@@ -8,11 +8,11 @@ import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.viewinterop.AndroidView
 
-struct WebView: View {
+public struct WebView: View {
     let url: URL
     let enableJavaScript: Bool
 
-    init(url: URL, enableJavaScript: Bool = true) {
+    public init(url: URL, enableJavaScript: Bool = true) {
         self.url = url
         self.enableJavaScript = enableJavaScript
     }
@@ -37,29 +37,29 @@ typealias ViewRepresentable = UIViewRepresentable
 typealias ViewRepresentable = NSViewRepresentable
 #endif
 
-struct WebView: ViewRepresentable {
+public struct WebView: ViewRepresentable {
     let url: URL
     let cfg = WKWebViewConfiguration()
 
-    init(url: URL, enableJavaScript: Bool = true) {
+    public init(url: URL, enableJavaScript: Bool = true) {
         self.url = url
         cfg.defaultWebpagePreferences.allowsContentJavaScript = enableJavaScript
     }
 
-    func makeCoordinator() -> WKWebView {
+    public func makeCoordinator() -> WKWebView {
         WKWebView(frame: .zero, configuration: cfg)
     }
 
-    func update(webView: WKWebView) {
+    public func update(webView: WKWebView) {
         webView.load(URLRequest(url: url))
     }
 
     #if canImport(UIKit)
-    func makeUIView(context: Context) -> WKWebView { context.coordinator }
-    func updateUIView(_ uiView: WKWebView, context: Context) { update(webView: uiView) }
+    public func makeUIView(context: Context) -> WKWebView { context.coordinator }
+    public func updateUIView(_ uiView: WKWebView, context: Context) { update(webView: uiView) }
     #elseif canImport(AppKit)
-    func makeNSView(context: Context) -> WKWebView { context.coordinator }
-    func updateNSView(_ nsView: WKWebView, context: Context) { update(webView: nsView) }
+    public func makeNSView(context: Context) -> WKWebView { context.coordinator }
+    public func updateNSView(_ nsView: WKWebView, context: Context) { update(webView: nsView) }
     #endif
 }
 #endif

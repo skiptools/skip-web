@@ -1,0 +1,292 @@
+{
+  "formatVersion": "1.1",
+  "component": {
+    "group": "skip.web",
+    "module": "SkipWeb",
+    "version": "unspecified",
+    "attributes": {
+      "org.gradle.status": "release"
+    }
+  },
+  "createdBy": {
+    "gradle": {
+      "version": "8.5"
+    }
+  },
+  "variants": [
+    {
+      "name": "debugVariantDefaultApiPublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "debug",
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "skip.web",
+          "module": "SkipUI",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipModel",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipFoundation",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipLib",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.22"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-debug.aar",
+          "url": "SkipWeb-unspecified-debug.aar",
+          "size": 26673,
+          "sha512": "1044acdd57b4e400056ba84c424dc9c0c3d7cb9900ef5805b87aeba95d93f59dc72cacbd7362bc0595f498a41d4dd25e351deb2219b66b2bcfb719e51e527b58",
+          "sha256": "14f1d1b1176543e4e1374242179140c6d055b0d6d1c62ebe0ab8d89de5508386",
+          "sha1": "8e22566320bc64e48c38addad0bf2f4be54929b1",
+          "md5": "18531e69c8066bb1a0e03f5e44471e7e"
+        }
+      ]
+    },
+    {
+      "name": "debugVariantDefaultRuntimePublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "debug",
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "skip.web",
+          "module": "SkipUI",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipModel",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipFoundation",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipLib",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.22"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-debug.aar",
+          "url": "SkipWeb-unspecified-debug.aar",
+          "size": 26673,
+          "sha512": "1044acdd57b4e400056ba84c424dc9c0c3d7cb9900ef5805b87aeba95d93f59dc72cacbd7362bc0595f498a41d4dd25e351deb2219b66b2bcfb719e51e527b58",
+          "sha256": "14f1d1b1176543e4e1374242179140c6d055b0d6d1c62ebe0ab8d89de5508386",
+          "sha1": "8e22566320bc64e48c38addad0bf2f4be54929b1",
+          "md5": "18531e69c8066bb1a0e03f5e44471e7e"
+        }
+      ]
+    },
+    {
+      "name": "debugVariantDefaultSourcePublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "debug",
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-debug-sources.jar",
+          "url": "SkipWeb-unspecified-debug-sources.jar",
+          "size": 1119,
+          "sha512": "ed4a426fbfd53324978e733dfbf03a09eb1266a9f3685f28942170f16e132da30691395d59c70053c005fcd91eb329ea3a871fcd936dcfe1e087d7cf56fe8d0a",
+          "sha256": "bb248f1297a2d8088ac307514e16aaab68f58922cfde18f023ff0876b2ddd7bd",
+          "sha1": "94017abb56b92b4552158c21a7d1823433481549",
+          "md5": "ef2e334666c0a924df2150adff211231"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantDefaultApiPublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "release",
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-api"
+      },
+      "dependencies": [
+        {
+          "group": "skip.web",
+          "module": "SkipUI",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipModel",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipFoundation",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipLib",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.22"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-release.aar",
+          "url": "SkipWeb-unspecified-release.aar",
+          "size": 22884,
+          "sha512": "4cf3db2b2d4cc8130104deed7cb19cdb81e0b135210b96440ac7786df78bc8ca5fae9f9c7640dabbda8c03508c3b4bf88d04ed938772ebc9ee4d062e62ad299d",
+          "sha256": "c3d596944c9d2665453e3fe3bc2733d6b35f6141f1f76065ff9a018f0af8bd48",
+          "sha1": "9ced3276a41275f19da076b722010efe9057fc28",
+          "md5": "041af9d43ee3a5e301ec02c33c9bfeef"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantDefaultRuntimePublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "release",
+        "org.gradle.category": "library",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.libraryelements": "aar",
+        "org.gradle.usage": "java-runtime"
+      },
+      "dependencies": [
+        {
+          "group": "skip.web",
+          "module": "SkipUI",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipModel",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipFoundation",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "skip.web",
+          "module": "SkipLib",
+          "version": {
+            "requires": "unspecified"
+          }
+        },
+        {
+          "group": "org.jetbrains.kotlin",
+          "module": "kotlin-stdlib",
+          "version": {
+            "requires": "1.9.22"
+          }
+        }
+      ],
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-release.aar",
+          "url": "SkipWeb-unspecified-release.aar",
+          "size": 22884,
+          "sha512": "4cf3db2b2d4cc8130104deed7cb19cdb81e0b135210b96440ac7786df78bc8ca5fae9f9c7640dabbda8c03508c3b4bf88d04ed938772ebc9ee4d062e62ad299d",
+          "sha256": "c3d596944c9d2665453e3fe3bc2733d6b35f6141f1f76065ff9a018f0af8bd48",
+          "sha1": "9ced3276a41275f19da076b722010efe9057fc28",
+          "md5": "041af9d43ee3a5e301ec02c33c9bfeef"
+        }
+      ]
+    },
+    {
+      "name": "releaseVariantDefaultSourcePublication",
+      "attributes": {
+        "com.android.build.api.attributes.BuildTypeAttr": "release",
+        "org.gradle.category": "documentation",
+        "org.gradle.dependency.bundling": "external",
+        "org.gradle.docstype": "sources",
+        "org.gradle.usage": "java-runtime"
+      },
+      "files": [
+        {
+          "name": "SkipWeb-unspecified-release-sources.jar",
+          "url": "SkipWeb-unspecified-release-sources.jar",
+          "size": 1119,
+          "sha512": "ed4a426fbfd53324978e733dfbf03a09eb1266a9f3685f28942170f16e132da30691395d59c70053c005fcd91eb329ea3a871fcd936dcfe1e087d7cf56fe8d0a",
+          "sha256": "bb248f1297a2d8088ac307514e16aaab68f58922cfde18f023ff0876b2ddd7bd",
+          "sha1": "94017abb56b92b4552158c21a7d1823433481549",
+          "md5": "ef2e334666c0a924df2150adff211231"
+        }
+      ]
+    }
+  ]
+}
