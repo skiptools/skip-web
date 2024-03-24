@@ -203,7 +203,106 @@ public class WebEngine : CustomStringConvertible {
     public func goForward() {
         webView.goForward()
     }
+
+    /// Evaluates the given JavaScript string
+    @MainActor public func evaluate(js: String) async throws -> String? {
+        #if !SKIP
+        let result = try await webView.evaluateJavaScript(js)
+        guard let res = (result as? NSObject) else {
+            return nil
+        }
+        return res.description
+        #else
+        webView.evaluateJavascript(js) { value in
+        }
+        return "XXX"
+        #endif
+    }
+
+    @MainActor public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") async throws {
+        logger.info("loadHTML webView: \(self.description)")
+        let encoding: String = "UTF-8"
+
+        #if SKIP
+        // see https://developer.android.com/reference/android/webkit/WebView#loadDataWithBaseURL(java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String)
+        let baseUrl: String? = baseURL?.absoluteString // the URL to use as the page's base URL. If null defaults to 'about:blank'
+        //var htmlContent = android.util.Base64.encodeToString(html.toByteArray(), android.util.Base64.NO_PADDING)
+        var htmlContent = html
+        let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
+        webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
+        #else
+        try await withNavigationDelegate {
+            webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
+        }
+        #endif
+    }
+
+    /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
+    @MainActor public func load(url: URL) async throws {
+        let urlString = url.absoluteString
+        logger.info("load URL=\(urlString) webView: \(self.description)")
+        #if SKIP
+        // TODO: set up the equivalent of a navigation delegate
+        webView.loadUrl(urlString ?? "about:blank")
+        #else
+        try await withNavigationDelegate {
+            if url.isFileURL {
+                webView.loadFileURL(url, allowingReadAccessTo: url)
+            } else {
+                webView.load(URLRequest(url: url))
+            }
+        }
+
+        #endif
+    }
+
+    #if !SKIP
+    @MainActor func withNavigationDelegate(_ block: () -> ()) async throws {
+        let pdelegate = webView.navigationDelegate
+        defer { webView.navigationDelegate = pdelegate }
+
+        // need to retain the navigation delegate or else it will drop the continuation
+        var navDelegate: WebNavDelegate? = nil
+
+        let _: WKNavigation? = try await withCheckedThrowingContinuation { continuation in
+            navDelegate = WebNavDelegate { result in
+                continuation.resume(with: result)
+            }
+
+            webView.navigationDelegate = navDelegate
+            block()
+        }
+
+    }
+    #endif
 }
+
+#if !SKIP
+/// A temporary WKNavigationDelegate that uses a callback to integrate with checked continuations
+@objc fileprivate class WebNavDelegate : NSObject, WKNavigationDelegate {
+    let callback: (Result<WKNavigation?, Error>) -> ()
+    var callbackInvoked = false
+
+    init(callback: @escaping (Result<WKNavigation?, Error>) -> Void) {
+        self.callback = callback
+    }
+
+    @objc func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        logger.info("webView: \(webView) didFinish: \(navigation!)")
+        if self.callbackInvoked { return }
+        callbackInvoked = true
+        self.callback(.success(navigation))
+    }
+
+    @objc func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
+        logger.info("webView: \(webView) didFail: \(navigation!) error: \(error)")
+        if self.callbackInvoked { return }
+        callbackInvoked = true
+        self.callback(.failure(error))
+    }
+}
+#endif
+
 
 /// The configuration for a WebEngine
 public struct WebEngineConfiguration {
@@ -331,27 +430,6 @@ public class WebViewNavigator {
         #endif
     }
 
-    public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
-        logger.info("loadHTML webView: \(self.webEngine?.description ?? "NONE")")
-        let encoding: String = "UTF-8"
-
-        guard let webView = webEngine?.webView else {
-            return logger.error("no web view in navigator")
-        }
-
-        #if SKIP
-        // see https://developer.android.com/reference/android/webkit/WebView#loadDataWithBaseURL(java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String)
-        let baseUrl: String? = baseURL?.absoluteString // the URL to use as the page's base URL. If null defaults to 'about:blank'
-        //var htmlContent = android.util.Base64.encodeToString(html.toByteArray(), android.util.Base64.NO_PADDING)
-        var htmlContent = html
-        let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
-        webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
-        #else
-        //webView.loadHTMLString(html, baseURL: baseURL)
-        webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
-        #endif
-    }
-
     public func reload() {
         logger.info("reload webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.reload()
@@ -471,9 +549,75 @@ extension WebView : ViewRepresentable {
 
         // configure JavaScript
         #if SKIP
-        webEngine.webView.settings.javaScriptEnabled = config.javaScriptEnabled
+        let settings = webEngine.webView.settings
+        settings.setJavaScriptEnabled(config.javaScriptEnabled)
+        settings.setSafeBrowsingEnabled(false)
+
+        //settings.setAlgorithmicDarkeningAllowed(boolean allow)
+        //settings.setAllowContentAccess(boolean allow)
+        //settings.setAllowFileAccess(boolean allow)
+        //settings.setAllowFileAccessFromFileURLs(boolean flag) // deprecated
+        //settings.setAllowUniversalAccessFromFileURLs(boolean flag) // deprecated
+        //settings.setBlockNetworkImage(boolean flag)
+        //settings.setBlockNetworkLoads(boolean flag)
+        //settings.setBuiltInZoomControls(boolean enabled)
+        //settings.setCacheMode(int mode)
+        //settings.setCursiveFontFamily(String font)
+        //settings.setDatabaseEnabled(boolean flag)
+        //settings.setDatabasePath(String databasePath) // deprecated
+        //settings.setDefaultFixedFontSize(int size)
+        //settings.setDefaultFontSize(int size)
+        //settings.setDefaultTextEncodingName(String encoding)
+        //settings.setDefaultZoom(WebSettings.ZoomDensity zoom) // deprecated
+        //settings.setDisabledActionModeMenuItems(int menuItems)
+        //settings.setDisplayZoomControls(boolean enabled)
+        //settings.setDomStorageEnabled(boolean flag)
+        //settings.setEnableSmoothTransition(boolean enable) // deprecated
+        //settings.setFantasyFontFamily(String font)
+        //settings.setFixedFontFamily(String font)
+        //settings.setForceDark(int forceDark) // deprecated
+        //settings.setGeolocationDatabasePath(String databasePath) // deprecated
+        //settings.setGeolocationEnabled(boolean flag)
+        //settings.setJavaScriptCanOpenWindowsAutomatically(boolean flag)
+        //settings.setLayoutAlgorithm(WebSettings.LayoutAlgorithm l)
+        //settings.setLightTouchEnabled(boolean enabled) // deprecated
+        //settings.setLoadWithOverviewMode(boolean overview)
+        //settings.setLoadsImagesAutomatically(boolean flag)
+        //settings.setMediaPlaybackRequiresUserGesture(boolean require)
+        //settings.setMinimumFontSize(int size)
+        //settings.setMinimumLogicalFontSize(int size)
+        //settings.setMixedContentMode(int mode)
+        //settings.setNeedInitialFocus(boolean flag)
+        //settings.setOffscreenPreRaster(boolean enabled)
+        //settings.setPluginState(WebSettings.PluginState state) // deprecated
+        //settings.setRenderPriority(WebSettings.RenderPriority priority) // deprecated
+        //settings.setSansSerifFontFamily(String font)
+        //settings.setSaveFormData(boolean save) // deprecated
+        //settings.setSavePassword(boolean save) // deprecated
+        //settings.setSerifFontFamily(String font)
+        //settings.setStandardFontFamily(String font)
+        //settings.setSupportMultipleWindows(boolean support)
+        //settings.setSupportZoom(boolean support)
+        //settings.setTextSize(WebSettings.TextSize t)
+        //settings.setTextZoom(int textZoom)
+        //settings.setUseWideViewPort(boolean use)
+        //settings.setUserAgentString(String ua)
         #else
-        webEngine.webView.configuration.defaultWebpagePreferences.allowsContentJavaScript = config.javaScriptEnabled
+        let configuration = webEngine.webView.configuration
+        configuration.allowsAirPlayForMediaPlayback = true
+        configuration.suppressesIncrementalRendering = false
+        //configuration.mediaTypesRequiringUserActionForPlayback =
+        //configuration.userContentController =
+        //configuration.allowsInlinePredictions =
+        //configuration.applicationNameForUserAgent =
+        //configuration.limitsNavigationsToAppBoundDomains =
+        //configuration.upgradeKnownHostsToHTTPS =
+
+        let preferences = configuration.defaultWebpagePreferences!
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
+        preferences.preferredContentMode = .recommended
+        preferences.isLockdownModeEnabled = false
+
         #endif
 
         return webEngine
@@ -1063,6 +1207,7 @@ new MutationObserver(function(mutations) {
 #if !SKIP
 public typealias BackForwardListItem = WKBackForwardListItem
 #else
+// TODO: wrap https://developer.android.com/reference/android/webkit/WebHistoryItem
 open struct BackForwardListItem {
     public var url: URL
     public var title: String?

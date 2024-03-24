@@ -1,0 +1,27 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Back" : {
+
+    },
+    "Forward" : {
+
+    },
+    "Home" : {
+
+    },
+    "More" : {
+
+    },
+    "Reload" : {
+
+    },
+    "Settings" : {
+
+    },
+    "URL or search" : {
+
+    }
+  },
+  "version" : "1.0"
+}
