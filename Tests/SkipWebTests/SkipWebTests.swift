@@ -5,6 +5,7 @@
 import XCTest
 import OSLog
 import Foundation
+import SkipWeb
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
@@ -19,6 +20,20 @@ final class SkipWebTests: XCTestCase {
         let testData = try JSONDecoder().decode(TestData.self, from: Data(contentsOf: resourceURL))
         XCTAssertEqual("SkipWeb", testData.testModuleName)
     }
+
+    func testWebEngine() throws {
+        if isRobolectric {
+            throw XCTSkip("cannot run WebEngine in Robolectric")
+        }
+
+        if isAndroid {
+            throw XCTSkip("FIXME: WebView cannot be initialized on a thread that has no Looper")
+        }
+
+        let engine = WebEngine()
+        engine.reload()
+    }
+
 }
 
 struct TestData : Codable, Hashable {
