@@ -28,6 +28,14 @@ import androidx.webkit.WebViewFeature
 
 import androidx.webkit.WebSettingsCompat.DARK_STRATEGY_PREFER_WEB_THEME_OVER_USER_AGENT_DARKENING
 
+import kotlin.coroutines.suspendCoroutine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 
 #endif
 
@@ -46,7 +54,7 @@ let homeURL = URL(string: homePage)!
 
 
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
-public struct BrowserView: View {
+@MainActor public struct BrowserView: View {
     @State var viewModel = BrowserViewModel(url: homePage)
     @State var state = WebViewState()
     @State var navigator = WebViewNavigator()
@@ -164,26 +172,30 @@ public struct BrowserView: View {
 }
 
 
-/// An web engine that holds a system `WebView`. It is used both as the render for a
-/// `WebView` and `BrowserView`, and can also be used in a headless context to drive web pages
+/// An web engine that holds a system web view:
+/// [`WebKit.WKWebView`](https://developer.apple.com/documentation/webkit/wkwebview) on iOS and
+/// [`android.webkit.WebView`](https://developer.android.com/reference/android/webkit/WebView) on Android
+///
+/// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
+/// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-public class WebEngine : CustomStringConvertible {
+@MainActor public class WebEngine {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
-
-    public init(configuration: WebEngineConfiguration = WebEngineConfiguration()) {
+    
+    /// Create a WebEngine with the specified configuration.
+    /// - Parameters:
+    ///   - configuration: the configuration to use
+    ///   - webView: when set, the given platform-specific web view will
+    public init(configuration: WebEngineConfiguration = WebEngineConfiguration(), webView: PlatformWebView? = nil) {
         self.configuration = configuration
 
         #if !SKIP
-        self.webView = PlatformWebView(frame: .zero, configuration: configuration.webViewConfiguration)
+        self.webView = webView ?? PlatformWebView(frame: .zero, configuration: configuration.webViewConfiguration)
         #else
         // fall back to using the global android context if the activity context is not set in the configuration
-        self.webView = PlatformWebView(configuration.context ?? ProcessInfo.processInfo.androidContext)
+        self.webView = webView ?? PlatformWebView(configuration.context ?? ProcessInfo.processInfo.androidContext)
         #endif
-    }
-
-    public var description: String {
-        "WebEngine: \(webView)"
     }
 
     public func reload() {
@@ -205,21 +217,15 @@ public class WebEngine : CustomStringConvertible {
     }
 
     /// Evaluates the given JavaScript string
-    @MainActor public func evaluate(js: String) async throws -> String? {
-        #if !SKIP
-        let result = try await webView.evaluateJavaScript(js)
+    public func evaluate(js: String) async throws -> String? {
+        let result = try await evaluateJavaScriptAsync(js)
         guard let res = (result as? NSObject) else {
             return nil
         }
         return res.description
-        #else
-        webView.evaluateJavascript(js) { value in
-        }
-        return "XXX"
-        #endif
     }
 
-    @MainActor public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") async throws {
+    public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") async throws {
         logger.info("loadHTML webView: \(self.description)")
         let encoding: String = "UTF-8"
 
@@ -238,7 +244,7 @@ public class WebEngine : CustomStringConvertible {
     }
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
-    @MainActor public func load(url: URL) async throws {
+    public func load(url: URL) async throws {
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
         #if SKIP
@@ -256,8 +262,33 @@ public class WebEngine : CustomStringConvertible {
         #endif
     }
 
+    fileprivate func evaluateJavaScriptAsync(_ script: String) async throws -> Any {
+        #if !SKIP
+        try await webView.evaluateJavaScript(script)
+        #else
+        logger.info("WebEngine: calling eval: \(android.os.Looper.myLooper())")
+    //    withContext(Dispatchers.IO) {
+            logger.info("WebEngine: calling eval withContext(Dispatchers.IO): \(android.os.Looper.myLooper())")
+            //suspendCoroutine
+            suspendCancellableCoroutine { continuation in
+                logger.info("WebEngine: calling eval suspendCoroutine: \(android.os.Looper.myLooper())")
+    //            withContext(Dispatchers.Main) {
+                    webView.evaluateJavascript(script) { result in
+                        logger.info("WebEngine: returned webView.evaluateJavascript: \(android.os.Looper.myLooper()): \(result)")
+                        continuation.resume(result)
+                    }
+
+                    continuation.invokeOnCancellation {
+                        continuation.cancel()
+                    }
+    //            }
+            }
+    //    }
+        #endif
+    }
+
     #if !SKIP
-    @MainActor func withNavigationDelegate(_ block: () -> ()) async throws {
+    func withNavigationDelegate(_ block: () -> ()) async throws {
         let pdelegate = webView.navigationDelegate
         defer { webView.navigationDelegate = pdelegate }
 
@@ -275,6 +306,12 @@ public class WebEngine : CustomStringConvertible {
 
     }
     #endif
+}
+
+extension WebEngine : CustomStringConvertible {
+    public var description: String {
+        "WebEngine: \(webView)"
+    }
 }
 
 #if !SKIP
@@ -346,7 +383,7 @@ public struct WebEngineConfiguration {
 
     #if !SKIP
     /// Create a `WKWebViewConfiguration` from the properties of this configuration.
-    var webViewConfiguration: WKWebViewConfiguration {
+    @MainActor var webViewConfiguration: WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
 
         //let preferences = WKWebpagePreferences()
@@ -355,7 +392,7 @@ public struct WebEngineConfiguration {
         #if !os(macOS) // API unavailable on macOS
         configuration.allowsInlineMediaPlayback = self.allowsInlineMediaPlayback
         configuration.dataDetectorTypes = [.all]
-//        configuration.defaultWebpagePreferences = preferences
+        //configuration.defaultWebpagePreferences = preferences
         configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
 
 //        for (urlSchemeHandler, urlScheme) in schemeHandlers {
@@ -400,7 +437,7 @@ public struct WebEngineConfiguration {
 
 /// A controller that can drive a `WebEngine` from a user interface.
 public class WebViewNavigator {
-    var webEngine: WebEngine? {
+    @MainActor var webEngine: WebEngine? {
         didSet {
             logger.info("assigned webEngine: \(self.webEngine?.description ?? "NULL")")
 
@@ -415,7 +452,7 @@ public class WebViewNavigator {
     public init() {
     }
 
-    public func load(url: URL) {
+    @MainActor public func load(url: URL) {
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.webEngine?.description ?? "NONE")")
         guard let webView = webEngine?.webView else { return }
@@ -430,24 +467,24 @@ public class WebViewNavigator {
         #endif
     }
 
-    public func reload() {
+    @MainActor public func reload() {
         logger.info("reload webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.reload()
     }
 
-    public func go(_ item: BackForwardListItem) {
+    @MainActor public func go(_ item: BackForwardListItem) {
         logger.info("go: \(item) webView: \(self.webEngine?.description ?? "NONE")")
         #if !SKIP
         webEngine?.go(to: item)
         #endif
     }
 
-    public func goBack() {
+    @MainActor public func goBack() {
         logger.info("goBack webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.goBack()
     }
 
-    public func goForward() {
+    @MainActor public func goForward() {
         logger.info("goForward webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.goForward()
     }
@@ -544,7 +581,7 @@ extension WebView : ViewRepresentable {
         WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
     }
 
-    private func setupWebView(_ webEngine: WebEngine) -> WebEngine {
+    @MainActor private func setupWebView(_ webEngine: WebEngine) -> WebEngine {
         navigator.webEngine = webEngine
 
         // configure JavaScript
@@ -636,7 +673,7 @@ extension WebView : ViewRepresentable {
         })
     }
     #else
-    private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> WebEngine {
+    @MainActor private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> WebEngine {
         var web: WebEngine?
         if let id = id {
             web = Self.engineCache[id] // it is UI thread so safe to access static
@@ -888,7 +925,7 @@ extension WebViewCoordinator: WKScriptMessageHandler {
                 newState.pageImageURL = imageURL
                 let targetState = newState
                 Task { @MainActor in
-                //                DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
+                // DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
                     webView.state = targetState
                 }
             }

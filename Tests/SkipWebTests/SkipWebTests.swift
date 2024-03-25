@@ -23,28 +23,31 @@ final class SkipWebTests: XCTestCase {
         XCTAssertEqual("SkipWeb", testData.testModuleName)
     }
 
-    @MainActor func testWebEngine() async throws {
+    func testWebEngine() async throws {
         if isRobolectric {
             throw XCTSkip("cannot run WebEngine in Robolectric")
         }
 
-        assertMainThread()
+        //assertMainThread()
 
-        let engine = WebEngine()
+        let engine = await WebEngine()
+
+        func html(title: String, body: String = "") -> String {
+            "<html><head><title>\(title)</title></head><body>\(body)</body></html>"
+        }
 
         if isAndroid {
             throw XCTSkip("TODO: implement Android side")
         }
 
+        // needed before JS can be evaluated?
+        //try await engine.loadHTML(html(title: "Initial Load"))
+
         let three = try await engine.evaluate(js: "1+2")
         XCTAssertEqual("3", three)
 
-        func html(title: String) -> String {
-            "<html><head><title>\(title)</title></head><body></body></html>"
-        }
 
-        // try async load with both HTML string and file URL loading
-        // and ensure the DOM is updated
+        // try async load with both HTML string and file URL loading and ensure the DOM is updated
 
         do {
             let title = "Hello HTML String!"
