@@ -3,6 +3,7 @@
 // as published by the Free Software Foundation https://fsf.org
 import SwiftUI
 import OSLog
+#if false
 #if !SKIP
 import WebKit
 public typealias PlatformWebView = WKWebView
@@ -1382,5 +1383,7 @@ extension URL {
         return self
     }
 }
+#endif
+
 #endif
 
