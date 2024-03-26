@@ -3,7 +3,6 @@
 // as published by the Free Software Foundation https://fsf.org
 import SwiftUI
 import OSLog
-#if false
 #if !SKIP
 import WebKit
 public typealias PlatformWebView = WKWebView
@@ -632,6 +631,11 @@ extension WebView : ViewRepresentable {
         return webEngine
     }
 
+    public func update(webView: PlatformWebView) {
+        logger.info("WebView.update: \(webView)")
+        //webView.load(URLRequest(url: url))
+    }
+
     #if SKIP
     public var body: some View {
         ComposeView { ctx in
@@ -642,7 +646,7 @@ extension WebView : ViewRepresentable {
                 webEngine.webView.webViewClient = WebViewClient()
                 return setupWebView(webEngine).webView
             }, modifier: ctx.modifier, update: { webView in
-                //webView.loadUrl(url.absoluteString)
+                self.update(webView: webView)
             })
         }
     }
@@ -681,11 +685,6 @@ extension WebView : ViewRepresentable {
         }
 
         return web
-    }
-
-    public func update(webView: WKWebView) {
-        logger.info("WebView.update: \(webView)")
-        //webView.load(URLRequest(url: url))
     }
 
     @MainActor private func create(from context: Context) -> WebEngine {
@@ -1383,7 +1382,5 @@ extension URL {
         return self
     }
 }
-#endif
-
 #endif
 
