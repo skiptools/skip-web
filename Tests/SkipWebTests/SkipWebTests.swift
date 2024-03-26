@@ -43,6 +43,7 @@ final class SkipWebTests: XCTestCase {
         // needed before JS can be evaluated?
         //try await engine.loadHTML(html(title: "Initial Load"))
 
+        // FIXME: Android times out and cancels coroutine after 10 seconds
         let three = try await engine.evaluate(js: "1+2")
         XCTAssertEqual("3", three)
 

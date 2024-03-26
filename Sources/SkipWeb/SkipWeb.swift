@@ -498,6 +498,10 @@ public struct WebView : View {
     private let config: WebEngineConfiguration
     let navigator: WebViewNavigator
 
+    @Binding var state: WebViewState
+    @State fileprivate var needsHistoryRefresh: Bool
+    @State private var lastInstalledScripts: [WebViewUserScript]
+
     var scriptCaller: WebViewScriptCaller? = nil
     let blockedHosts: Set<String>? = []
     let htmlInState: Bool = false
@@ -515,39 +519,6 @@ public struct WebView : View {
 
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
-
-    // FIXME: we need to manually create the bindings because KotlinSwiftUITransformer doesn't seem to automatically process @Binding/@State when the type does not declare a `var body`
-
-    /* SKIP REPLACE:
-     internal var state: WebViewState
-         get() = _state.wrappedValue
-         set(newValue) {
-             _state.wrappedValue = newValue
-         }
-     internal var _state: Binding<WebViewState> = Binding({ fatalError() }, { it ->  })
-     */
-    @Binding var state: WebViewState
-
-    /* SKIP REPLACE:
-     internal var needsHistoryRefresh: Boolean
-         get() = _needsHistoryRefresh.wrappedValue
-         set(newValue) {
-             _needsHistoryRefresh.wrappedValue = newValue
-         }
-     internal var _needsHistoryRefresh: skip.ui.State<Boolean> = skip.ui.State(false)
-     */
-    @State fileprivate var needsHistoryRefresh: Bool
-
-    /* SKIP REPLACE:
-     private var lastInstalledScripts: Array<WebViewUserScript>
-         get() = _lastInstalledScripts.wrappedValue.sref({ this.lastInstalledScripts = it })
-         set(newValue) {
-             _lastInstalledScripts.wrappedValue = newValue.sref()
-         }
-     private var _lastInstalledScripts: skip.ui.State<Array<WebViewUserScript>> = skip.ui.State(arrayOf())
-     */
-    @State private var lastInstalledScripts: [WebViewUserScript]
-
 
     public init(configuration: WebEngineConfiguration, navigator: WebViewNavigator, state: Binding<WebViewState>) {
         self.config = configuration
@@ -653,7 +624,7 @@ extension WebView : ViewRepresentable {
         let preferences = configuration.defaultWebpagePreferences!
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         preferences.preferredContentMode = .recommended
-        preferences.isLockdownModeEnabled = false
+        // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
 
         #endif
 
@@ -661,16 +632,18 @@ extension WebView : ViewRepresentable {
     }
 
     #if SKIP
-    @Composable public override func ComposeContent(context: ComposeContext) {
-        AndroidView(factory: { ctx in
-            config.context = ctx
-            let webEngine = WebEngine(config)
+    public var body: some View {
+        ComposeView { ctx in
+            AndroidView(factory: { ctx in
+                config.context = ctx
+                let webEngine = WebEngine(config)
 
-            webEngine.webView.webViewClient = WebViewClient()
-            return setupWebView(webEngine).webView
-        }, modifier: context.modifier, update: { webView in
-            //webView.loadUrl(url.absoluteString)
-        })
+                webEngine.webView.webViewClient = WebViewClient()
+                return setupWebView(webEngine).webView
+            }, modifier: ctx.modifier, update: { webView in
+                //webView.loadUrl(url.absoluteString)
+            })
+        }
     }
     #else
     @MainActor private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> WebEngine {
@@ -1147,8 +1120,10 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
             logger.error("evaluateJavaScript: no asyncCaller set for WebViewScriptCaller \(self.uuid)") // TODO: Error
             return
         }
+        
         do {
             let result = try await asyncCaller(js, arguments, frame, world)
+            // SKIP NOWARN
             try await completionHandler?(Result.success(result))
             if duplicateInMultiTargetFrames {
                 for (uuid, targetFrame) in multiTargetFrames {
@@ -1168,6 +1143,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
                 }
             }
         } catch {
+            // SKIP NOWARN
             try? await completionHandler?(Result.failure(error))
         }
     }
