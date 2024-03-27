@@ -50,7 +50,6 @@ let homeURL = URL(string: homePage)!
     }
 }
 
-
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
 @MainActor public struct BrowserView: View {
     @State var viewModel = BrowserViewModel(url: homePage)

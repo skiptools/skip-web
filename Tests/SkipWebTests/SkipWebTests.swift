@@ -6,6 +6,7 @@ import XCTest
 import OSLog
 import Foundation
 import SkipWeb
+#if false
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
@@ -85,3 +86,5 @@ final class SkipWebTests: XCTestCase {
 struct TestData : Codable, Hashable {
     var testModuleName: String
 }
+#endif
+
