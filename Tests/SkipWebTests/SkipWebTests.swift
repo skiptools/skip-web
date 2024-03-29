@@ -6,7 +6,6 @@ import XCTest
 import OSLog
 import Foundation
 import SkipWeb
-#if false
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
@@ -24,7 +23,6 @@ final class SkipWebTests: XCTestCase {
         XCTAssertEqual("SkipWeb", testData.testModuleName)
     }
 
-    #if false
     func testWebEngine() async throws {
         if isRobolectric {
             throw XCTSkip("cannot run WebEngine in Robolectric")
@@ -72,7 +70,6 @@ final class SkipWebTests: XCTestCase {
             XCTAssertEqual(title, title2)
         }
     }
-    #endif
 
     func assertMainThread() {
         #if !SKIP
@@ -86,5 +83,3 @@ final class SkipWebTests: XCTestCase {
 struct TestData : Codable, Hashable {
     var testModuleName: String
 }
-#endif
-
