@@ -71,35 +71,56 @@ import SwiftUI
     }
 
     @ViewBuilder func backButton() -> some View {
+        let backLabel = Label {
+            Text("Back", bundle: .module, comment: "back button label")
+        } icon: {
+            Image(systemName: "chevron.left")
+        }
+        #if SKIP
+        // TODO: SkipUI does not support Menu with primaryAction in toolbar
+        Button {
+            backAction()
+        } label: {
+            backLabel
+        }
+        #else
         Menu {
             backHistoryMenu()
         } label: {
-            Label {
-                Text("Back", bundle: .module, comment: "back button label")
-            } icon: {
-                Image(systemName: "chevron.left")
-            }
+            backLabel
         } primaryAction: {
             backAction()
         }
         .disabled(!state.canGoBack)
         .accessibilityIdentifier("button.back")
+        #endif
     }
 
     @ViewBuilder func forwardButton() -> some View {
+        let forwardLabel = Label {
+            Text("Forward", bundle: .module, comment: "forward button label")
+        } icon: {
+            Image(systemName: "chevron.right")
+        }
+
+        #if SKIP
+        // TODO: SkipUI does not support Menu with primaryAction in toolbar
+        Button {
+            forwardAction()
+        } label: {
+            forwardLabel
+        }
+        #else
         Menu {
             forwardHistoryMenu()
         } label: {
-            Label {
-                Text("Forward", bundle: .module, comment: "forward button label")
-            } icon: {
-                Image(systemName: "chevron.right")
-            }
+            forwardLabel
         } primaryAction: {
             forwardAction()
         }
         .disabled(!state.canGoForward)
         .accessibilityIdentifier("button.forward")
+        #endif
     }
 
     @ViewBuilder func tabListButton() -> some View {

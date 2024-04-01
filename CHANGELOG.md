@@ -1,3 +1,15 @@
+## 0.1.2
+
+Released 2024-04-01
+
+  - Fix initializer for WebViewMessage
+  - Re-enable some types on macOS due to CI failures
+  - Re-enable some types on macOS due to CI failures
+  - Disable some types on macOS due to CI failures
+  - Support macOS 13 in order to be able to build with CI
+  - Add WebBrowserStore and PageInfo data models
+  - Refactor WebEngine, WebView, and WebBrowser
+
 ## 0.1.1
 
 Released 2024-03-29
