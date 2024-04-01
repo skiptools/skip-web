@@ -1,11 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Appearance" : {
+      "comment" : "settings appearance picker label"
+    },
     "Back" : {
       "comment" : "back button label"
     },
     "Close Tab" : {
       "comment" : "more button string for closing a tab"
+    },
+    "Dark" : {
+      "comment" : "settings appearance system label"
     },
     "Favorite" : {
       "comment" : "more button string for adding a favorite"
@@ -14,13 +20,19 @@
       "comment" : "forward button label"
     },
     "History" : {
-      "comment" : "more button string for opening the history"
+      "comment" : "history sheet title"
     },
     "Home" : {
       "comment" : "home button label"
     },
+    "Light" : {
+      "comment" : "settings appearance system label"
+    },
     "More" : {
       "comment" : "more button label"
+    },
+    "New Private Tab" : {
+      "comment" : "more button string for creating a new private tab"
     },
     "New Tab" : {
       "comment" : "more button string for creating a new tab"
@@ -29,10 +41,16 @@
       "comment" : "more button string for reloading the current page"
     },
     "Settings" : {
-      "comment" : "more button string for opening the settings"
+      "comment" : "settings sheet title"
+    },
+    "System" : {
+      "comment" : "settings appearance system label"
+    },
+    "Tab List" : {
+      "comment" : "tab list action label"
     },
     "URL or search" : {
-
+      "comment" : "placeholder string for URL bar"
     }
   },
   "version" : "1.0"
