@@ -412,3 +412,31 @@ import SwiftUI
         self.urlTextField = urlTextField
     }
 }
+
+/// A store for persisting `WebBrowser` state such as history, favorites, and preferences.
+public protocol WebBrowserStore {
+    /// Adds the given item to the history list
+    func addHistoryItem(_ item: PageInfo)
+    func fetchHistoryItemIDs() -> [PageInfo.ID]
+    func fetchHistoryItem(id: PageInfo.ID) -> PageInfo?
+    func removeHistoryItem(id: PageInfo.ID)
+    func clearHistory()
+
+    /// Adds the given item to the favorites list
+    func addFavoriteItem(_ item: PageInfo)
+    func fetchFavoriteItemIDs() -> [PageInfo.ID]
+    func fetchFavoriteItem(id: PageInfo.ID) -> PageInfo?
+    func removeFavoriteItem(id: PageInfo.ID)
+    func clearFavorites()
+}
+
+/// Information about a web page, for storing in the history or favorites list
+public struct PageInfo : Identifiable {
+    public typealias ID = Int64
+
+    /// The ID of this history item if it is persistent
+    public var id: ID
+    public var url: URL
+    public var title: String?
+    public var date: Date
+}
