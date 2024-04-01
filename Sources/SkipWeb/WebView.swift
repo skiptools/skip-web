@@ -30,6 +30,7 @@ import androidx.webkit.WebViewFeature
 /// An embedded WebKit view. It is configured using a `WebEngineConfiguration`
 ///  and driven with a `WebViewNavigator` which can be associated
 ///  with user interface controls like back/forward buttons and a URL bar.
+@available(macOS 14.0, tvOS 17.0, *)
 public struct WebView : View {
     private let config: WebEngineConfiguration
     let navigator: WebViewNavigator
@@ -67,6 +68,7 @@ public struct WebView : View {
 }
 
 /// The current state of a web page, including the loading status and the current URL
+@available(macOS 14.0, tvOS 17.0, *)
 @Observable public class WebViewState {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
@@ -170,6 +172,7 @@ typealias ViewRepresentable = NSViewRepresentable
 #error("Unsupported platform")
 #endif
 
+@available(macOS 14.0, tvOS 17.0, *)
 extension WebView : ViewRepresentable {
     public typealias Coordinator = WebViewCoordinator
 
@@ -379,6 +382,7 @@ extension WebView : ViewRepresentable {
 
 // TODO: translate script logic for Skip
 #if !SKIP
+@available(macOS 14.0, tvOS 17.0, *)
 extension WebView {
     @MainActor
     func refreshContentRules(userContentController: UserContentController, coordinator: Coordinator) {
@@ -453,6 +457,7 @@ extension WebView {
 #endif
 
 
+@available(macOS 14.0, tvOS 17.0, *)
 public class WebViewCoordinator: NSObject {
     private let webView: WebView
 
@@ -512,6 +517,7 @@ public class WebViewCoordinator: NSObject {
 }
 
 #if !SKIP
+@available(macOS 14.0, tvOS 17.0, *)
 extension WebViewCoordinator: ScriptMessageHandler {
     public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
         if message.name == "swiftUIWebViewLocationChanged" {
@@ -594,6 +600,7 @@ public struct WebViewUserScript: Equatable, Hashable {
 
 
 #if !SKIP
+@available(macOS 14.0, tvOS 17.0, *)
 extension WebViewCoordinator: NavigationDelegate {
     @MainActor
     public func webView(_ webView: PlatformWebView, didFinish navigation: Navigation!) {

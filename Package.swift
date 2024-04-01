@@ -8,7 +8,7 @@ import PackageDescription
 let package = Package(
     name: "skip-web",
     defaultLocalization: "en",
-    platforms: [.iOS(.v17), .macOS(.v14), .tvOS(.v17), .watchOS(.v10), .macCatalyst(.v17)],
+    platforms: [.iOS(.v17), .macOS(.v13), .tvOS(.v17), .watchOS(.v10), .macCatalyst(.v17)],
     products: [
         .library(name: "SkipWeb", targets: ["SkipWeb"]),
     ],
