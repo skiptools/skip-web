@@ -262,7 +262,7 @@ open struct BackForwardListItem {
 
 public struct WebViewMessage: Equatable {
     public let frameInfo: FrameInfo
-    fileprivate let uuid: UUID
+    internal let uuid: UUID
     public let name: String
     public let body: Any
 
