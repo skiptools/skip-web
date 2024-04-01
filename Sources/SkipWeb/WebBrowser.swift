@@ -3,10 +3,10 @@
 // as published by the Free Software Foundation https://fsf.org
 import SwiftUI
 
-#if !os(macOS)
+#if SKIP || os(iOS)
 
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
-@available(macOS 14.0, tvOS 17.0, *)
+@available(macOS 14.0, iOS 17.0, *)
 @MainActor public struct WebBrowser: View {
     @State var viewModel = BrowserViewModel(url: homePage)
     @State var state = WebViewState()
@@ -406,7 +406,7 @@ import SwiftUI
     }
 }
 
-@available(macOS 14.0, tvOS 17.0, *)
+@available(macOS 14.0, iOS 17.0, *)
 @Observable public class BrowserViewModel {
     var urlTextField = ""
     var showSettings = false

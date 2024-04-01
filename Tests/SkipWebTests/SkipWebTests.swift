@@ -23,7 +23,7 @@ final class SkipWebTests: XCTestCase {
         XCTAssertEqual("SkipWeb", testData.testModuleName)
     }
 
-    #if !os(macOS)
+    #if SKIP || os(iOS)
     func testWebEngine() async throws {
         if isRobolectric {
             throw XCTSkip("cannot run WebEngine in Robolectric")
@@ -72,7 +72,7 @@ final class SkipWebTests: XCTestCase {
         }
     }
     #endif
-    
+
     func assertMainThread() {
         #if !SKIP
         XCTAssertTrue(Thread.isMainThread)

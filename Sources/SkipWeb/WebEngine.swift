@@ -13,8 +13,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 #endif
 
-#if !os(macOS)
-
 /// An web engine that holds a system web view:
 /// [`WebKit.WKWebView`](https://developer.apple.com/documentation/webkit/wkwebview) on iOS and
 /// [`android.webkit.WebView`](https://developer.android.com/reference/android/webkit/WebView) on Android
@@ -246,6 +244,4 @@ public struct WebEngineConfiguration {
     }
     #endif
 }
-
-#endif
 
