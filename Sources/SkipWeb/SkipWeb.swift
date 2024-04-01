@@ -39,7 +39,7 @@ import kotlinx.coroutines.launch
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 
-let homePage = "https://google.com"
+let homePage = "https://en.wikipedia.org/wiki/Special:Random" // "https://wikipedia.org"
 let homeURL = URL(string: homePage)!
 
 
@@ -56,19 +56,27 @@ let homeURL = URL(string: homePage)!
     @State var state = WebViewState()
     @State var navigator = WebViewNavigator()
     let configuration: WebEngineConfiguration
+    let urlBarOnTop = false
 
     public init(configuration: WebEngineConfiguration) {
         self.configuration = configuration
     }
 
     public var body: some View {
-        VStack {
-            URLBar()
+        VStack(spacing: 0.0) {
+            if urlBarOnTop { URLBar() }
             WebView(configuration: configuration, navigator: navigator, state: $state)
                 .frame(maxHeight: .infinity)
-                .task {
-                    navigator.load(url: homeURL)
-                }
+            if !urlBarOnTop { URLBar() }
+        }
+        // doesn't work for pull-to-refresh, possibly because it is a UIViewRepresentable
+//        #if !SKIP
+//        .refreshable {
+//            reloadAction()
+//        }
+//        #endif
+        .task {
+            navigator.load(url: homeURL)
         }
         .toolbar {
             #if os(macOS)
@@ -78,93 +86,218 @@ let homeURL = URL(string: homePage)!
             #endif
 
             ToolbarItemGroup(placement: toolbarPlacement) {
-                Button(action: { backButtonTapped() }) {
-                    Label("Back", systemImage: "chevron.left")
+                Button(action: backAction) {
+                    Label {
+                        Text("Back", bundle: .module, comment: "back button label")
+                    } icon: {
+                        Image(systemName: "chevron.left")
+                    }
                 }
-//                .disabled(!state.canGoBack)
-                Spacer()
-                Button(action: { forwardButtonTapped() }) {
-                    Label("Forward", systemImage: "chevron.right")
-                }
-//                .disabled(!state.canGoForward)
-                Spacer()
-
-                ShareLink(item: state.pageURL ?? homeURL)
-                        .disabled(state.pageURL == nil)
+                .accessibilityIdentifier("button.back")
+                .disabled(!state.canGoBack)
 
                 Spacer()
-                Button(action: { settingsButtonTapped() }) {
-                    Label("Settings", systemImage: "gearshape")
-                }
+                moreButton()
                 Spacer()
-                Button(action: { reloadButtonTapped() }) {
-                    Label("More", systemImage: "ellipsis")
+
+                Button(action: forwardAction) {
+                    Label {
+                        Text("Forward", bundle: .module, comment: "forward button label")
+                    } icon: {
+                        Image(systemName: "chevron.right")
+                    }
                 }
+                .accessibilityIdentifier("button.forward")
+                .disabled(!state.canGoForward)
             }
         }
     }
 
     @ViewBuilder func URLBar() -> some View {
-        HStack {
-            Button(action: { homeButtonTapped() }) {
-                #if SKIP
-                Image(systemName: "house")
-                #else
-                Label("Home", systemImage: "house")
-                    .labelStyle(.iconOnly)
-                #endif
-            }
-            .buttonStyle(.bordered)
-            .foregroundStyle(.mint)
+        URLBarComponent()
+            #if !SKIP
+            // "Skip is unable to match this API call to determine whether it results in a View. Consider adding additional type information"
+            .onChange(of: state.pageURL, initial: false, { oldURL, newURL in
+                if let newURL = newURL {
+                    logger.log("changed pageURL to: \(newURL)")
+                    viewModel.url = newURL.absoluteString
+                    addPageToHistory(newURL)
+                }
+            })
+            .onChange(of: state.pageTitle, initial: false, { oldTitle, newTitle in
+                if let newTitle = newTitle {
+                    logger.log("loaded page title: \(newTitle)")
+                }
 
+            })
+            #endif
+    }
+
+    @ViewBuilder func URLBarComponent() -> some View {
+        HStack {
             TextField(text: $viewModel.url) {
                 Text("URL or search")
             }
             .textFieldStyle(.roundedBorder)
-            .font(.title2)
+            .font(.body)
             .autocorrectionDisabled()
+            .keyboardType(.URL)
             #if !SKIP
             #if os(iOS)
             .textInputAutocapitalization(.never)
             #endif
             #endif
-
-            Button(action: { reloadButtonTapped() }) {
-                #if SKIP
-                Image(systemName: "arrow.clockwise.circle")
-                #else
-                Label("Reload", systemImage: "arrow.clockwise.circle")
-                    .labelStyle(.iconOnly)
-                #endif
-            }
-            .buttonStyle(.bordered)
-            .foregroundStyle(.mint)
         }
     }
 
-    func homeButtonTapped() {
-        logger.info("homeButtonTapped")
+    func addPageToHistory(_ page: URL) {
+        logger.info("addPageToHistory: \(page.absoluteString)")
+    }
+
+    func homeAction() {
+        logger.info("homeAction")
         navigator.load(url: homeURL)
     }
 
-    func backButtonTapped() {
-        logger.info("backButtonTapped")
+    func backAction() {
+        logger.info("backAction")
         navigator.goBack()
     }
 
-    func forwardButtonTapped() {
-        logger.info("forwardButtonTapped")
+    func forwardAction() {
+        logger.info("forwardAction")
         navigator.goForward()
     }
 
-    func reloadButtonTapped() {
-        logger.info("reloadButtonTapped")
+    func reloadAction() {
+        logger.info("reloadAction")
         navigator.reload()
     }
 
-    func settingsButtonTapped() {
-        logger.info("settingsButtonTapped")
+    func closeAction() {
+        logger.info("closeAction")
         // TODO
+    }
+
+    func newTabAction() {
+        logger.info("newTabAction")
+        // TODO
+    }
+
+    func favoriteAction() {
+        logger.info("favoriteAction")
+        // TODO
+    }
+
+    func historyAction() {
+        logger.info("historyAction")
+        // TODO
+    }
+
+    func settingsAction() {
+        logger.info("settingsAction")
+        // TODO
+    }
+
+    func moreButton() -> some View {
+        Menu {
+            Button(action: newTabAction) {
+                Label {
+                    Text("New Tab", bundle: .module, comment: "more button string for creating a new tab")
+                } icon: {
+                    Image(systemName: "plus")
+                }
+            }
+            .accessibilityIdentifier("button.new")
+
+            Button(action: closeAction) {
+                Label {
+                    Text("Close Tab", bundle: .module, comment: "more button string for closing a tab")
+                } icon: {
+                    Image(systemName: "xmark")
+                }
+            }
+            .accessibilityIdentifier("button.close")
+
+            Divider()
+
+            Button(action: reloadAction) {
+                Label {
+                    Text("Reload", bundle: .module, comment: "more button string for reloading the current page")
+                } icon: {
+                    Image(systemName: "arrow.clockwise.circle")
+                }
+            }
+            .accessibilityIdentifier("button.reload")
+            Button(action: homeAction) {
+                Label(title: {
+                    Text("Home", bundle: .module, comment: "home button label")
+                }, icon: {
+                    Image(systemName: "house")
+                })
+            }
+            .accessibilityIdentifier("button.home")
+
+            Divider()
+
+//            Button {
+//                logger.log("find on page button tapped")
+//            } label: {
+//                Text("Find on Page", bundle: .module, comment: "more button string for finding on the current page")
+//            }
+
+//            Button {
+//                logger.log("text zoom button tapped")
+//            } label: {
+//                Text("Text Zoom", bundle: .module, comment: "more button string for text zoom")
+//            }
+
+//            Button {
+//                logger.log("disable blocker button tapped")
+//            } label: {
+//                Text("Disable Blocker", bundle: .module, comment: "more button string for disabling the blocker")
+//            }
+
+            // share button
+            ShareLink(item: state.pageURL ?? homeURL)
+                .disabled(state.pageURL == nil)
+
+            Button(action: favoriteAction) {
+                Label {
+                    Text("Favorite", bundle: .module, comment: "more button string for adding a favorite")
+                } icon: {
+                    Image(systemName: "star")
+                }
+            }
+            .accessibilityIdentifier("button.favorite")
+
+            Divider()
+
+            Button(action: historyAction) {
+                Label {
+                    Text("History", bundle: .module, comment: "more button string for opening the history")
+                } icon: {
+                    Image(systemName: "calendar")
+                }
+            }
+            .accessibilityIdentifier("button.history")
+
+            Button(action: settingsAction) {
+                Label {
+                    Text("Settings", bundle: .module, comment: "more button string for opening the settings")
+                } icon: {
+                    Image(systemName: "gearshape")
+                }
+            }
+            .accessibilityIdentifier("button.settings")
+        } label: {
+            Label {
+                Text("More", bundle: .module, comment: "more button label")
+            } icon: {
+                Image(systemName: "ellipsis")
+            }
+            .accessibilityIdentifier("button.more")
+        }
     }
 }
 
@@ -712,6 +845,12 @@ extension WebView : ViewRepresentable {
             webView.isInspectable = true
         }
 
+        #if canImport(UIKit)
+        // add a pull-to-refresh control to the page
+        webView.scrollView.refreshControl = UIRefreshControl()
+        webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
+        #endif
+
         context.coordinator.navigator.webEngine = webEngine
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
@@ -916,6 +1055,16 @@ extension WebViewCoordinator: WKScriptMessageHandler {
             await messageHandler(msg)
         }
     }
+
+    #if canImport(UIKit)
+    @objc func handleRefreshControl(sender: UIRefreshControl) {
+        sender.endRefreshing()
+        logger.log("refreshing")
+        DispatchQueue.main.async {
+            self.webView.navigator.reload()
+        }
+    }
+    #endif
 }
 #endif
 

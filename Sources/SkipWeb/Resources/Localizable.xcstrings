@@ -2,22 +2,34 @@
   "sourceLanguage" : "en",
   "strings" : {
     "Back" : {
-
+      "comment" : "back button label"
+    },
+    "Close Tab" : {
+      "comment" : "more button string for closing a tab"
+    },
+    "Favorite" : {
+      "comment" : "more button string for adding a favorite"
     },
     "Forward" : {
-
+      "comment" : "forward button label"
+    },
+    "History" : {
+      "comment" : "more button string for opening the history"
     },
     "Home" : {
-
+      "comment" : "home button label"
     },
     "More" : {
-
+      "comment" : "more button label"
+    },
+    "New Tab" : {
+      "comment" : "more button string for creating a new tab"
     },
     "Reload" : {
-
+      "comment" : "more button string for reloading the current page"
     },
     "Settings" : {
-
+      "comment" : "more button string for opening the settings"
     },
     "URL or search" : {
 
