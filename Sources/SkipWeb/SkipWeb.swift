@@ -9,7 +9,6 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 let homePage = "https://en.wikipedia.org/wiki/Special:Random" // "https://wikipedia.org"
 let homeURL = URL(string: homePage)!
 
-
 #if !SKIP
 extension URL {
     public func normalizedHost(stripWWWSubdomainOnly: Bool = false) -> String? {

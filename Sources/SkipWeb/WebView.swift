@@ -562,40 +562,6 @@ extension WebViewCoordinator: ScriptMessageHandler {
 }
 #endif
 
-public struct WebViewMessage: Equatable {
-    public let frameInfo: FrameInfo
-    fileprivate let uuid: UUID
-    public let name: String
-    public let body: Any
-
-    public static func == (lhs: WebViewMessage, rhs: WebViewMessage) -> Bool {
-        lhs.uuid == rhs.uuid
-        && lhs.name == rhs.name && lhs.frameInfo == rhs.frameInfo
-    }
-}
-
-public struct WebViewUserScript: Equatable, Hashable {
-    public let source: String
-    public let webKitUserScript: UserScript
-    public let allowedDomains: Set<String>
-
-    public static func == (lhs: WebViewUserScript, rhs: WebViewUserScript) -> Bool {
-        lhs.source == rhs.source
-        && lhs.allowedDomains == rhs.allowedDomains
-    }
-
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .defaultClient, allowedDomains: Set<String> = Set()) {
-        self.source = source
-        self.webKitUserScript = UserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
-        self.allowedDomains = allowedDomains
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(source)
-        hasher.combine(allowedDomains)
-    }
-}
-
 
 #if !SKIP
 @available(macOS 14.0, iOS 17.0, *)
@@ -806,18 +772,6 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
 }
 
 
-
-#if !SKIP
-public typealias BackForwardListItem = WKBackForwardListItem
-#else
-// TODO: wrap https://developer.android.com/reference/android/webkit/WebHistoryItem
-open struct BackForwardListItem {
-    public var url: URL
-    public var title: String?
-    public var initialURL: URL
-}
-#endif
-
 #if !SKIP
 public typealias UserContentController = WKUserContentController
 #else
@@ -831,17 +785,6 @@ public typealias ProcessPool = WKProcessPool
 public class ProcessPool { }
 #endif
 
-#if !SKIP
-public typealias Navigation = WKNavigation
-#else
-public class Navigation { }
-#endif
-
-#if !SKIP
-public typealias NavigationAction = WKNavigationAction
-#else
-public class NavigationAction { }
-#endif
 
 #if !SKIP
 public typealias NavigationActionPolicy = WKNavigationActionPolicy
@@ -865,93 +808,9 @@ public class NavigationResponsePolicy { }
 
 
 #if !SKIP
-public typealias SecurityOrigin = WKSecurityOrigin
-#else
-public class SecurityOrigin { }
-#endif
-
-#if !SKIP
-public typealias NavigationDelegate = WKNavigationDelegate
-#else
-public class NavigationDelegate { }
-#endif
-
-#if !SKIP
-public typealias WebViewConfiguration = WKWebViewConfiguration
-#else
-public class WebViewConfiguration { }
-#endif
-
-
-
-
-#if !SKIP
-public typealias UserScript = WKUserScript
-#else
-open class UserScript : NSObject {
-    open var source: String
-    open var injectionTime: UserScriptInjectionTime
-    open var isForMainFrameOnly: Bool
-    open var contentWorld: ContentWorld
-
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, in contentWorld: ContentWorld) {
-        self.source = source
-        self.injectionTime = injectionTime
-        self.isForMainFrameOnly = forMainFrameOnly
-        self.contentWorld = contentWorld
-    }
-}
-#endif
-
-
-#if !SKIP
-public typealias FrameInfo = WKFrameInfo
-#else
-public class FrameInfo {
-    open var isMainFrame: Bool
-    open var request: URLRequest
-    open var securityOrigin: SecurityOrigin
-    weak open var webView: PlatformWebView?
-
-    init(isMainFrame: Bool, request: URLRequest, securityOrigin: SecurityOrigin, webView: PlatformWebView? = nil) {
-        self.isMainFrame = isMainFrame
-        self.request = request
-        self.securityOrigin = securityOrigin
-        self.webView = webView
-    }
-}
-#endif
-
-
-#if !SKIP
 public typealias WebpagePreferences = WKWebpagePreferences
 #else
 public class WebpagePreferences {
-}
-#endif
-
-
-#if !SKIP
-public typealias ContentWorld = WKContentWorld
-#else
-public class ContentWorld {
-    static var page: ContentWorld = ContentWorld()
-    static var defaultClient: ContentWorld = ContentWorld()
-
-    static func world(name: String) -> ContentWorld {
-        fatalError("TODO")
-    }
-
-    public var name: String?
-}
-#endif
-
-#if !SKIP
-public typealias UserScriptInjectionTime = WKUserScriptInjectionTime
-#else
-public enum UserScriptInjectionTime : Int {
-    case atDocumentStart = 0
-    case atDocumentEnd = 1
 }
 #endif
 
