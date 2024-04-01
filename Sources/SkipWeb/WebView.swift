@@ -27,6 +27,8 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 #endif
 
+#if !os(macOS)
+
 /// An embedded WebKit view. It is configured using a `WebEngineConfiguration`
 ///  and driven with a `WebViewNavigator` which can be associated
 ///  with user interface controls like back/forward buttons and a URL bar.
@@ -1052,3 +1054,6 @@ new MutationObserver(function(mutations) {
         userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, world: .defaultClient)
     }
 }
+
+#endif
+

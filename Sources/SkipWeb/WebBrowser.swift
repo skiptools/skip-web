@@ -3,6 +3,8 @@
 // as published by the Free Software Foundation https://fsf.org
 import SwiftUI
 
+#if !os(macOS)
+
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
 @available(macOS 14.0, tvOS 17.0, *)
 @MainActor public struct WebBrowser: View {
@@ -442,3 +444,6 @@ public struct PageInfo : Identifiable {
     public var title: String?
     public var date: Date
 }
+
+#endif
+
