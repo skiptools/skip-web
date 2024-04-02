@@ -11,24 +11,20 @@ let homeURL = URL(string: homePage)!
 
 /// A store for persisting `WebBrowser` state such as history, favorites, and preferences.
 public protocol WebBrowserStore {
-    /// Adds the given item to the history list
-    func saveHistoryItem(_ item: PageInfo) throws
-    func loadHistoryItem(id: PageInfo.ID) throws -> PageInfo?
-    func loadHistoryItemIDs() throws -> [PageInfo.ID]
-    func removeHistoryItem(id: PageInfo.ID) throws
-    func clearHistory() throws
-
-    /// Adds the given item to the favorites list
-    func saveFavoriteItem(_ item: PageInfo) throws
-    func loadFavoriteItem(id: PageInfo.ID) throws -> PageInfo?
-    func loadFavoriteItemIDs() throws -> [PageInfo.ID]
-    func removeFavoriteItem(id: PageInfo.ID) throws
-    func clearFavorites() throws
+    func saveItems(type: PageInfo.PageType, items: [PageInfo]) throws
+    func loadItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws -> [PageInfo]
+    func removeItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws
 }
 
 /// Information about a web page, for storing in the history or favorites list
 public struct PageInfo : Identifiable {
     public typealias ID = Int64
+
+    /// Whether the page is a favorite bookmark or history item
+    public enum PageType {
+        case history
+        case favorite
+    }
 
     /// The ID of this history item if it is persistent; 0 indicates that it is new
     public var id: ID

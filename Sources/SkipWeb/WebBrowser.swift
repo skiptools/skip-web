@@ -8,35 +8,38 @@ import SwiftUI
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor public struct WebBrowser: View {
-    @State var viewModel = BrowserViewModel(url: homePage)
+    @State var viewModel = BrowserViewModel(url: homePage, navigator: WebViewNavigator())
     @State var state = WebViewState()
-    @State var navigator = WebViewNavigator()
     @AppStorage("appearance") var appearance: String = "system"
     let configuration: WebEngineConfiguration
+    let store: WebBrowserStore
     let urlBarOnTop = true
 
-    public init(configuration: WebEngineConfiguration) {
+    public init(configuration: WebEngineConfiguration, store: WebBrowserStore) {
         self.configuration = configuration
+        self.store = store
     }
 
     public var body: some View {
         VStack(spacing: 0.0) {
             if urlBarOnTop { URLBar() }
-            WebView(configuration: configuration, navigator: navigator, state: $state)
+            WebView(configuration: configuration, navigator: viewModel.navigator, state: $state)
                 .frame(maxHeight: .infinity)
             if !urlBarOnTop { URLBar() }
         }
         .task {
-            navigator.load(url: homeURL)
+            viewModel.navigator.load(url: homeURL)
         }
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsView()
         }
         .sheet(isPresented: $viewModel.showHistory) {
-            HistoryView()
+            HistoryView(store: store, viewModel: $viewModel)
         }
         #if !SKIP
-        .onOpenURL(perform: handleOpenURL)
+        .onOpenURL {
+            viewModel.openURL(url: $0, newTab: true)
+        }
         #endif
         .toolbar {
             #if os(macOS)
@@ -58,16 +61,6 @@ import SwiftUI
             }
         }
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
-    }
-
-    func handleOpenURL(url: URL) {
-        logger.log("openURL: \(url)")
-        var newURL = url
-        // if the scheme netskip:// then change it to https://
-        if url.scheme == "netskip" {
-            newURL = URL(string: url.absoluteString.replacingOccurrences(of: "netskip://", with: "https://")) ?? url
-        }
-        navigator.load(url: newURL)
     }
 
     @ViewBuilder func backButton() -> some View {
@@ -193,7 +186,7 @@ import SwiftUI
 
     @ViewBuilder func historyItem(item: BackForwardListItem) -> some View {
         Button(item.title?.isEmpty == false ? (item.title ?? "") : item.url.absoluteString) {
-            navigator.go(item)
+            viewModel.navigator.go(item)
         }
     }
 
@@ -205,14 +198,13 @@ import SwiftUI
                 if let newURL = newURL {
                     logger.log("changed pageURL to: \(newURL)")
                     viewModel.urlTextField = newURL.absoluteString
-                    addPageToHistory(newURL)
                 }
             })
             .onChange(of: state.pageTitle, initial: false, { oldTitle, newTitle in
                 if let newTitle = newTitle {
                     logger.log("loaded page title: \(newTitle)")
+                    addPageToHistory()
                 }
-
             })
             #endif
     }
@@ -235,7 +227,7 @@ import SwiftUI
                 logger.log("submit")
                 if let url = URL(string: viewModel.urlTextField) {
                     logger.log("loading url: \(url)")
-                    navigator.load(url: url)
+                    viewModel.navigator.load(url: url)
                 } else {
                     logger.log("TODO: search for: \(viewModel.urlTextField)")
                     // TODO: perform search using specified search engine
@@ -260,34 +252,33 @@ import SwiftUI
         }
     }
 
-    @ViewBuilder func HistoryView() -> some View {
-        List {
-            Text("History", bundle: .module, comment: "history sheet title")
+    func addPageToHistory() {
+        if let url = state.pageURL, let title = state.pageTitle {
+            logger.info("addPageToHistory: \(title) \(url.absoluteString)")
+            trying {
+                try store.saveItems(type: .history, items: [PageInfo(url: url, title: title)])
+            }
         }
-    }
-
-    func addPageToHistory(_ page: URL) {
-        logger.info("addPageToHistory: \(page.absoluteString)")
     }
 
     func homeAction() {
         logger.info("homeAction")
-        navigator.load(url: homeURL)
+        viewModel.navigator.load(url: homeURL)
     }
 
     func backAction() {
         logger.info("backAction")
-        navigator.goBack()
+        viewModel.navigator.goBack()
     }
 
     func forwardAction() {
         logger.info("forwardAction")
-        navigator.goForward()
+        viewModel.navigator.goForward()
     }
 
     func reloadAction() {
         logger.info("reloadAction")
-        navigator.reload()
+        viewModel.navigator.reload()
     }
 
     func closeAction() {
@@ -427,14 +418,132 @@ import SwiftUI
     }
 }
 
+struct HistoryView : View {
+    let store: WebBrowserStore
+    @Binding var viewModel: BrowserViewModel
+    @State var items: [PageInfo] = []
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(items) { item in
+                    Button(action: {
+                        viewModel.showHistory = false
+                        viewModel.openURL(url: item.url, newTab: false)
+                    }, label: {
+                        VStack(alignment: .leading) {
+                            Text(item.title ?? "")
+                                .font(.title2)
+                                .lineLimit(1)
+                            #if !SKIP
+                            // SKIP TODO: formatted
+                            Text(item.date.formatted())
+                                .font(.body)
+                                .lineLimit(1)
+                            #endif
+                            Text(item.url.absoluteString)
+                                .font(.caption)
+                                .foregroundStyle(Color.gray)
+                                .lineLimit(1)
+                                #if !SKIP
+                                .truncationMode(.middle)
+                                #endif
+                        }
+                    })
+                    .buttonStyle(.plain)
+                }
+                .onDelete { offsets in
+                    let ids = offsets.map({
+                        items[$0].id
+                    })
+                    logger.log("deleting history items: \(ids)")
+                    trying {
+                        try store.removeItems(type: .history, ids: Set(ids))
+                    }
+                    reload()
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        viewModel.showHistory = false
+                    } label: {
+                        Text("Done", bundle: .module, comment: "done button title")
+                    }
+                    .buttonStyle(.plain)
+                }
+                ToolbarItem(placement: .bottomBar) {
+                    Button {
+                        logger.log("clearing history")
+                        trying {
+                            try store.removeItems(type: PageInfo.PageType.history, ids: [])
+                            reload()
+                        }
+                    } label: {
+                        Text("Clear", bundle: .module, comment: "clear history button title")
+                            .bold()
+                            //.font(.title2)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle(Text("History", bundle: .module, comment: "history sheet title"))
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .onAppear {
+            reload()
+        }
+        #if !SKIP
+        .refreshable {
+            reload()
+        }
+        #endif
+    }
+
+    func reload() {
+        let items = trying {
+            try store.loadItems(type: .history, ids: [])
+        }
+        if let items = items {
+            self.items = items
+        }
+    }
+}
+
+
 @available(macOS 14.0, iOS 17.0, *)
 @Observable public class BrowserViewModel {
+    let navigator: WebViewNavigator
     var urlTextField = ""
     var showSettings = false
     var showHistory = false
 
-    public init(url urlTextField: String) {
+    public init(url urlTextField: String, navigator: WebViewNavigator) {
         self.urlTextField = urlTextField
+        self.navigator = navigator
+    }
+
+    @MainActor func openURL(url: URL, newTab: Bool) {
+        // TODO: handle newTab=true
+
+        logger.log("openURL: \(url)")
+        var newURL = url
+        // if the scheme netskip:// then change it to https://
+        if url.scheme == "netskip" {
+            newURL = URL(string: url.absoluteString.replacingOccurrences(of: "netskip://", with: "https://")) ?? url
+        }
+        navigator.load(url: newURL)
+    }
+
+}
+
+
+func trying<T>(operation: () throws -> T) -> T? {
+    do {
+        return try operation()
+    } catch {
+        logger.error("error performing operation: \(error)")
+        return nil
     }
 }
 

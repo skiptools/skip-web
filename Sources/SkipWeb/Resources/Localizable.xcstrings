@@ -7,11 +7,17 @@
     "Back" : {
       "comment" : "back button label"
     },
+    "Clear" : {
+      "comment" : "clear history button title"
+    },
     "Close Tab" : {
       "comment" : "more button string for closing a tab"
     },
     "Dark" : {
       "comment" : "settings appearance system label"
+    },
+    "Done" : {
+      "comment" : "done button title"
     },
     "Favorite" : {
       "comment" : "more button string for adding a favorite"
@@ -20,7 +26,7 @@
       "comment" : "forward button label"
     },
     "History" : {
-      "comment" : "history sheet title"
+      "comment" : "more button string for opening the history"
     },
     "Home" : {
       "comment" : "home button label"
