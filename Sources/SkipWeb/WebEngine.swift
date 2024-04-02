@@ -2,6 +2,7 @@
 // under the terms of the GNU Lesser General Public License 3.0
 // as published by the Free Software Foundation https://fsf.org
 import Foundation
+import SwiftUI
 #if !SKIP
 import WebKit
 #else
@@ -187,16 +188,17 @@ extension WebEngine : CustomStringConvertible {
 
 
 /// The configuration for a WebEngine
-public struct WebEngineConfiguration {
-    public let javaScriptEnabled: Bool
-    public let contentRules: String?
-    public let allowsBackForwardNavigationGestures: Bool
-    public let allowsInlineMediaPlayback: Bool
-    public let dataDetectorsEnabled: Bool
-    public let isScrollEnabled: Bool
-    public let pageZoom: CGFloat
-    public let isOpaque: Bool
-    public let userScripts: [WebViewUserScript]
+public class WebEngineConfiguration : ObservableObject {
+    @Published public var javaScriptEnabled: Bool
+    @Published public var contentRules: String?
+    @Published public var allowsBackForwardNavigationGestures: Bool
+    @Published public var allowsInlineMediaPlayback: Bool
+    @Published public var dataDetectorsEnabled: Bool
+    @Published public var isScrollEnabled: Bool
+    @Published public var pageZoom: CGFloat
+    @Published public var isOpaque: Bool
+    @Published public var searchEngines: [SearchEngine]
+    @Published public var userScripts: [WebViewUserScript]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -211,6 +213,7 @@ public struct WebEngineConfiguration {
                 isScrollEnabled: Bool = true,
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
+                searchEngines: [SearchEngine] = [],
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.contentRules = contentRules
@@ -220,6 +223,7 @@ public struct WebEngineConfiguration {
         self.isScrollEnabled = isScrollEnabled
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
+        self.searchEngines = searchEngines
         self.userScripts = userScripts
     }
 

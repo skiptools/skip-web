@@ -28,11 +28,17 @@
     "Forward" : {
       "comment" : "forward button label"
     },
+    "Haptic Feedback" : {
+      "comment" : "settings toggle label for button haptic feedback"
+    },
     "History" : {
       "comment" : "more button string for opening the history"
     },
     "Home" : {
       "comment" : "home button label"
+    },
+    "JavaScript" : {
+      "comment" : "settings toggle label for enabling JavaScript"
     },
     "Light" : {
       "comment" : "settings appearance system label"
@@ -57,6 +63,12 @@
     },
     "Reload" : {
       "comment" : "more button string for reloading the current page"
+    },
+    "Search Engine" : {
+      "comment" : "settings picker label for the default search engine"
+    },
+    "Search Suggestions" : {
+      "comment" : "settings toggle label for previewing search suggestions"
     },
     "Settings" : {
       "comment" : "settings sheet title"

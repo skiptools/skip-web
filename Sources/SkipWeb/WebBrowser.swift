@@ -10,7 +10,19 @@ import SwiftUI
 @MainActor public struct WebBrowser: View {
     @State var viewModel = BrowserViewModel(url: homePage, navigator: WebViewNavigator())
     @State var state = WebViewState()
+    @State var triggerImpact = false
+    @State var triggerWarning = false
+    @State var triggerError = false
+    @State var triggerStart = false
+    @State var triggerStop = false
+
     @AppStorage("appearance") var appearance: String = "system"
+    @AppStorage("buttonHaptics") var buttonHaptics: Bool = true
+    @AppStorage("searchEngine") var searchEngine: SearchEngine.ID = ""
+    @AppStorage("searchSuggestions") var searchSuggestions: Bool = true
+    @AppStorage("userAgent") var userAgent: String = ""
+    @AppStorage("enableJavaScript") var enableJavaScript: Bool = true
+
     let configuration: WebEngineConfiguration
     let store: WebBrowserStore
     let urlBarOnTop = false
@@ -18,6 +30,9 @@ import SwiftUI
     public init(configuration: WebEngineConfiguration, store: WebBrowserStore) {
         self.configuration = configuration
         self.store = store
+        if searchEngine.isEmpty, let firstEngineID = configuration.searchEngines.first?.id {
+            self.searchEngine = firstEngineID
+        }
     }
 
     public var body: some View {
@@ -40,6 +55,11 @@ import SwiftUI
         .onOpenURL {
             viewModel.openURL(url: $0, newTab: true)
         }
+        .sensoryFeedback(.start, trigger: triggerStart)
+        .sensoryFeedback(.stop, trigger: triggerStop)
+        .sensoryFeedback(.impact, trigger: triggerImpact)
+        .sensoryFeedback(.warning, trigger: triggerWarning)
+        .sensoryFeedback(.error, trigger: triggerError)
         #endif
         .toolbar {
             #if os(macOS)
@@ -62,6 +82,13 @@ import SwiftUI
         }
         .preferredColorScheme(appearance == "dark" ? .dark : appearance == "light" ? .light : nil)
     }
+
+    func currentSearchEngine() -> SearchEngine? {
+        configuration.searchEngines.first { engine in
+            engine.id == self.searchEngine
+        } ?? configuration.searchEngines.first
+    }
+
 
     @ViewBuilder func backButton() -> some View {
         let backLabel = Label {
@@ -222,45 +249,118 @@ import SwiftUI
     }
 
     @ViewBuilder func URLBarComponent() -> some View {
-        HStack {
+        ZStack {
             TextField(text: $viewModel.urlTextField) {
                 Text("URL or search", bundle: .module, comment: "placeholder string for URL bar")
             }
             .textFieldStyle(.roundedBorder)
             //.font(Font.body)
-            .autocorrectionDisabled()
             #if !SKIP
             #if os(iOS)
-            .keyboardType(.URL)
+            //.keyboardType(.URL)
+            //.textContentType(.URL)
+            .autocorrectionDisabled(true)
             .textInputAutocapitalization(.never)
+            //.textScale(Text.Scale.secondary, isEnabled: true)
             #endif
             #endif
             .onSubmit(of: .text) {
                 logger.log("URLBar submit")
-                if let url = URL(string: viewModel.urlTextField) {
+                if isURLString(viewModel.urlTextField), 
+                    let url = URL(string: viewModel.urlTextField),
+                    ["http", "https", "file", "ftp", "netskip"].contains(url.scheme ?? "") {
                     logger.log("loading url: \(url)")
                     viewModel.navigator.load(url: url, newTab: false)
                 } else {
-                    logger.log("TODO: search for: \(viewModel.urlTextField)")
-                    // TODO: perform search using specified search engine
+                    logger.log("URL search bar entry: \(viewModel.urlTextField)")
+                    if let searchEngine = configuration.searchEngines.first(where: { $0.id == self.searchEngine }),
+                       let queryURL = searchEngine.queryURL(viewModel.urlTextField, Locale.current.identifier) {
+                        logger.log("search engine query URL: \(queryURL)")
+                        if let url = URL(string: queryURL) {
+                            viewModel.navigator.load(url: url, newTab: false)
+                        }
+                    }
                 }
             }
-            //.background(Color.mint)
+            .padding(6.0)
         }
+        #if !SKIP
+        // same as the bottom bar background color
+        .background(Color(UIColor.systemGroupedBackground))
+        #endif
+    }
+
+    func isURLString(_ string: String) -> Bool {
+        if string.hasPrefix("https://")
+            || string.hasPrefix("http://")
+            || string.hasPrefix("file://") {
+            return true
+        }
+        if string.contains(" ") {
+            return false
+        }
+        if string.contains(".") {
+            return true
+        }
+        return false
     }
 
     @ViewBuilder func SettingsView() -> some View {
         NavigationStack {
             Form {
-                Picker(selection: $appearance) {
-                    Text("System", bundle: .module, comment: "settings appearance system label").tag("")
-                    Text("Light", bundle: .module, comment: "settings appearance system label").tag("light")
-                    Text("Dark", bundle: .module, comment: "settings appearance system label").tag("dark")
-                } label: {
-                    Text("Appearance", bundle: .module, comment: "settings appearance picker label").tag("")
+                Section {
+                    Picker(selection: $appearance) {
+                        Text("System", bundle: .module, comment: "settings appearance system label").tag("")
+                        Text("Light", bundle: .module, comment: "settings appearance system label").tag("light")
+                        Text("Dark", bundle: .module, comment: "settings appearance system label").tag("dark")
+                    } label: {
+                        Text("Appearance", bundle: .module, comment: "settings appearance picker label").tag("")
+                    }
+
+                    Toggle(isOn: $buttonHaptics, label: {
+                        Text("Haptic Feedback", bundle: .module, comment: "settings toggle label for button haptic feedback")
+                    })
                 }
+
+                Section {
+                    Picker(selection: $searchEngine) {
+                        ForEach(configuration.searchEngines, id: \.id) { engine in
+                            Text(verbatim: engine.name())
+                                .tag(engine.id)
+                        }
+                    } label: {
+                        Text("Search Engine", bundle: .module, comment: "settings picker label for the default search engine")
+                    }
+
+                    Toggle(isOn: $searchSuggestions, label: {
+                        Text("Search Suggestions", bundle: .module, comment: "settings toggle label for previewing search suggestions")
+                    })
+                    // disable when there is no URL available for search suggestions
+                    //.disabled(SearchEngine.find(id: searchEngine)?.suggestionURL("", "") == nil)
+                }
+
+                Section {
+                    Toggle(isOn: $enableJavaScript, label: {
+                        Text("JavaScript", bundle: .module, comment: "settings toggle label for enabling JavaScript")
+                    })
+                    .onChange(of: enableJavaScript) { (oldJS, newJS) in
+                        configuration.javaScriptEnabled = newJS
+                    }
+                }
+
             }
             .navigationTitle(Text("Settings", bundle: .module, comment: "settings sheet title"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        viewModel.showSettings = false
+                    } label: {
+                        Text("Done", bundle: .module, comment: "done button title")
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
         }
     }
 
@@ -273,58 +373,77 @@ import SwiftUI
         }
     }
 
+    func hapticFeedback() {
+        #if !SKIP
+        if buttonHaptics {
+            triggerImpact.toggle()
+        }
+        #endif
+    }
+
     func homeAction() {
         logger.info("homeAction")
+        hapticFeedback()
         viewModel.navigator.load(url: homeURL, newTab: false)
     }
 
     func backAction() {
         logger.info("backAction")
+        hapticFeedback()
         viewModel.navigator.goBack()
     }
 
     func forwardAction() {
         logger.info("forwardAction")
+        hapticFeedback()
         viewModel.navigator.goForward()
     }
 
     func reloadAction() {
         logger.info("reloadAction")
+        hapticFeedback()
         viewModel.navigator.reload()
     }
 
     func closeAction() {
         logger.info("closeAction")
+        hapticFeedback()
         // TODO
     }
 
     func newTabAction() {
         logger.info("newTabAction")
+        hapticFeedback()
         // TODO
     }
 
     func newPrivateTabAction() {
         logger.info("newPrivateTabAction")
+        hapticFeedback()
         // TODO
     }
 
     func tabListAction() {
         logger.info("tabListAction")
+        hapticFeedback()
         // TODO
     }
 
     func favoriteAction() {
         logger.info("favoriteAction")
+        hapticFeedback()
         // TODO
     }
 
     func historyAction() {
         logger.info("historyAction")
+        hapticFeedback()
         viewModel.showHistory = true
     }
 
     func settingsAction() {
         logger.info("settingsAction")
+        hapticFeedback()
         viewModel.showSettings = true
     }
 

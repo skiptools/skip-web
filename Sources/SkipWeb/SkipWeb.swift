@@ -40,6 +40,23 @@ public struct PageInfo : Identifiable {
     }
 }
 
+/// The configuration for a search engine
+public struct SearchEngine : Identifiable {
+    public typealias ID = String
+
+    public let id: ID
+    public let name: () -> String
+    public let queryURL: (String, String) -> String?
+    public let suggestionURL: (String, String) -> String?
+
+    public init(id: String, name: @escaping () -> String, queryURL: @escaping (String, String) -> String?, suggestionURL: @escaping (String, String) -> String?) {
+        self.id = id
+        self.name = name
+        self.queryURL = queryURL
+        self.suggestionURL = suggestionURL
+    }
+}
+
 
 #if !SKIP
 extension URL {
