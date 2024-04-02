@@ -13,6 +13,9 @@
     "Close Tab" : {
       "comment" : "more button string for closing a tab"
     },
+    "Copy Link" : {
+      "comment" : "context menu action name for copying a URL link"
+    },
     "Dark" : {
       "comment" : "settings appearance system label"
     },
@@ -43,11 +46,23 @@
     "New Tab" : {
       "comment" : "more button string for creating a new tab"
     },
+    "Open" : {
+      "comment" : "context menu action name for opening a url"
+    },
+    "Open in Default Browser" : {
+      "comment" : "context menu action name for opening a url in the system browser"
+    },
+    "Open in New Tab" : {
+      "comment" : "context menu action name for opening a url in a new tab"
+    },
     "Reload" : {
       "comment" : "more button string for reloading the current page"
     },
     "Settings" : {
       "comment" : "settings sheet title"
+    },
+    "Share…" : {
+      "comment" : "context menu action name for sharing a URL"
     },
     "System" : {
       "comment" : "settings appearance system label"

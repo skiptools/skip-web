@@ -13,7 +13,7 @@ import SwiftUI
     @AppStorage("appearance") var appearance: String = "system"
     let configuration: WebEngineConfiguration
     let store: WebBrowserStore
-    let urlBarOnTop = true
+    let urlBarOnTop = false
 
     public init(configuration: WebEngineConfiguration, store: WebBrowserStore) {
         self.configuration = configuration
@@ -28,13 +28,13 @@ import SwiftUI
             if !urlBarOnTop { URLBar() }
         }
         .task {
-            viewModel.navigator.load(url: homeURL)
+            viewModel.navigator.load(url: homeURL, newTab: false)
         }
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsView()
         }
         .sheet(isPresented: $viewModel.showHistory) {
-            HistoryView(store: store, viewModel: $viewModel)
+            PageInfoList(type: PageInfo.PageType.history, store: store, viewModel: $viewModel)
         }
         #if !SKIP
         .onOpenURL {
@@ -239,7 +239,7 @@ import SwiftUI
                 logger.log("URLBar submit")
                 if let url = URL(string: viewModel.urlTextField) {
                     logger.log("loading url: \(url)")
-                    viewModel.navigator.load(url: url)
+                    viewModel.navigator.load(url: url, newTab: false)
                 } else {
                     logger.log("TODO: search for: \(viewModel.urlTextField)")
                     // TODO: perform search using specified search engine
@@ -275,7 +275,7 @@ import SwiftUI
 
     func homeAction() {
         logger.info("homeAction")
-        viewModel.navigator.load(url: homeURL)
+        viewModel.navigator.load(url: homeURL, newTab: false)
     }
 
     func backAction() {
@@ -430,17 +430,19 @@ import SwiftUI
     }
 }
 
-struct HistoryView : View {
+struct PageInfoList : View {
+    let type: PageInfo.PageType
     let store: WebBrowserStore
     @Binding var viewModel: BrowserViewModel
     @State var items: [PageInfo] = []
+    @Environment(\.dismiss) var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 ForEach(items) { item in
                     Button(action: {
-                        viewModel.showHistory = false
+                        dismiss()
                         viewModel.openURL(url: item.url, newTab: false)
                     }, label: {
                         VStack(alignment: .leading) {
@@ -470,7 +472,7 @@ struct HistoryView : View {
                     })
                     logger.log("deleting history items: \(ids)")
                     trying {
-                        try store.removeItems(type: .history, ids: Set(ids))
+                        try store.removeItems(type: type, ids: Set(ids))
                     }
                     reload()
                 }
@@ -478,7 +480,7 @@ struct HistoryView : View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
-                        viewModel.showHistory = false
+                        self.dismiss()
                     } label: {
                         Text("Done", bundle: .module, comment: "done button title")
                     }
@@ -509,7 +511,7 @@ struct HistoryView : View {
 
     func reload() {
         let items = trying {
-            try store.loadItems(type: .history, ids: [])
+            try store.loadItems(type: PageInfo.PageType.history, ids: [])
         }
         if let items = items {
             self.items = items
@@ -539,7 +541,7 @@ struct HistoryView : View {
         if url.scheme == "netskip" {
             newURL = URL(string: url.absoluteString.replacingOccurrences(of: "netskip://", with: "https://")) ?? url
         }
-        navigator.load(url: newURL)
+        navigator.load(url: newURL, newTab: newTab)
     }
 
 }

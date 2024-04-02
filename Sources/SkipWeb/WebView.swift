@@ -116,7 +116,7 @@ public class WebViewNavigator {
     public init() {
     }
 
-    @MainActor public func load(url: URL) {
+    @MainActor public func load(url: URL, newTab: Bool) {
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.webEngine?.description ?? "NONE")")
         guard let webView = webEngine?.webView else { return }
@@ -576,11 +576,31 @@ extension WebViewCoordinator: WebUIDelegate {
 
         logger.log("webView contextMenuConfigurationFor: \(url)")
 
-        let openAction = UIAction(title: "Open", image: UIImage(systemName: "safari")) { _ in
-            UIApplication.shared.open(url)
-        }
-
-        let menu = UIMenu(title: "", children: [openAction])
+        let menu = UIMenu(title: "", children: [
+            UIAction(title: NSLocalizedString("Open", bundle: .module, comment: "context menu action name for opening a url"), image: UIImage(systemName: "plus.square")) { _ in
+                Task {
+                    await self.navigator.load(url: url, newTab: true)
+                }
+            },
+            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
+                Task {
+                    await self.navigator.load(url: url, newTab: true)
+                }
+            },
+            UIAction(title: NSLocalizedString("Open in Default Browser", bundle: .module, comment: "context menu action name for opening a url in the system browser"), image: UIImage(systemName: "safari")) { _ in
+                UIApplication.shared.open(url)
+            },
+            UIAction(title: NSLocalizedString("Copy Link", bundle: .module, comment: "context menu action name for copying a URL link"), image: UIImage(systemName: "doc.on.clipboard")) { _ in
+                UIPasteboard.general.url = url
+            },
+            // randomly doesn't show up … probably need a handle to the actual UIViewController
+//            UIAction(title: NSLocalizedString("Share…", bundle: .module, comment: "context menu action name for sharing a URL"), image: UIImage(systemName: "square.and.arrow.up")) { _ in
+//                let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+//                let controller = webView.findViewController()
+//                logger.info("opening share sheet for \(url) in: \(controller)")
+//                controller?.present(activity, animated: true)
+//            },
+        ])
         let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
             return menu
         }
@@ -720,6 +740,19 @@ extension WebViewCoordinator: WebNavigationDelegate {
         return .allow
     }
 }
+
+extension UIView {
+    func findViewController() -> UIViewController? {
+        if let nextResponder = self.next as? UIViewController {
+            return nextResponder
+        } else if let nextResponder = self.next as? UIView {
+            return nextResponder.findViewController()
+        } else {
+            return nil
+        }
+    }
+}
+
 #endif
 
 public class WebViewScriptCaller: Equatable, ObservableObject {
