@@ -258,7 +258,7 @@ import SwiftUI
             #if !SKIP
             #if os(iOS)
             //.keyboardType(.URL)
-            //.textContentType(.URL)
+            .textContentType(.URL)
             .autocorrectionDisabled(true)
             .textInputAutocapitalization(.never)
             //.textScale(Text.Scale.secondary, isEnabled: true)

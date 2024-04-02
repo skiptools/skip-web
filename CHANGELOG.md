@@ -1,3 +1,10 @@
+## 0.1.4
+
+Released 2024-04-02
+
+  - Refactor names; add UIDelegate
+  - History view
+
 ## 0.1.3
 
 Released 2024-04-01
