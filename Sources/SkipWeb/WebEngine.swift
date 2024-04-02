@@ -138,7 +138,7 @@ import kotlinx.coroutines.launch
         // need to retain the navigation delegate or else it will drop the continuation
         var navDelegate: WebNavDelegate? = nil
 
-        let _: Navigation? = try await withCheckedThrowingContinuation { continuation in
+        let _: WebNavigation? = try await withCheckedThrowingContinuation { continuation in
             navDelegate = WebNavDelegate { result in
                 continuation.resume(with: result)
             }
@@ -161,22 +161,22 @@ extension WebEngine : CustomStringConvertible {
 
 #if !SKIP
 /// A temporary NavigationDelegate that uses a callback to integrate with checked continuations
-@objc fileprivate class WebNavDelegate : NSObject, NavigationDelegate {
-    let callback: (Result<Navigation?, Error>) -> ()
+@objc fileprivate class WebNavDelegate : NSObject, WebNavigationDelegate {
+    let callback: (Result<WebNavigation?, Error>) -> ()
     var callbackInvoked = false
 
-    init(callback: @escaping (Result<Navigation?, Error>) -> Void) {
+    init(callback: @escaping (Result<WebNavigation?, Error>) -> Void) {
         self.callback = callback
     }
 
-    @objc func webView(_ webView: PlatformWebView, didFinish navigation: Navigation!) {
+    @objc func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         logger.info("webView: \(webView) didFinish: \(navigation!)")
         if self.callbackInvoked { return }
         callbackInvoked = true
         self.callback(.success(navigation))
     }
 
-    @objc func webView(_ webView: PlatformWebView, didFail navigation: Navigation!, withError error: any Error) {
+    @objc func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: any Error) {
         logger.info("webView: \(webView) didFail: \(navigation!) error: \(error)")
         if self.callbackInvoked { return }
         callbackInvoked = true
@@ -292,21 +292,27 @@ public class FrameInfo {
 #endif
 
 #if !SKIP
-public typealias Navigation = WKNavigation
+public typealias WebNavigation = WKNavigation
 #else
-public class Navigation { }
+public class WebNavigation { }
 #endif
 
 #if !SKIP
-public typealias NavigationAction = WKNavigationAction
+public typealias WebNavigationAction = WKNavigationAction
 #else
-public class NavigationAction { }
+public class WebNavigationAction { }
 #endif
 
 #if !SKIP
-public typealias NavigationDelegate = WKNavigationDelegate
+public typealias WebNavigationDelegate = WKNavigationDelegate
 #else
-public class NavigationDelegate { }
+public protocol WebNavigationDelegate { }
+#endif
+
+#if !SKIP
+public typealias WebUIDelegate = WKUIDelegate
+#else
+public protocol WebUIDelegate { }
 #endif
 
 #if !SKIP

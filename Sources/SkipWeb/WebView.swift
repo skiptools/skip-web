@@ -327,6 +327,7 @@ extension WebView : ViewRepresentable {
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
 
         #if os(iOS)
@@ -565,9 +566,33 @@ extension WebViewCoordinator: ScriptMessageHandler {
 
 #if !SKIP
 @available(macOS 14.0, iOS 17.0, *)
-extension WebViewCoordinator: NavigationDelegate {
+extension WebViewCoordinator: WebUIDelegate {
+
+    public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
+        guard let url = elementInfo.linkURL else {
+            completionHandler(nil)
+            return
+        }
+
+        logger.log("webView contextMenuConfigurationFor: \(url)")
+
+        let openAction = UIAction(title: "Open", image: UIImage(systemName: "safari")) { _ in
+            UIApplication.shared.open(url)
+        }
+
+        let menu = UIMenu(title: "", children: [openAction])
+        let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
+            return menu
+        }
+
+        completionHandler(configuration)
+    }
+}
+
+@available(macOS 14.0, iOS 17.0, *)
+extension WebViewCoordinator: WebNavigationDelegate {
     @MainActor
-    public func webView(_ webView: PlatformWebView, didFinish navigation: Navigation!) {
+    public func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         let newState = setLoading(
             false,
             pageURL: webView.url,
@@ -621,7 +646,7 @@ extension WebViewCoordinator: NavigationDelegate {
     }
 
     @MainActor
-    public func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: Navigation!, withError error: Error) {
+    public func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error) {
         scriptCaller?.removeAllMultiTargetFrames()
         setLoading(false, isProvisionallyNavigating: false, error: error)
     }
@@ -632,7 +657,7 @@ extension WebViewCoordinator: NavigationDelegate {
     }
 
     @MainActor
-    public func webView(_ webView: PlatformWebView, didFail navigation: Navigation!, withError error: Error) {
+    public func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: Error) {
         scriptCaller?.removeAllMultiTargetFrames()
         setLoading(false, isProvisionallyNavigating: false, error: error)
 
@@ -640,7 +665,7 @@ extension WebViewCoordinator: NavigationDelegate {
     }
 
     @MainActor
-    public func webView(_ webView: PlatformWebView, didCommit navigation: Navigation!) {
+    public func webView(_ webView: PlatformWebView, didCommit navigation: WebNavigation!) {
         scriptCaller?.removeAllMultiTargetFrames()
         let newState = setLoading(true, pageURL: webView.url, isProvisionallyNavigating: false)
         if let onNavigationCommitted = self.webView.onNavigationCommitted {
@@ -649,7 +674,7 @@ extension WebViewCoordinator: NavigationDelegate {
     }
 
     @MainActor
-    public func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: Navigation!) {
+    public func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
         setLoading(
             true,
             isProvisionallyNavigating: true,
@@ -660,7 +685,7 @@ extension WebViewCoordinator: NavigationDelegate {
     }
 
     @MainActor
-    public func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: NavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
+    public func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
         if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
             if blockedHosts.contains(where: { host.contains($0) }) {
                 setLoading(false, isProvisionallyNavigating: false)

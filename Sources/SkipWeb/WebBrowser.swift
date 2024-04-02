@@ -190,22 +190,34 @@ import SwiftUI
         }
     }
 
-    @ViewBuilder func URLBar() -> some View {
+    func updatePageURL(_ oldURL: URL?, _ newURL: URL?) {
+        if let newURL = newURL {
+            logger.log("changed pageURL to: \(newURL)")
+            viewModel.urlTextField = newURL.absoluteString
+        }
+    }
+
+    func updatePageTitle(_ oldTitle: String?, _ newTitle: String?) {
+        if let newTitle = newTitle {
+            logger.log("loaded page title: \(newTitle)")
+            addPageToHistory()
+        }
+    }
+
+    func URLBar() -> some View {
         URLBarComponent()
             #if !SKIP
-            // "Skip is unable to match this API call to determine whether it results in a View. Consider adding additional type information"
-            .onChange(of: state.pageURL, initial: false, { oldURL, newURL in
-                if let newURL = newURL {
-                    logger.log("changed pageURL to: \(newURL)")
-                    viewModel.urlTextField = newURL.absoluteString
-                }
-            })
-            .onChange(of: state.pageTitle, initial: false, { oldTitle, newTitle in
-                if let newTitle = newTitle {
-                    logger.log("loaded page title: \(newTitle)")
-                    addPageToHistory()
-                }
-            })
+            .onChange(of: state.pageURL, updatePageURL)
+            .onChange(of: state.pageTitle, updatePageTitle)
+            #else
+            // workaround onChange() expects an Equatable, which Optional does not conform to
+            // https://github.com/skiptools/skip-ui/issues/27
+            .onChange(of: state.pageURL ?? URL(string: "https://SENTINEL_URL")!) {
+                updatePageURL($0, $1)
+            }
+            .onChange(of: state.pageTitle ?? "SENTINEL_TITLE") {
+                updatePageTitle($0, $1)
+            }
             #endif
     }
 
@@ -224,7 +236,7 @@ import SwiftUI
             #endif
             #endif
             .onSubmit(of: .text) {
-                logger.log("submit")
+                logger.log("URLBar submit")
                 if let url = URL(string: viewModel.urlTextField) {
                     logger.log("loading url: \(url)")
                     viewModel.navigator.load(url: url)
@@ -493,11 +505,6 @@ struct HistoryView : View {
         .onAppear {
             reload()
         }
-        #if !SKIP
-        .refreshable {
-            reload()
-        }
-        #endif
     }
 
     func reload() {
