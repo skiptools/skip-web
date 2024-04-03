@@ -5,10 +5,12 @@ import SwiftUI
 
 #if SKIP || os(iOS)
 
+let supportTabs = false
+
 /// A complete browser view, including a URL bar, the WebView canvas, and toolbar buttons for common actions.
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor public struct WebBrowser: View {
-    @State var viewModel = BrowserViewModel(url: homePage, navigator: WebViewNavigator())
+    @State var viewModel = BrowserViewModel(navigator: WebViewNavigator())
     @State var state = WebViewState()
     @State var triggerImpact = false
     @State var triggerWarning = false
@@ -35,15 +37,32 @@ import SwiftUI
         }
     }
 
+    var homeURL: URL? {
+        if let homePage = URL(string: configuration.searchEngines.first?.homeURL ?? "https://example.org") {
+            return homePage
+        } else {
+            return nil
+        }
+
+    }
     public var body: some View {
         VStack(spacing: 0.0) {
             if urlBarOnTop { URLBar() }
             WebView(configuration: configuration, navigator: viewModel.navigator, state: $state)
                 .frame(maxHeight: .infinity)
             if !urlBarOnTop { URLBar() }
+            ProgressView(value: state.estimatedProgress)
+                .progressViewStyle(.linear)
+                .frame(height: 1.0) // thin progress bar
+                //.tint(state.isLoading ? Color.accentColor : Color.clear)
+                //.opacity(state.isLoading ? 1.0 : 0.5)
+                .opacity(1.0 - (state.estimatedProgress ?? 0.0) / 2.0)
         }
         .task {
-            viewModel.navigator.load(url: homeURL, newTab: false)
+            // load the most recent history page when we first start
+            if let lastPage = (try? store.loadItems(type: PageInfo.PageType.history, ids: []))?.first {
+                viewModel.navigator.load(url: lastPage.url, newTab: false)
+            }
         }
         .sheet(isPresented: $viewModel.showSettings) {
             SettingsView()
@@ -71,11 +90,15 @@ import SwiftUI
             ToolbarItemGroup(placement: toolbarPlacement) {
                 backButton()
                 Spacer()
-                tabListButton()
-                Spacer()
+                if supportTabs {
+                    tabListButton()
+                    Spacer()
+                }
                 moreButton()
-                Spacer()
-                newTabButton()
+                if supportTabs {
+                    Spacer()
+                    newTabButton()
+                }
                 Spacer()
                 forwardButton()
             }
@@ -257,11 +280,24 @@ import SwiftUI
             //.font(Font.body)
             #if !SKIP
             #if os(iOS)
-            //.keyboardType(.URL)
+            .keyboardType(.webSearch)
             .textContentType(.URL)
             .autocorrectionDisabled(true)
             .textInputAutocapitalization(.never)
+            //.toolbar {
+            //    ToolbarItemGroup(placement: .keyboard) {
+            //        Button("Custom Search…") {
+            //            logger.log("Clicked Custom Search…")
+            //        }
+            //    }
+            //}
             //.textScale(Text.Scale.secondary, isEnabled: true)
+            .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidBeginEditingNotification)) { obj in
+                logger.log("received textDidBeginEditingNotification: \(obj.object as? NSObject)")
+                if let textField = obj.object as? UITextField {
+                    textField.selectAll(nil)
+                }
+            }
             #endif
             #endif
             .onSubmit(of: .text) {
@@ -384,7 +420,9 @@ import SwiftUI
     func homeAction() {
         logger.info("homeAction")
         hapticFeedback()
-        viewModel.navigator.load(url: homeURL, newTab: false)
+        if let homeURL = homeURL {
+            viewModel.navigator.load(url: homeURL, newTab: false)
+        }
     }
 
     func backAction() {
@@ -449,25 +487,27 @@ import SwiftUI
 
     func moreButton() -> some View {
         Menu {
-            Button(action: newTabAction) {
-                Label {
-                    Text("New Tab", bundle: .module, comment: "more button string for creating a new tab")
-                } icon: {
-                    Image(systemName: "plus.square.on.square")
+            if supportTabs {
+                Button(action: newTabAction) {
+                    Label {
+                        Text("New Tab", bundle: .module, comment: "more button string for creating a new tab")
+                    } icon: {
+                        Image(systemName: "plus.square.on.square")
+                    }
                 }
-            }
-            .accessibilityIdentifier("button.new")
+                .accessibilityIdentifier("button.new")
 
-            Button(action: closeAction) {
-                Label {
-                    Text("Close Tab", bundle: .module, comment: "more button string for closing a tab")
-                } icon: {
-                    Image(systemName: "xmark")
+                Button(action: closeAction) {
+                    Label {
+                        Text("Close Tab", bundle: .module, comment: "more button string for closing a tab")
+                    } icon: {
+                        Image(systemName: "xmark")
+                    }
                 }
-            }
-            .accessibilityIdentifier("button.close")
+                .accessibilityIdentifier("button.close")
 
-            Divider()
+                Divider()
+            }
 
             Button(action: reloadAction) {
                 Label {
@@ -507,7 +547,7 @@ import SwiftUI
 //            }
 
             // share button
-            ShareLink(item: state.pageURL ?? homeURL)
+            ShareLink(item: state.pageURL ?? URL(string: "https://example.org")!)
                 .disabled(state.pageURL == nil)
 
             Button(action: favoriteAction) {
@@ -646,8 +686,7 @@ struct PageInfoList : View {
     var showSettings = false
     var showHistory = false
 
-    public init(url urlTextField: String, navigator: WebViewNavigator) {
-        self.urlTextField = urlTextField
+    public init(navigator: WebViewNavigator) {
         self.navigator = navigator
     }
 

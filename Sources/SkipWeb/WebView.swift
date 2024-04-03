@@ -3,6 +3,7 @@
 // as published by the Free Software Foundation https://fsf.org
 import SwiftUI
 import OSLog
+import Combine
 #if !SKIP
 import WebKit
 public typealias PlatformWebView = WKWebView
@@ -75,6 +76,7 @@ public struct WebView : View {
     public internal(set) var isLoading: Bool
     public internal(set) var isProvisionallyNavigating: Bool
     public internal(set) var pageURL: URL?
+    public internal(set) var estimatedProgress: Double?
     public internal(set) var pageTitle: String?
     public internal(set) var pageImageURL: URL?
     public internal(set) var pageHTML: String?
@@ -84,8 +86,9 @@ public struct WebView : View {
     public internal(set) var backList: [BackForwardListItem]
     public internal(set) var forwardList: [BackForwardListItem]
 
-    public init(isLoading: Bool = false, isProvisionallyNavigating: Bool = false, pageURL: URL? = nil, pageTitle: String? = nil, pageImageURL: URL? = nil, pageHTML: String? = nil, error: Error? = nil, canGoBack: Bool = false, canGoForward: Bool = false, backList: [BackForwardListItem] = [], forwardList: [BackForwardListItem] = []) {
+    public init(isLoading: Bool = false, estimatedProgress: Double? = nil, isProvisionallyNavigating: Bool = false, pageURL: URL? = nil, pageTitle: String? = nil, pageImageURL: URL? = nil, pageHTML: String? = nil, error: Error? = nil, canGoBack: Bool = false, canGoForward: Bool = false, backList: [BackForwardListItem] = [], forwardList: [BackForwardListItem] = []) {
         self.isLoading = isLoading
+        self.estimatedProgress = estimatedProgress
         self.isProvisionallyNavigating = isProvisionallyNavigating
         self.pageURL = pageURL
         self.pageTitle = pageTitle
@@ -124,7 +127,7 @@ public class WebViewNavigator {
         webView.loadUrl(urlString ?? "about:blank")
         #else
         if url.isFileURL {
-            webView.loadFileURL(url, allowingReadAccessTo: url)
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
         } else {
             webView.load(URLRequest(url: url))
         }
@@ -262,8 +265,7 @@ extension WebView : ViewRepresentable {
     }
 
     public func update(webView: PlatformWebView) {
-        logger.info("WebView.update: \(webView)")
-        //webView.load(URLRequest(url: url))
+        //logger.info("WebView.update: \(webView)")
     }
 
     #if SKIP
@@ -319,6 +321,8 @@ extension WebView : ViewRepresentable {
 
     @MainActor private func create(from context: Context) -> WebEngine {
         let webEngine = makeWebEngine(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        context.coordinator.navigator.webEngine = webEngine
+
         let webView = webEngine.webView
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
 
@@ -341,9 +345,17 @@ extension WebView : ViewRepresentable {
         // add a pull-to-refresh control to the page
         webView.scrollView.refreshControl = UIRefreshControl()
         webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
+
+        webView.publisher(for: \.estimatedProgress)
+            .receive(on: DispatchQueue.main)
+            .sink { progress in
+                _ = withAnimation(progress == 0.0 ? .none : .easeIn) {
+                    context.coordinator.setLoading(estimatedProgress: progress)
+                }
+            }
+            .store(in: &context.coordinator.subscriptions)
         #endif
 
-        context.coordinator.navigator.webEngine = webEngine
         if context.coordinator.scriptCaller == nil, let scriptCaller = scriptCaller {
             context.coordinator.scriptCaller = scriptCaller
         }
@@ -467,6 +479,10 @@ public class WebViewCoordinator: NSObject {
 
     var compiledContentRules = [String: ContentRuleList]()
 
+    #if !SKIP
+    var subscriptions: Set<AnyCancellable> = []
+    #endif
+
     var messageHandlerNames: [String] {
         webView.messageHandlers.keys.map { $0 }
     }
@@ -486,11 +502,16 @@ public class WebViewCoordinator: NSObject {
 //        }
     }
 
-    @discardableResult func setLoading(_ isLoading: Bool, pageURL: URL? = nil, isProvisionallyNavigating: Bool? = nil, canGoBack: Bool? = nil, canGoForward: Bool? = nil, backList: [BackForwardListItem]? = nil, forwardList: [BackForwardListItem]? = nil, error: Error? = nil) -> WebViewState {
+    @discardableResult func setLoading(_ isLoading: Bool? = nil, estimatedProgress: Double? = nil, pageURL: URL? = nil, isProvisionallyNavigating: Bool? = nil, canGoBack: Bool? = nil, canGoForward: Bool? = nil, backList: [BackForwardListItem]? = nil, forwardList: [BackForwardListItem]? = nil, error: Error? = nil) -> WebViewState {
         let newState = webView.state
-        newState.isLoading = isLoading
+        if let isLoading = isLoading {
+            newState.isLoading = isLoading
+        }
         if let pageURL = pageURL {
             newState.pageURL = pageURL
+        }
+        if let estimatedProgress = estimatedProgress {
+            newState.estimatedProgress = estimatedProgress
         }
         if let isProvisionallyNavigating = isProvisionallyNavigating {
             newState.isProvisionallyNavigating = isProvisionallyNavigating
@@ -568,7 +589,16 @@ extension WebViewCoordinator: ScriptMessageHandler {
 @available(macOS 14.0, iOS 17.0, *)
 extension WebViewCoordinator: WebUIDelegate {
 
-    public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
+    @MainActor public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // TODO: open new window
+        logger.log("TODO createWebViewWith: \(configuration) \(navigationAction)")
+        if let url = navigationAction.request.url {
+            navigator.load(url: url, newTab: true)
+        }
+        return nil // self.navigator.webEngine?.webView // uncaught exception 'NSInternalInconsistencyException', reason: 'Returned WKWebView was not created with the given configuration.'
+    }
+
+    @MainActor public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
         guard let url = elementInfo.linkURL else {
             completionHandler(nil)
             return
@@ -578,15 +608,12 @@ extension WebViewCoordinator: WebUIDelegate {
 
         let menu = UIMenu(title: "", children: [
             UIAction(title: NSLocalizedString("Open", bundle: .module, comment: "context menu action name for opening a url"), image: UIImage(systemName: "plus.square")) { _ in
-                Task {
-                    await self.navigator.load(url: url, newTab: true)
-                }
+                self.navigator.load(url: url, newTab: true)
             },
-            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
-                Task {
-                    await self.navigator.load(url: url, newTab: true)
-                }
-            },
+            // TODO: supportTabs
+//            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
+//                self.navigator.load(url: url, newTab: true)
+//            },
             UIAction(title: NSLocalizedString("Open in Default Browser", bundle: .module, comment: "context menu action name for opening a url in the system browser"), image: UIImage(systemName: "safari")) { _ in
                 UIApplication.shared.open(url)
             },
@@ -615,6 +642,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
     public func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         let newState = setLoading(
             false,
+            estimatedProgress: webView.estimatedProgress,
             pageURL: webView.url,
             isProvisionallyNavigating: false,
             canGoBack: webView.canGoBack,
@@ -697,6 +725,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
     public func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
         setLoading(
             true,
+            estimatedProgress: 0.0,
             isProvisionallyNavigating: true,
             canGoBack: webView.canGoBack,
             canGoForward: webView.canGoForward,

@@ -23,9 +23,12 @@ import kotlinx.coroutines.launch
 /// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
 /// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-@MainActor public class WebEngine {
+@MainActor public class WebEngine : ObservableObject {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
+    #if !SKIP
+    private var observers: [NSKeyValueObservation] = []
+    #endif
 
     /// Create a WebEngine with the specified configuration.
     /// - Parameters:
@@ -35,7 +38,7 @@ import kotlinx.coroutines.launch
         self.configuration = configuration
 
         #if !SKIP
-        self.webView = webView ?? PlatformWebView(frame: .zero, configuration: configuration.webViewConfiguration)
+        self.webView = webView ?? WKWebView(frame: .zero, configuration: configuration.webViewConfiguration)
         #else
         // fall back to using the global android context if the activity context is not set in the configuration
         self.webView = webView ?? PlatformWebView(configuration.context ?? ProcessInfo.processInfo.androidContext)

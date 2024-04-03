@@ -6,9 +6,6 @@ import OSLog
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 
-let homePage = "https://en.wikipedia.org/wiki/Special:Random" // "https://wikipedia.org"
-let homeURL = URL(string: homePage)!
-
 /// A store for persisting `WebBrowser` state such as history, favorites, and preferences.
 public protocol WebBrowserStore {
     func saveItems(type: PageInfo.PageType, items: [PageInfo]) throws
@@ -45,12 +42,14 @@ public struct SearchEngine : Identifiable {
     public typealias ID = String
 
     public let id: ID
+    public let homeURL: String
     public let name: () -> String
     public let queryURL: (String, String) -> String?
     public let suggestionURL: (String, String) -> String?
 
-    public init(id: String, name: @escaping () -> String, queryURL: @escaping (String, String) -> String?, suggestionURL: @escaping (String, String) -> String?) {
+    public init(id: String, homeURL: String, name: @escaping () -> String, queryURL: @escaping (String, String) -> String?, suggestionURL: @escaping (String, String) -> String?) {
         self.id = id
+        self.homeURL = homeURL
         self.name = name
         self.queryURL = queryURL
         self.suggestionURL = suggestionURL
@@ -58,8 +57,8 @@ public struct SearchEngine : Identifiable {
 }
 
 
-#if !SKIP
 extension URL {
+    #if !SKIP
     public func normalizedHost(stripWWWSubdomainOnly: Bool = false) -> String? {
         // Use components.host instead of self.host since the former correctly preserves
         // brackets for IPv6 hosts, whereas the latter strips them.
@@ -106,7 +105,7 @@ extension URL {
 
         return self
     }
+    #endif
 }
-#endif
 
 
