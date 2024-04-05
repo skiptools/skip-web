@@ -1,11 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "About %@" : {
+      "comment" : "settings title menu for about app"
+    },
     "Appearance" : {
       "comment" : "settings appearance picker label"
     },
     "Back" : {
       "comment" : "back button label"
+    },
+    "Block Ads" : {
+      "comment" : "settings toggle label for blocking ads"
     },
     "Clear" : {
       "comment" : "clear history button title"
@@ -22,8 +28,14 @@
     "Done" : {
       "comment" : "done button title"
     },
+    "Enable JavaScript" : {
+      "comment" : "settings toggle label for enabling JavaScript"
+    },
     "Favorite" : {
       "comment" : "more button string for adding a favorite"
+    },
+    "Find on Page" : {
+      "comment" : "more button string for finding on the current page"
     },
     "Forward" : {
       "comment" : "forward button label"
@@ -36,9 +48,6 @@
     },
     "Home" : {
       "comment" : "home button label"
-    },
-    "JavaScript" : {
-      "comment" : "settings toggle label for enabling JavaScript"
     },
     "Light" : {
       "comment" : "settings appearance system label"
@@ -71,7 +80,7 @@
       "comment" : "settings toggle label for previewing search suggestions"
     },
     "Settings" : {
-      "comment" : "settings sheet title"
+      "comment" : "more button string for opening the settings"
     },
     "Share…" : {
       "comment" : "context menu action name for sharing a URL"

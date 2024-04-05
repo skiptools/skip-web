@@ -60,10 +60,15 @@ public struct WebView : View {
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
 
-    public init(configuration: WebEngineConfiguration, navigator: WebViewNavigator, state: Binding<WebViewState>) {
+    public init(configuration: WebEngineConfiguration = WebEngineConfiguration(), navigator: WebViewNavigator = WebViewNavigator(), url initialURL: URL? = nil, html initialHTML: String? = nil, state: Binding<WebViewState> = .constant(WebViewState())) {
         self.config = configuration
         self.navigator = navigator
-
+        if let initialURL = initialURL {
+            navigator.initialURL = initialURL
+        }
+        if let initialHTML = initialHTML {
+            navigator.initialHTML = initialHTML
+        }
         self._state = state
         self.needsHistoryRefresh = false
         self.lastInstalledScripts = []
@@ -104,26 +109,40 @@ public struct WebView : View {
 
 /// A controller that can drive a `WebEngine` from a user interface.
 public class WebViewNavigator {
-    @MainActor var webEngine: WebEngine? {
+    var initialURL: URL?
+    var initialHTML: String?
+
+    @MainActor public var webEngine: WebEngine? {
         didSet {
             logger.info("assigned webEngine: \(self.webEngine?.description ?? "NULL")")
 
-//            guard let webView = webView else { return }
-            // TODO: Make about:blank history initialization optional via configuration.
-//            if !webView.canGoBack && !webView.canGoForward && (webView.url == nil || webView.url?.absoluteString == "about:blank") {
-//                load(URLRequest(url: URL(string: "about:blank")!))
-//            }
+            if let initialURL = initialURL {
+                logger.log("loading initialURL: \(initialURL)")
+                load(url: initialURL, newTab: false)
+            } else if let initialHTML = initialHTML {
+                load(html: initialHTML, newTab: false)
+            }
         }
     }
 
-    public init() {
+    public init(initialURL: URL? = nil, initialHTML: String? = nil) {
+        self.initialURL = initialURL
+        self.initialHTML = initialHTML
+    }
+
+    @MainActor public func load(html: String, baseURL: URL? = nil, mimeType: String = "text/html", newTab: Bool) {
+        // TODO: handle newTab
+        webEngine?.loadHTML(html, baseURL: baseURL, mimeType: mimeType)
     }
 
     @MainActor public func load(url: URL, newTab: Bool) {
+        // TODO: handle newTab
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.webEngine?.description ?? "NONE")")
         guard let webView = webEngine?.webView else { return }
         #if SKIP
+        // TODO: create a WebViewAssetLoader for jar:file: URLs to handle loading the HTML and resources from the apk
+        // https://github.com/skiptools/skip-web/issues/1
         webView.loadUrl(urlString ?? "about:blank")
         #else
         if url.isFileURL {
@@ -156,11 +175,6 @@ public class WebViewNavigator {
         webEngine?.goForward()
     }
 }
-
-
-
-
-
 
 
 // MARK: SkipUI interop with legacy UIKit/AndroidView system
@@ -326,8 +340,6 @@ extension WebView : ViewRepresentable {
         let webView = webEngine.webView
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
 
-        refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: context.coordinator)
-
         webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
@@ -341,7 +353,8 @@ extension WebView : ViewRepresentable {
         webView.pageZoom = config.pageZoom
         webView.isOpaque = config.isOpaque
         webView.isInspectable = true
-        
+        webView.isFindInteractionEnabled = true
+
         // add a pull-to-refresh control to the page
         webView.scrollView.refreshControl = UIRefreshControl()
         webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
@@ -349,7 +362,7 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.estimatedProgress)
             .receive(on: DispatchQueue.main)
             .sink { progress in
-                _ = withAnimation(progress == 0.0 ? .none : .easeIn) {
+                _ = withAnimation(progress == 0.0 ? .none : .interpolatingSpring) {
                     context.coordinator.setLoading(estimatedProgress: progress)
                 }
             }
@@ -395,27 +408,6 @@ extension WebView : ViewRepresentable {
 #if !SKIP
 @available(macOS 14.0, iOS 17.0, *)
 extension WebView {
-    @MainActor
-    func refreshContentRules(userContentController: UserContentController, coordinator: Coordinator) {
-        userContentController.removeAllContentRuleLists()
-        guard let contentRules = config.contentRules else { return }
-        if let ruleList = coordinator.compiledContentRules[contentRules] {
-            userContentController.add(ruleList)
-        } else {
-            ContentRuleListStore.default().compileContentRuleList(
-                forIdentifier: "ContentBlockingRules",
-                encodedContentRuleList: contentRules) { (ruleList, error) in
-                    guard let ruleList = ruleList else {
-                        if let error = error {
-                            print(error)
-                        }
-                        return
-                    }
-                    userContentController.add(ruleList)
-                    coordinator.compiledContentRules[contentRules] = ruleList
-                }
-        }
-    }
 
     @MainActor
     func refreshMessageHandlers(userContentController: UserContentController, context: Context) {
@@ -610,10 +602,9 @@ extension WebViewCoordinator: WebUIDelegate {
             UIAction(title: NSLocalizedString("Open", bundle: .module, comment: "context menu action name for opening a url"), image: UIImage(systemName: "plus.square")) { _ in
                 self.navigator.load(url: url, newTab: true)
             },
-            // TODO: supportTabs
-//            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
-//                self.navigator.load(url: url, newTab: true)
-//            },
+            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
+                self.navigator.load(url: url, newTab: true)
+            },
             UIAction(title: NSLocalizedString("Open in Default Browser", bundle: .module, comment: "context menu action name for opening a url in the system browser"), image: UIImage(systemName: "safari")) { _ in
                 UIApplication.shared.open(url)
             },
@@ -740,10 +731,6 @@ extension WebViewCoordinator: WebNavigationDelegate {
                 setLoading(false, isProvisionallyNavigating: false)
                 return (.cancel, preferences)
             }
-        }
-
-        if navigationAction.targetFrame?.isMainFrame ?? false {
-            self.webView.refreshContentRules(userContentController: webView.configuration.userContentController, coordinator: self)
         }
 
         return (.allow, preferences)
@@ -945,6 +932,13 @@ public class ContentRuleListStore {
 
 #endif
 
+
+/// Notification posted by the model when the content rules are loaded
+extension Notification.Name {
+    public static var webContentRulesLoaded: Notification.Name {
+        return Notification.Name("webContentRulesLoaded")
+    }
+}
 
 
 fileprivate struct LocationChangeUserScript {

@@ -72,7 +72,7 @@ import kotlinx.coroutines.launch
         return res.description
     }
 
-    public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") async throws {
+    public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
         logger.info("loadHTML webView: \(self.description)")
         let encoding: String = "UTF-8"
 
@@ -84,9 +84,9 @@ import kotlinx.coroutines.launch
         let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
         webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
         #else
-        try await withNavigationDelegate {
-            webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
-        }
+        //try await withNavigationDelegate {
+        webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
+        //}
         #endif
     }
 
@@ -193,7 +193,6 @@ extension WebEngine : CustomStringConvertible {
 /// The configuration for a WebEngine
 public class WebEngineConfiguration : ObservableObject {
     @Published public var javaScriptEnabled: Bool
-    @Published public var contentRules: String?
     @Published public var allowsBackForwardNavigationGestures: Bool
     @Published public var allowsInlineMediaPlayback: Bool
     @Published public var dataDetectorsEnabled: Bool
@@ -209,7 +208,6 @@ public class WebEngineConfiguration : ObservableObject {
     #endif
 
     public init(javaScriptEnabled: Bool = true,
-                contentRules: String? = nil,
                 allowsBackForwardNavigationGestures: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
                 dataDetectorsEnabled: Bool = true,
@@ -219,7 +217,6 @@ public class WebEngineConfiguration : ObservableObject {
                 searchEngines: [SearchEngine] = [],
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
-        self.contentRules = contentRules
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
         self.dataDetectorsEnabled = dataDetectorsEnabled
@@ -296,6 +293,12 @@ public class FrameInfo {
         self.webView = webView
     }
 }
+#endif
+
+#if !SKIP
+public typealias WebContentRuleListStore = WKContentRuleListStore
+#else
+public class WebContentRuleListStore { }
 #endif
 
 #if !SKIP
