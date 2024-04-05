@@ -134,8 +134,11 @@ import kotlinx.coroutines.launch
         #endif
     }
 
-    #if !SKIP
-    func withNavigationDelegate(_ block: () -> ()) async throws {
+    public func withNavigationDelegate(_ block: () -> ()) async throws {
+        #if SKIP
+        // TODO
+        block()
+        #else
         let pdelegate = webView.navigationDelegate
         defer { webView.navigationDelegate = pdelegate }
 
@@ -150,9 +153,8 @@ import kotlinx.coroutines.launch
             webView.navigationDelegate = navDelegate
             block()
         }
-
+        #endif
     }
-    #endif
 }
 
 

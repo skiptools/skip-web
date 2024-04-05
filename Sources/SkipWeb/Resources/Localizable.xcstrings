@@ -1,65 +1,8 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "About %@" : {
-      "comment" : "settings title menu for about app"
-    },
-    "Appearance" : {
-      "comment" : "settings appearance picker label"
-    },
-    "Back" : {
-      "comment" : "back button label"
-    },
-    "Block Ads" : {
-      "comment" : "settings toggle label for blocking ads"
-    },
-    "Clear" : {
-      "comment" : "clear history button title"
-    },
-    "Close Tab" : {
-      "comment" : "more button string for closing a tab"
-    },
     "Copy Link" : {
       "comment" : "context menu action name for copying a URL link"
-    },
-    "Dark" : {
-      "comment" : "settings appearance system label"
-    },
-    "Done" : {
-      "comment" : "done button title"
-    },
-    "Enable JavaScript" : {
-      "comment" : "settings toggle label for enabling JavaScript"
-    },
-    "Favorite" : {
-      "comment" : "more button string for adding a favorite"
-    },
-    "Find on Page" : {
-      "comment" : "more button string for finding on the current page"
-    },
-    "Forward" : {
-      "comment" : "forward button label"
-    },
-    "Haptic Feedback" : {
-      "comment" : "settings toggle label for button haptic feedback"
-    },
-    "History" : {
-      "comment" : "more button string for opening the history"
-    },
-    "Home" : {
-      "comment" : "home button label"
-    },
-    "Light" : {
-      "comment" : "settings appearance system label"
-    },
-    "More" : {
-      "comment" : "more button label"
-    },
-    "New Private Tab" : {
-      "comment" : "more button string for creating a new private tab"
-    },
-    "New Tab" : {
-      "comment" : "more button string for creating a new tab"
     },
     "Open" : {
       "comment" : "context menu action name for opening a url"
@@ -70,29 +13,8 @@
     "Open in New Tab" : {
       "comment" : "context menu action name for opening a url in a new tab"
     },
-    "Reload" : {
-      "comment" : "more button string for reloading the current page"
-    },
-    "Search Engine" : {
-      "comment" : "settings picker label for the default search engine"
-    },
-    "Search Suggestions" : {
-      "comment" : "settings toggle label for previewing search suggestions"
-    },
-    "Settings" : {
-      "comment" : "more button string for opening the settings"
-    },
     "Share…" : {
       "comment" : "context menu action name for sharing a URL"
-    },
-    "System" : {
-      "comment" : "settings appearance system label"
-    },
-    "Tab List" : {
-      "comment" : "tab list action label"
-    },
-    "URL or search" : {
-      "comment" : "placeholder string for URL bar"
     }
   },
   "version" : "1.0"

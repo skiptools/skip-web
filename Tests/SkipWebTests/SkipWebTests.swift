@@ -24,14 +24,14 @@ final class SkipWebTests: XCTestCase {
     }
 
     #if SKIP || os(iOS)
-    func testWebEngine() async throws {
+    @MainActor func testWebEngine() async throws {
         if isRobolectric {
             throw XCTSkip("cannot run WebEngine in Robolectric")
         }
 
         //assertMainThread()
 
-        let engine = await WebEngine()
+        let engine = WebEngine()
 
         func html(title: String, body: String = "") -> String {
             "<html><head><title>\(title)</title></head><body>\(body)</body></html>"
@@ -53,7 +53,10 @@ final class SkipWebTests: XCTestCase {
 
         do {
             let title = "Hello HTML String!"
-            try await engine.loadHTML(html(title: title))
+            try await engine.withNavigationDelegate {
+                engine.loadHTML(html(title: title))
+            }
+
             let title1 = try await engine.evaluate(js: "document.title")
             XCTAssertEqual(title, title1)
         }
