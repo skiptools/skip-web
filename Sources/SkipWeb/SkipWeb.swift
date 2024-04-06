@@ -8,7 +8,7 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 
 /// A store for persisting `WebBrowser` state such as history, favorites, and preferences.
 public protocol WebBrowserStore {
-    func saveItems(type: PageInfo.PageType, items: [PageInfo]) throws
+    func saveItems(type: PageInfo.PageType, items: [PageInfo]) throws -> [PageInfo.ID]
     func loadItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws -> [PageInfo]
     func removeItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws
 }
@@ -21,6 +21,7 @@ public struct PageInfo : Identifiable {
     public enum PageType {
         case history
         case favorite
+        case active
     }
 
     /// The ID of this history item if it is persistent; 0 indicates that it is new

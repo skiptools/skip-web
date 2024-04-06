@@ -118,9 +118,9 @@ public class WebViewNavigator {
 
             if let initialURL = initialURL {
                 logger.log("loading initialURL: \(initialURL)")
-                load(url: initialURL, newTab: false)
+                load(url: initialURL)
             } else if let initialHTML = initialHTML {
-                load(html: initialHTML, newTab: false)
+                load(html: initialHTML)
             }
         }
     }
@@ -130,12 +130,12 @@ public class WebViewNavigator {
         self.initialHTML = initialHTML
     }
 
-    @MainActor public func load(html: String, baseURL: URL? = nil, mimeType: String = "text/html", newTab: Bool) {
+    @MainActor public func load(html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
         // TODO: handle newTab
         webEngine?.loadHTML(html, baseURL: baseURL, mimeType: mimeType)
     }
 
-    @MainActor public func load(url: URL, newTab: Bool) {
+    @MainActor public func load(url: URL) {
         // TODO: handle newTab
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.webEngine?.description ?? "NONE")")
@@ -461,7 +461,7 @@ extension WebView {
 
 
 @available(macOS 14.0, iOS 17.0, *)
-public class WebViewCoordinator: NSObject {
+@MainActor public class WebViewCoordinator: NSObject {
     private let webView: WebView
 
     var navigator: WebViewNavigator
@@ -492,6 +492,13 @@ public class WebViewCoordinator: NSObject {
 //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
 //            }
 //        }
+    }
+
+    @discardableResult func openURL(url: URL, newTab: Bool) -> PlatformWebView? {
+        // TODO: handle newTab
+        let openInNewTab = newTab
+        navigator.load(url: url)
+        return nil // TOOD: return new PlatformWebView
     }
 
     @discardableResult func setLoading(_ isLoading: Bool? = nil, estimatedProgress: Double? = nil, pageURL: URL? = nil, isProvisionallyNavigating: Bool? = nil, canGoBack: Bool? = nil, canGoForward: Bool? = nil, backList: [BackForwardListItem]? = nil, forwardList: [BackForwardListItem]? = nil, error: Error? = nil) -> WebViewState {
@@ -582,10 +589,9 @@ extension WebViewCoordinator: ScriptMessageHandler {
 extension WebViewCoordinator: WebUIDelegate {
 
     @MainActor public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        // TODO: open new window
-        logger.log("TODO createWebViewWith: \(configuration) \(navigationAction)")
+        logger.log("createWebViewWith: \(configuration) \(navigationAction)")
         if let url = navigationAction.request.url {
-            navigator.load(url: url, newTab: true)
+            return openURL(url: url, newTab: true)
         }
         return nil // self.navigator.webEngine?.webView // uncaught exception 'NSInternalInconsistencyException', reason: 'Returned WKWebView was not created with the given configuration.'
     }
@@ -600,10 +606,11 @@ extension WebViewCoordinator: WebUIDelegate {
 
         let menu = UIMenu(title: "", children: [
             UIAction(title: NSLocalizedString("Open", bundle: .module, comment: "context menu action name for opening a url"), image: UIImage(systemName: "plus.square")) { _ in
-                self.navigator.load(url: url, newTab: true)
+                self.navigator.load(url: url)
+                self.openURL(url: url, newTab: false)
             },
             UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
-                self.navigator.load(url: url, newTab: true)
+                self.openURL(url: url, newTab: true)
             },
             UIAction(title: NSLocalizedString("Open in Default Browser", bundle: .module, comment: "context menu action name for opening a url in the system browser"), image: UIImage(systemName: "safari")) { _ in
                 UIApplication.shared.open(url)

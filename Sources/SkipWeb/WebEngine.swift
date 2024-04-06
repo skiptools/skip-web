@@ -125,7 +125,7 @@ import kotlinx.coroutines.launch
                         continuation.resume(result)
                     }
 
-                    continuation.invokeOnCancellation {
+                    continuation.invokeOnCancellation { _ in
                         continuation.cancel()
                     }
     //            }
