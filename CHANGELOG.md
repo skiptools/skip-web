@@ -1,3 +1,15 @@
+## 0.3.0
+
+Released 2024-04-06
+
+  - Handle external URL load
+
+## 0.2.1
+
+Released 2024-04-06
+
+  - Handle external URL load
+
 ## 0.1.4
 
 Released 2024-04-02
