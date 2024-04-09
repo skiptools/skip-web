@@ -496,7 +496,6 @@ extension WebView {
 
     @discardableResult func openURL(url: URL, newTab: Bool) -> PlatformWebView? {
         // TODO: handle newTab
-        let openInNewTab = newTab
         navigator.load(url: url)
         return nil // TOOD: return new PlatformWebView
     }

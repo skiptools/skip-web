@@ -6,58 +6,6 @@ import OSLog
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 
-/// A store for persisting `WebBrowser` state such as history, favorites, and preferences.
-public protocol WebBrowserStore {
-    func saveItems(type: PageInfo.PageType, items: [PageInfo]) throws -> [PageInfo.ID]
-    func loadItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws -> [PageInfo]
-    func removeItems(type: PageInfo.PageType, ids: Set<PageInfo.ID>) throws
-}
-
-/// Information about a web page, for storing in the history or favorites list
-public struct PageInfo : Identifiable {
-    public typealias ID = Int64
-
-    /// Whether the page is a favorite bookmark or history item
-    public enum PageType {
-        case history
-        case favorite
-        case active
-    }
-
-    /// The ID of this history item if it is persistent; 0 indicates that it is new
-    public var id: ID
-    public var url: URL
-    public var title: String?
-    public var date: Date
-
-    public init(id: ID = Int64(0), url: URL, title: String? = nil, date: Date = Date.now) {
-        self.id = id
-        self.url = url
-        self.title = title
-        self.date = date
-    }
-}
-
-/// The configuration for a search engine
-public struct SearchEngine : Identifiable {
-    public typealias ID = String
-
-    public let id: ID
-    public let homeURL: String
-    public let name: () -> String
-    public let queryURL: (String, String) -> String?
-    public let suggestionURL: (String, String) -> String?
-
-    public init(id: String, homeURL: String, name: @escaping () -> String, queryURL: @escaping (String, String) -> String?, suggestionURL: @escaping (String, String) -> String?) {
-        self.id = id
-        self.homeURL = homeURL
-        self.name = name
-        self.queryURL = queryURL
-        self.suggestionURL = suggestionURL
-    }
-}
-
-
 extension URL {
     #if !SKIP
     public func normalizedHost(stripWWWSubdomainOnly: Bool = false) -> String? {

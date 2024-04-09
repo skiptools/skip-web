@@ -201,7 +201,6 @@ public class WebEngineConfiguration : ObservableObject {
     @Published public var isScrollEnabled: Bool
     @Published public var pageZoom: CGFloat
     @Published public var isOpaque: Bool
-    @Published public var searchEngines: [SearchEngine]
     @Published public var userScripts: [WebViewUserScript]
 
     #if SKIP
@@ -216,7 +215,6 @@ public class WebEngineConfiguration : ObservableObject {
                 isScrollEnabled: Bool = true,
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
-                searchEngines: [SearchEngine] = [],
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
@@ -225,7 +223,6 @@ public class WebEngineConfiguration : ObservableObject {
         self.isScrollEnabled = isScrollEnabled
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
-        self.searchEngines = searchEngines
         self.userScripts = userScripts
     }
 
