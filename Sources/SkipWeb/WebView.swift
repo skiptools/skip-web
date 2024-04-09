@@ -939,14 +939,6 @@ public class ContentRuleListStore {
 #endif
 
 
-/// Notification posted by the model when the content rules are loaded
-extension Notification.Name {
-    public static var webContentRulesLoaded: Notification.Name {
-        return Notification.Name("webContentRulesLoaded")
-    }
-}
-
-
 fileprivate struct LocationChangeUserScript {
     let userScript: WebViewUserScript
 
