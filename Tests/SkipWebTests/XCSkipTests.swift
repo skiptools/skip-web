@@ -32,3 +32,8 @@ let isRobolectric = isJava && !isAndroid
 /// True if the system's `Int` type is 32-bit.
 let is32BitInteger = Int64(Int.max) == Int64(Int32.max)
 
+#if os(macOS)
+let isMacOS = true
+#else
+let isMacOS = false
+#endif
