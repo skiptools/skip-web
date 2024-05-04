@@ -120,7 +120,7 @@ final class SkipWebTests: XCTestCase {
             try await engine.load(url: url)
             logger.log("done loading url: \(url)")
             let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual("ABC", title2)
+            XCTAssertEqual("Example Domain", title2)
         }
 
         // try async load with both HTML string and file URL loading and ensure the DOM is updated
