@@ -1,3 +1,9 @@
+## 0.4.0
+
+Released 2024-05-25
+
+  - Call webView.setBackgroundColor to avoid screen flashing; bump dependency androidx.webkit:webkit:1.11.0
+
 ## 0.3.0
 
 Released 2024-04-06
