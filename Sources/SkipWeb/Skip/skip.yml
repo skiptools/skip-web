@@ -5,21 +5,12 @@
 # the blocks to add to the build.gradle.kts
 build:
   contents:
-    - block: 'android'
-      contents:
-        - block: 'buildFeatures'
-          contents:
-            - 'compose = true'
-        - block: 'composeOptions'
-          contents:
-            - 'kotlinCompilerExtensionVersion = libs.versions.kotlin.compose.compiler.extension.get()'
-
     - block: 'dependencies'
       export: false
       contents:
         - 'implementation("androidx.webkit:webkit:1.11.0")'
-        - 'androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")'
-        - 'androidTestImplementation("androidx.test.espresso:espresso-web:3.5.1")'
+        - 'androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")'
+        - 'androidTestImplementation("androidx.test.espresso:espresso-web:3.6.1")'
 
         - 'testImplementation(libs.androidx.compose.ui.test)'
         - 'androidTestImplementation(libs.androidx.compose.ui.test)'

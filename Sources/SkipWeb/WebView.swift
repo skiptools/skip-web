@@ -94,7 +94,6 @@ public struct WebView : View {
     public internal(set) var backList: [BackForwardListItem] = []
     public internal(set) var forwardList: [BackForwardListItem] = []
     public internal(set) var scrollingDown: Bool = false
-    public internal(set) var scrollingOffset: Double = 0.0
 
     public init() {
     }
@@ -795,14 +794,19 @@ extension WebViewCoordinator: WebNavigationDelegate {
 @available(macOS 14.0, iOS 17.0, *)
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        //logger.log("scrollView: isDecelerating=\(scrollView.isDecelerating) isDragging=\(scrollView.isDragging) isTracking=\(scrollView.isTracking) isZoomBouncing=\(scrollView.isZoomBouncing) contentOffset=\(scrollView.contentOffset.debugDescription)")
         // ignore scrolling while the page is loading
         if self.state.isLoading { return }
+        // only change the state if we are actively dragging, not if intertial scrolling is in effect
+        if !scrollView.isTracking { return }
 
         defer { self.lastScrollOffset = scrollView.contentOffset }
         let offsetY = scrollView.contentOffset.y
         let isScrollingDown = ((offsetY + scrollView.visibleSize.height) >= scrollView.contentSize.height) || (offsetY > 0 && offsetY > self.lastScrollOffset.y)
-        self.state.scrollingDown = isScrollingDown
-        self.state.scrollingOffset = offsetY
+
+        if self.state.scrollingDown != isScrollingDown {
+            self.state.scrollingDown = isScrollingDown
+        }
     }
 
     public func scrollViewDidZoom(_ scrollView: UIScrollView) {
