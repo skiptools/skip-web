@@ -204,6 +204,8 @@ extension WebView : ViewRepresentable {
         let settings = webEngine.webView.settings
         settings.setJavaScriptEnabled(config.javaScriptEnabled)
         settings.setSafeBrowsingEnabled(false)
+        settings.setAllowContentAccess(true)
+        settings.setAllowFileAccess(true)
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
