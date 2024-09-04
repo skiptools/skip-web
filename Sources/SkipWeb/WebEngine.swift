@@ -378,6 +378,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
 public class WebEngineConfiguration : ObservableObject {
     @Published public var javaScriptEnabled: Bool
     @Published public var allowsBackForwardNavigationGestures: Bool
+	@Published public var allowsPullToRefresh: Bool
     @Published public var allowsInlineMediaPlayback: Bool
     @Published public var dataDetectorsEnabled: Bool
     @Published public var isScrollEnabled: Bool
@@ -392,6 +393,7 @@ public class WebEngineConfiguration : ObservableObject {
 
     public init(javaScriptEnabled: Bool = true,
                 allowsBackForwardNavigationGestures: Bool = true,
+				allowsPullToRefresh: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
                 dataDetectorsEnabled: Bool = true,
                 isScrollEnabled: Bool = true,
@@ -400,6 +402,7 @@ public class WebEngineConfiguration : ObservableObject {
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
+		self.allowsPullToRefresh = allowsPullToRefresh
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
         self.dataDetectorsEnabled = dataDetectorsEnabled
         self.isScrollEnabled = isScrollEnabled

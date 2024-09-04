@@ -358,9 +358,12 @@ extension WebView : ViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsLinkPreview = true
 
-        // add a pull-to-refresh control to the page
-        webView.scrollView.refreshControl = UIRefreshControl()
-        webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
+		if config.allowsPullToRefresh == true {
+			// add a pull-to-refresh control to the page
+
+			webView.scrollView.refreshControl = UIRefreshControl()
+			webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
+		}
 
         webView.publisher(for: \.title)
             .receive(on: DispatchQueue.main)
