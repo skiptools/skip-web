@@ -1,3 +1,11 @@
+## 0.5.1
+
+Released 2024-09-03
+
+  - Merge pull request #2 from jeffc-dev/main
+  - Added support for pull-to-refresh configuration option…
+  - Add settings.setAllowContentAccess and settings.setAllowFileAccess
+
 ## 0.5.0
 
 Released 2024-08-15
