@@ -4,7 +4,7 @@ SkipWeb provides an embedded WebView for [Skip](https://skip.tools) projects.
 On iOS it uses a [WKWebView](https://developer.apple.com/documentation/webkit/wkwebview)
 and on Android it uses an [android.webkit.WebView](https://developer.android.com/develop/ui/views/layout/webapps/webview).
 
-A simple example of 
+A simple example of using an embedded WebView with a static URL can be seen:
 
 ```swift
 import Foundation
@@ -24,7 +24,7 @@ struct EmbeddedWebView : View {
 
 The [`WebView`](https://github.com/skiptools/skip-web/blob/main/Sources/SkipWeb/WebView.swift) is backed by a
 [`WebEngine`](https://github.com/skiptools/skip-web/blob/main/Sources/SkipWeb/WebEngine.swift).
-It can be configured with a [`WebEngineConfiguration`] instance. For example:
+It can be configured with a [`WebEngineConfiguration`](https://github.com/skiptools/skip-web/blob/main/Sources/SkipWeb/WebEngine.swift) instance. For example:
 
 ```swift
 import Foundation
