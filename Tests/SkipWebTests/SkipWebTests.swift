@@ -9,7 +9,6 @@ import SkipWeb
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
-// SKIP INSERT: @org.junit.runner.RunWith(androidx.test.ext.junit.runners.AndroidJUnit4::class)
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class SkipWebTests: XCTestCase {
 
