@@ -384,6 +384,7 @@ public class WebEngineConfiguration : ObservableObject {
     @Published public var isScrollEnabled: Bool
     @Published public var pageZoom: CGFloat
     @Published public var isOpaque: Bool
+	@Published public var customUserAgent: String
     @Published public var userScripts: [WebViewUserScript]
 
     #if SKIP
@@ -399,6 +400,7 @@ public class WebEngineConfiguration : ObservableObject {
                 isScrollEnabled: Bool = true,
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
+				customUserAgent: String = "",
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
@@ -408,6 +410,7 @@ public class WebEngineConfiguration : ObservableObject {
         self.isScrollEnabled = isScrollEnabled
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
+		self.customUserAgent = customUserAgent
         self.userScripts = userScripts
     }
 

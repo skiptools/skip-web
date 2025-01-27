@@ -206,6 +206,9 @@ extension WebView : ViewRepresentable {
         settings.setSafeBrowsingEnabled(false)
         settings.setAllowContentAccess(true)
         settings.setAllowFileAccess(true)
+		if (config.customUserAgent != "" ) {
+			settings.setUserAgentString(config.customUserAgent)
+		}
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
@@ -272,7 +275,9 @@ extension WebView : ViewRepresentable {
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         preferences.preferredContentMode = .recommended
         // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
-
+		if (config.customUserAgent != "" ) {
+			webEngine.webView.customUserAgent = config.customUserAgent
+		}
         #endif
 
         return webEngine
