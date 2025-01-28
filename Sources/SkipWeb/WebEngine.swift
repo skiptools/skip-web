@@ -400,7 +400,7 @@ public class WebEngineConfiguration : ObservableObject {
                 isScrollEnabled: Bool = true,
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
-                customUserAgent: String,
+                customUserAgent: String? = nil,
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
