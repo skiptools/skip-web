@@ -378,13 +378,13 @@ public struct WebLoadError : Error, CustomStringConvertible {
 public class WebEngineConfiguration : ObservableObject {
     @Published public var javaScriptEnabled: Bool
     @Published public var allowsBackForwardNavigationGestures: Bool
-	@Published public var allowsPullToRefresh: Bool
+    @Published public var allowsPullToRefresh: Bool
     @Published public var allowsInlineMediaPlayback: Bool
     @Published public var dataDetectorsEnabled: Bool
     @Published public var isScrollEnabled: Bool
     @Published public var pageZoom: CGFloat
     @Published public var isOpaque: Bool
-	@Published public var customUserAgent: String
+    @Published public var customUserAgent: String?
     @Published public var userScripts: [WebViewUserScript]
 
     #if SKIP
@@ -394,23 +394,23 @@ public class WebEngineConfiguration : ObservableObject {
 
     public init(javaScriptEnabled: Bool = true,
                 allowsBackForwardNavigationGestures: Bool = true,
-				allowsPullToRefresh: Bool = true,
+                allowsPullToRefresh: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
                 dataDetectorsEnabled: Bool = true,
                 isScrollEnabled: Bool = true,
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
-				customUserAgent: String = "",
+                customUserAgent: String,
                 userScripts: [WebViewUserScript] = []) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
-		self.allowsPullToRefresh = allowsPullToRefresh
+        self.allowsPullToRefresh = allowsPullToRefresh
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
         self.dataDetectorsEnabled = dataDetectorsEnabled
         self.isScrollEnabled = isScrollEnabled
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
-		self.customUserAgent = customUserAgent
+        self.customUserAgent = customUserAgent
         self.userScripts = userScripts
     }
 
