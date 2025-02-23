@@ -8,7 +8,7 @@ build:
     - block: 'dependencies'
       export: false
       contents:
-        - 'implementation("androidx.webkit:webkit:1.11.0")'
+        - 'implementation("androidx.webkit:webkit:1.12.1")'
         - 'androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")'
         - 'androidTestImplementation("androidx.test.espresso:espresso-web:3.6.1")'
 
