@@ -427,12 +427,17 @@ extension WebView : ViewRepresentable {
         }
 
         context.coordinator.scriptCaller?.asyncCaller = { js, args, frame, world in
+            // work-around for iOS<18.4 crash: https://github.com/skiptools/skip-web/issues/8
+            return try await webView.evaluateJavaScript(js)
+
+            #if false
             let world = world ?? .defaultClient
             if let args = args {
                 return try await webView.callAsyncJavaScript(js, arguments: args, in: frame, contentWorld: world)
             } else {
                 return try await webView.callAsyncJavaScript(js, in: frame, contentWorld: world)
             }
+            #endif
         }
 
         // In case we retrieved a cached web view that is already warm but we don't know it.
