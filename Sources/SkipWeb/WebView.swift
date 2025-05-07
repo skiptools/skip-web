@@ -205,6 +205,9 @@ extension WebView : ViewRepresentable {
         settings.setSafeBrowsingEnabled(false)
         settings.setAllowContentAccess(true)
         settings.setAllowFileAccess(true)
+        if (config.customUserAgent != nil ) {
+            settings.setUserAgentString(config.customUserAgent)
+        }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
@@ -271,7 +274,9 @@ extension WebView : ViewRepresentable {
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         preferences.preferredContentMode = .recommended
         // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
-
+        if (config.customUserAgent != "" ) {
+            webEngine.webView.customUserAgent = config.customUserAgent
+        }
         #endif
 
         return webEngine
@@ -357,12 +362,12 @@ extension WebView : ViewRepresentable {
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsLinkPreview = true
 
-		if config.allowsPullToRefresh == true {
-			// add a pull-to-refresh control to the page
+        if config.allowsPullToRefresh == true {
+            // add a pull-to-refresh control to the page
 
-			webView.scrollView.refreshControl = UIRefreshControl()
-			webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
-		}
+            webView.scrollView.refreshControl = UIRefreshControl()
+            webView.scrollView.refreshControl?.addTarget(context.coordinator, action: #selector(Coordinator.handleRefreshControl), for: .valueChanged)
+        }
 
         webView.publisher(for: \.title)
             .receive(on: DispatchQueue.main)
