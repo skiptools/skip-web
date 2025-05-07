@@ -385,6 +385,7 @@ public class WebEngineConfiguration : ObservableObject {
     @Published public var isOpaque: Bool
     @Published public var customUserAgent: String?
     @Published public var userScripts: [WebViewUserScript]
+    @Published public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -400,7 +401,8 @@ public class WebEngineConfiguration : ObservableObject {
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
                 customUserAgent: String? = nil,
-                userScripts: [WebViewUserScript] = []) {
+                userScripts: [WebViewUserScript] = [],
+                messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsPullToRefresh = allowsPullToRefresh
@@ -411,6 +413,7 @@ public class WebEngineConfiguration : ObservableObject {
         self.isOpaque = isOpaque
         self.customUserAgent = customUserAgent
         self.userScripts = userScripts
+        self.messageHandlers = messageHandlers
     }
 
     #if !SKIP

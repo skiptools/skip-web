@@ -44,13 +44,9 @@ public struct WebView : View {
     let blockedHosts: Set<String>? = []
     let htmlInState: Bool = false
     let schemeHandlers: [(URLSchemeHandler, String)] = []
-    var messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
     let persistentWebViewID: String? = nil
-
-    private var messageHandlerNamesToRegister = Set<String>()
-    private var userContentController = UserContentController()
 
     private static var engineCache: [String: WebEngine] = [:]
     private static let processPool = ProcessPool()
@@ -300,7 +296,7 @@ extension WebView : ViewRepresentable {
         }
     }
     #else
-    @MainActor private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator, messageHandlerNamesToRegister: Set<String>) -> WebEngine {
+    @MainActor private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator) -> WebEngine {
         var web: WebEngine?
         if let id = id {
             web = Self.engineCache[id] // it is UI thread so safe to access static
@@ -327,23 +323,16 @@ extension WebView : ViewRepresentable {
             fatalError("couldn't instantiate WKWebView for WebView.")
         }
 
-        for messageHandlerName in messageHandlerNamesToRegister {
-            if coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-            web.webView.configuration.userContentController.add(coordinator, contentWorld: .page, name: messageHandlerName)
-            coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-
         return web
     }
 
     @MainActor private func create(from context: Context) -> WebEngine {
-        let webEngine = makeWebEngine(id: persistentWebViewID, config: config, coordinator: context.coordinator, messageHandlerNamesToRegister: messageHandlerNamesToRegister)
+        let webEngine = makeWebEngine(id: persistentWebViewID, config: config, coordinator: context.coordinator)
         context.coordinator.navigator.webEngine = webEngine
 
         let webView = webEngine.webView
         refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
 
-        webView.configuration.userContentController = userContentController
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
         webView.scrollView.delegate = context.coordinator
@@ -471,7 +460,7 @@ extension WebView {
 
     @MainActor
     func refreshMessageHandlers(userContentController: UserContentController, context: Context) {
-        for messageHandlerName in Self.systemMessageHandlers + messageHandlerNamesToRegister {
+        for messageHandlerName in Self.systemMessageHandlers + context.coordinator.config.messageHandlers.keys {
             if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
 
             #if !SKIP
@@ -481,8 +470,9 @@ extension WebView {
             #endif
             context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + messageHandlerNamesToRegister) {
+        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + context.coordinator.config.messageHandlers.keys) {
             userContentController.removeScriptMessageHandler(forName: missing)
+            context.coordinator.registeredMessageHandlerNames.remove(missing)
         }
     }
 
@@ -542,7 +532,7 @@ extension WebView {
     }
 
     var messageHandlerNames: [String] {
-        webView.messageHandlers.keys.map { $0 }
+        config.messageHandlers.keys.map { $0 }
     }
 
     init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebEngineConfiguration) {
@@ -596,7 +586,7 @@ extension WebViewCoordinator: ScriptMessageHandler {
             return
         }*/
 
-        guard let messageHandler = webView.messageHandlers[message.name] else { return }
+        guard let messageHandler = config.messageHandlers[message.name] else { return }
         let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
         Task {
             await messageHandler(msg)
