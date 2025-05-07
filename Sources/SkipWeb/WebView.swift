@@ -183,6 +183,25 @@ typealias ViewRepresentable = NSViewRepresentable
 #error("Unsupported platform")
 #endif
 
+#if SKIP
+
+public struct MessageHandlerRouter {
+    let webEngine: WebEngine
+    // SKIP INSERT: @android.webkit.JavascriptInterface
+    public func postMessage(_ name: String, body: String) {
+        guard let messageHandler = webEngine.configuration.messageHandlers[name] else {
+            logger.error("no messageHandler for \(name)")
+            return
+        }
+        let frameInfo = FrameInfo(isMainFrame: true, request: URLRequest(url: URL(string: "about:blank")!), securityOrigin: SecurityOrigin(), webView: webEngine.webView)
+        let message = WebViewMessage(frameInfo: frameInfo, uuid: UUID(), name: name, body: body)
+        Task {
+            await messageHandler(message)
+        }
+    }
+}
+#endif
+
 @available(macOS 14.0, iOS 17.0, *)
 extension WebView : ViewRepresentable {
     public typealias Coordinator = WebViewCoordinator
@@ -205,6 +224,7 @@ extension WebView : ViewRepresentable {
             settings.setUserAgentString(config.customUserAgent)
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
+        webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
