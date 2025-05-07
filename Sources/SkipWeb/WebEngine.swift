@@ -221,7 +221,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 
     /// Notify the host application that a page has started loading.
-    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap) {
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
         super.onPageStarted(view, url, favicon)
     }
