@@ -223,6 +223,19 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application that a page has started loading.
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
+        // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
+        // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
+        // We're using an empty target; when JS accesses any property,
+        // we'll return a JS object with a `postMessage` member function, which will call
+        // skipWebAndroidMessageHandler.postMessage, passing the messageHandlerName and body as strings.
+        view.evaluateJavascript("""
+            if (!window.webkit) window.webkit = {};
+            webkit.messageHandlers = new Proxy({}, {
+                get: (target, messageHandlerName, receiver) => ({
+                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), String(body))
+                })
+            });
+        """) { _ in logger.debug("Added webkit.messageHandlers") }
         super.onPageStarted(view, url, favicon)
     }
 
