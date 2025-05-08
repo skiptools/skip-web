@@ -22,10 +22,13 @@ import kotlinx.coroutines.launch
 /// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
 /// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-@MainActor public class WebEngine : ObservableObject {
+@MainActor public class WebEngine : NSObject, ObservableObject {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
     #if !SKIP
+    public override var description: String {
+        "WebEngine: \(webView)"
+    }
     private var observers: [NSKeyValueObservation] = []
     #endif
 
@@ -87,6 +90,7 @@ import kotlinx.coroutines.launch
         let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
         webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
         #else
+        refreshMessageHandlers()
         //try await awaitPageLoaded {
         webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
         //}
@@ -144,7 +148,7 @@ import kotlinx.coroutines.launch
         var loadDelegate: PageLoadDelegate? = nil
 
         let _: Void? = try await withCheckedThrowingContinuation { continuation in
-            loadDelegate = PageLoadDelegate { result in
+            loadDelegate = PageLoadDelegate(config: configuration) { result in
                 continuation.resume(with: result)
             }
 
@@ -153,8 +157,51 @@ import kotlinx.coroutines.launch
             block()
         }
     }
+    
+    #if !SKIP
+    var registeredMessageHandlerNames = Set<String>()
+    
+    fileprivate static var systemMessageHandlers: [String] {
+        [
+            // TODO these don't run https://github.com/skiptools/skip-web/issues/14
+            //"swiftUIWebViewLocationChanged",
+            //"swiftUIWebViewImageUpdated",
+        ]
+    }
+    
+    @MainActor
+    public func refreshMessageHandlers() {
+        let userContentController = webView.configuration.userContentController
+        for messageHandlerName in Self.systemMessageHandlers + configuration.messageHandlers.keys {
+            if registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+
+            // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
+            userContentController.add(self, contentWorld: .page, name: messageHandlerName)
+            registeredMessageHandlerNames.insert(messageHandlerName)
+        }
+        for missing in registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + configuration.messageHandlers.keys) {
+            userContentController.removeScriptMessageHandler(forName: missing)
+            registeredMessageHandlerNames.remove(missing)
+        }
+    }
+    
+    
+    #endif
 }
 
+
+#if !SKIP
+extension WebEngine: ScriptMessageHandler {
+    public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
+        guard let messageHandler = configuration.messageHandlers[message.name] else { return }
+        let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+        Task {
+            await messageHandler(msg)
+        }
+    }
+}
+#endif
 
 extension WebEngine {
     /// The engine delegate that handles client navigation events like the page being loaded or an error occuring
@@ -178,16 +225,14 @@ extension WebEngine {
     }
 }
 
-extension WebEngine : CustomStringConvertible {
-    public var description: String {
-        "WebEngine: \(webView)"
-    }
-}
 
 #if SKIP
 public class WebEngineDelegate : android.webkit.WebViewClient {
-    override init() {
+    let config: WebEngineConfiguration
+    
+    override init(config: WebEngineConfiguration) {
         super.init()
+        self.config = config
     }
 
     /// Notify the host application to update its visited links database.
@@ -221,8 +266,23 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 
     /// Notify the host application that a page has started loading.
-    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap) {
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
+        if (!config.messageHandlers.isEmpty) {
+            // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
+            // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
+            // We're using an empty target; when JS accesses any property,
+            // we'll return a JS object with a `postMessage` member function, which will call
+            // skipWebAndroidMessageHandler.postMessage, passing the messageHandlerName and body as strings.
+            view.evaluateJavascript("""
+            if (!window.webkit) window.webkit = {};
+            webkit.messageHandlers = new Proxy({}, {
+                get: (target, messageHandlerName, receiver) => ({
+                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), String(body))
+                })
+            });
+        """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
         super.onPageStarted(view, url, favicon)
     }
 
@@ -314,7 +374,10 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
     var callbackInvoked = false
 
-    init(callback: @escaping (Result<Void, Error>) -> Void) {
+    init(config: WebEngineConfiguration, callback: @escaping (Result<Void, Error>) -> Void) {
+        #if SKIP
+        super.init(config: config)
+        #endif
         self.callback = callback
     }
 
@@ -385,6 +448,7 @@ public class WebEngineConfiguration : ObservableObject {
     @Published public var isOpaque: Bool
     @Published public var customUserAgent: String?
     @Published public var userScripts: [WebViewUserScript]
+    @Published public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -400,7 +464,8 @@ public class WebEngineConfiguration : ObservableObject {
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
                 customUserAgent: String? = nil,
-                userScripts: [WebViewUserScript] = []) {
+                userScripts: [WebViewUserScript] = [],
+                messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsPullToRefresh = allowsPullToRefresh
@@ -411,6 +476,7 @@ public class WebEngineConfiguration : ObservableObject {
         self.isOpaque = isOpaque
         self.customUserAgent = customUserAgent
         self.userScripts = userScripts
+        self.messageHandlers = messageHandlers
     }
 
     #if !SKIP
@@ -588,4 +654,91 @@ public class ContentWorld {
     public var name: String?
 }
 #endif
+
+#if !SKIP
+public typealias UserContentController = WKUserContentController
+#else
+public class UserContentController { }
+#endif
+
+
+#if !SKIP
+public typealias ProcessPool = WKProcessPool
+#else
+public class ProcessPool { }
+#endif
+
+
+#if !SKIP
+public typealias NavigationActionPolicy = WKNavigationActionPolicy
+#else
+public class NavigationActionPolicy { }
+#endif
+
+
+#if !SKIP
+public typealias NavigationResponse = WKNavigationResponse
+#else
+public class NavigationResponse { }
+#endif
+
+
+#if !SKIP
+public typealias NavigationResponsePolicy = WKNavigationResponsePolicy
+#else
+public class NavigationResponsePolicy { }
+#endif
+
+
+#if !SKIP
+public typealias WebpagePreferences = WKWebpagePreferences
+#else
+public class WebpagePreferences {
+}
+#endif
+
+#if !SKIP
+public typealias URLSchemeHandler = WKURLSchemeHandler
+#else
+public protocol URLSchemeHandler {
+}
+#endif
+
+#if !SKIP
+public typealias ScriptMessage = WKScriptMessage
+#else
+public class ScriptMessage {
+
+}
+#endif
+
+#if !SKIP
+public typealias ScriptMessageHandler = WKScriptMessageHandler
+#else
+public protocol ScriptMessageHandler {
+
+}
+#endif
+
+#if !SKIP
+public typealias ContentRuleList = WKContentRuleList
+#else
+public class ContentRuleList {
+    public var identifier: String
+
+    init(identifier: String) {
+        self.identifier = identifier
+    }
+}
+#endif
+
+
+#if !SKIP
+public typealias ContentRuleListStore = WKContentRuleListStore
+#else
+public class ContentRuleListStore {
+}
+
+#endif
+
 #endif
