@@ -628,7 +628,7 @@ public struct WebViewUserScript: Equatable, Hashable {
         && lhs.allowedDomains == rhs.allowedDomains
     }
 
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .defaultClient, allowedDomains: Set<String> = Set()) {
+    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
         self.source = source
         self.webKitUserScript = UserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
         self.allowedDomains = allowedDomains
