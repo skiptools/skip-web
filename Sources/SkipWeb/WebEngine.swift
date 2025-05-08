@@ -192,7 +192,6 @@ import kotlinx.coroutines.launch
 
 
 #if !SKIP
-@available(macOS 14.0, iOS 17.0, *)
 extension WebEngine: ScriptMessageHandler {
     public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
         guard let messageHandler = configuration.messageHandlers[message.name] else { return }
