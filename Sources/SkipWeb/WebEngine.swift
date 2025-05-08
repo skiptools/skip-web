@@ -275,6 +275,14 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
         super.onPageFinished(view, url)
+        for userScript in config.userScripts {
+            if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
+        }
     }
 
     /// Notify the host application that a page has started loading.
@@ -294,6 +302,14 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 })
             });
         """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
+        for userScript in config.userScripts {
+            if userScript.webKitUserScript.injectionTime == .atDocumentStart {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
         }
         super.onPageStarted(view, url, favicon)
     }
