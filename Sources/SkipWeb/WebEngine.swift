@@ -148,7 +148,7 @@ import kotlinx.coroutines.launch
         var loadDelegate: PageLoadDelegate? = nil
 
         let _: Void? = try await withCheckedThrowingContinuation { continuation in
-            loadDelegate = PageLoadDelegate { result in
+            loadDelegate = PageLoadDelegate(config: configuration) { result in
                 continuation.resume(with: result)
             }
 
@@ -229,8 +229,11 @@ extension WebEngine {
 
 #if SKIP
 public class WebEngineDelegate : android.webkit.WebViewClient {
-    override init() {
+    let config: WebEngineConfiguration
+    
+    override init(config: WebEngineConfiguration) {
         super.init()
+        self.config = config
     }
 
     /// Notify the host application to update its visited links database.
@@ -266,12 +269,13 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application that a page has started loading.
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
-        // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
-        // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
-        // We're using an empty target; when JS accesses any property,
-        // we'll return a JS object with a `postMessage` member function, which will call
-        // skipWebAndroidMessageHandler.postMessage, passing the messageHandlerName and body as strings.
-        view.evaluateJavascript("""
+        if (!config.messageHandlers.isEmpty) {
+            // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
+            // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
+            // We're using an empty target; when JS accesses any property,
+            // we'll return a JS object with a `postMessage` member function, which will call
+            // skipWebAndroidMessageHandler.postMessage, passing the messageHandlerName and body as strings.
+            view.evaluateJavascript("""
             if (!window.webkit) window.webkit = {};
             webkit.messageHandlers = new Proxy({}, {
                 get: (target, messageHandlerName, receiver) => ({
@@ -279,6 +283,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 })
             });
         """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
         super.onPageStarted(view, url, favicon)
     }
 
@@ -370,7 +375,10 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
     var callbackInvoked = false
 
-    init(callback: @escaping (Result<Void, Error>) -> Void) {
+    init(config: WebEngineConfiguration, callback: @escaping (Result<Void, Error>) -> Void) {
+        #if SKIP
+        super.init(config: config)
+        #endif
         self.callback = callback
     }
 
