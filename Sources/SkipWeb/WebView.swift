@@ -37,7 +37,6 @@ public struct WebView : View {
     let navigator: WebViewNavigator
 
     @Binding var state: WebViewState
-    @State fileprivate var needsHistoryRefresh: Bool
     @State private var lastInstalledScripts: [WebViewUserScript]
 
     var scriptCaller: WebViewScriptCaller? = nil
@@ -64,7 +63,6 @@ public struct WebView : View {
             navigator.initialHTML = initialHTML
         }
         self._state = state
-        self.needsHistoryRefresh = false
         self.lastInstalledScripts = []
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
@@ -291,6 +289,9 @@ extension WebView : ViewRepresentable {
         preferences.allowsContentJavaScript = config.javaScriptEnabled
         preferences.preferredContentMode = .recommended
         // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
+
+        webEngine.refreshMessageHandlers()
+        
         if (config.customUserAgent != "" ) {
             webEngine.webView.customUserAgent = config.customUserAgent
         }
@@ -352,7 +353,6 @@ extension WebView : ViewRepresentable {
         context.coordinator.navigator.webEngine = webEngine
 
         let webView = webEngine.webView
-        refreshMessageHandlers(userContentController: webView.configuration.userContentController, context: context)
 
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
@@ -480,24 +480,6 @@ extension WebView : ViewRepresentable {
 extension WebView {
 
     @MainActor
-    func refreshMessageHandlers(userContentController: UserContentController, context: Context) {
-        for messageHandlerName in Self.systemMessageHandlers + context.coordinator.config.messageHandlers.keys {
-            if context.coordinator.registeredMessageHandlerNames.contains(messageHandlerName) { continue }
-
-            #if !SKIP
-            // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
-            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
-            userContentController.add(context.coordinator, contentWorld: .page, name: messageHandlerName)
-            #endif
-            context.coordinator.registeredMessageHandlerNames.insert(messageHandlerName)
-        }
-        for missing in context.coordinator.registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + context.coordinator.config.messageHandlers.keys) {
-            userContentController.removeScriptMessageHandler(forName: missing)
-            context.coordinator.registeredMessageHandlerNames.remove(missing)
-        }
-    }
-
-    @MainActor
     func updateUserScripts(userContentController: UserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebEngineConfiguration) {
         var scripts = config.userScripts
         if let domain = domain?.domainURL.host {
@@ -521,12 +503,6 @@ extension WebView {
         ImageChangeUserScript().userScript,
     ]
 
-    fileprivate static var systemMessageHandlers: [String] {
-        [
-            "swiftUIWebViewLocationChanged",
-            "swiftUIWebViewImageUpdated",
-        ]
-    }
 }
 #endif
 
@@ -538,8 +514,7 @@ extension WebView {
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
     var config: WebEngineConfiguration
-    var registeredMessageHandlerNames = Set<String>()
-
+    
     var compiledContentRules = [String: ContentRuleList]()
 
     #if !SKIP
@@ -576,44 +551,7 @@ extension WebView {
         navigator.load(url: url)
         return nil // TOOD: return new PlatformWebView
     }
-}
-
-#if !SKIP
-@available(macOS 14.0, iOS 17.0, *)
-extension WebViewCoordinator: ScriptMessageHandler {
-    public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
-        if message.name == "swiftUIWebViewLocationChanged" {
-            webView.needsHistoryRefresh = true
-            return
-        } else if message.name == "swiftUIWebViewImageUpdated" {
-            guard let body = message.body as? [String: Any] else { return }
-            if let imageURLRaw = body["imageURL"] as? String, let urlRaw = body["url"] as? String, let url = URL(string: urlRaw), let imageURL = URL(string: imageURLRaw), url == webView.state.pageURL {
-                let newState = webView.state
-                newState.pageImageURL = imageURL
-                let targetState = newState
-                Task { @MainActor in
-                // DispatchQueue.main.asyncAfter(deadline: .now() + 0.002) { [webView] in
-                    webView.state = targetState
-                }
-            }
-        }
-        /* else if message.name == "swiftUIWebViewIsWarm" {
-            if !webView.isWarm, let onWarm = webView.onWarm {
-                Task { @MainActor in
-                    webView.isWarm = true
-                    await onWarm()
-                }
-            }
-            return
-        }*/
-
-        guard let messageHandler = config.messageHandlers[message.name] else { return }
-        let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
-        Task {
-            await messageHandler(msg)
-        }
-    }
-
+    
     #if canImport(UIKit)
     @objc func handleRefreshControl(sender: UIRefreshControl) {
         sender.endRefreshing()
@@ -624,7 +562,6 @@ extension WebViewCoordinator: ScriptMessageHandler {
     }
     #endif
 }
-#endif
 
 
 #if !SKIP

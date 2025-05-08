@@ -84,7 +84,13 @@ final class SkipWebTests: XCTestCase {
 
         //assertMainThread()
 
-        let config = WebEngineConfiguration()
+        var handledMessage: String? = nil
+        
+        let config = WebEngineConfiguration(messageHandlers: [
+            "test": { message in
+                handledMessage = (message.body as! String)
+            }
+        ])
         #if SKIP
         let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
         config.context = ctx
@@ -101,6 +107,8 @@ final class SkipWebTests: XCTestCase {
                 return platformWebView
             })
         }
+        #else
+        engine.refreshMessageHandlers()
         #endif
 
         func html(title: String, body: String = "") -> String {
@@ -150,6 +158,10 @@ final class SkipWebTests: XCTestCase {
         logger.log("loading javascript")
         let three = try await engine.evaluate(js: "1+2")
         XCTAssertEqual("3", three)
+        
+        logger.log("executing message handler")
+        _ = try await engine.evaluate(js: "void(webkit.messageHandlers.test.postMessage('hello'))")
+        XCTAssertEqual("hello", handledMessage)
 
         let agent = try await engine.evaluate(js: "navigator.userAgent") ?? ""
         // e.g.: Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148

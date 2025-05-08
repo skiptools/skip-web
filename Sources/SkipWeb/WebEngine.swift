@@ -22,10 +22,13 @@ import kotlinx.coroutines.launch
 /// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
 /// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-@MainActor public class WebEngine : ObservableObject {
+@MainActor public class WebEngine : NSObject, ObservableObject {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
     #if !SKIP
+    public override var description: String {
+        "WebEngine: \(webView)"
+    }
     private var observers: [NSKeyValueObservation] = []
     #endif
 
@@ -87,6 +90,7 @@ import kotlinx.coroutines.launch
         let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
         webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
         #else
+        refreshMessageHandlers()
         //try await awaitPageLoaded {
         webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
         //}
@@ -153,8 +157,52 @@ import kotlinx.coroutines.launch
             block()
         }
     }
+    
+    #if !SKIP
+    var registeredMessageHandlerNames = Set<String>()
+    
+    fileprivate static var systemMessageHandlers: [String] {
+        [
+            // TODO these don't run https://github.com/skiptools/skip-web/issues/14
+            //"swiftUIWebViewLocationChanged",
+            //"swiftUIWebViewImageUpdated",
+        ]
+    }
+    
+    @MainActor
+    public func refreshMessageHandlers() {
+        let userContentController = webView.configuration.userContentController
+        for messageHandlerName in Self.systemMessageHandlers + configuration.messageHandlers.keys {
+            if registeredMessageHandlerNames.contains(messageHandlerName) { continue }
+
+            // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
+            userContentController.removeScriptMessageHandler(forName: messageHandlerName, contentWorld: .page)
+            userContentController.add(self, contentWorld: .page, name: messageHandlerName)
+            registeredMessageHandlerNames.insert(messageHandlerName)
+        }
+        for missing in registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + configuration.messageHandlers.keys) {
+            userContentController.removeScriptMessageHandler(forName: missing)
+            registeredMessageHandlerNames.remove(missing)
+        }
+    }
+    
+    
+    #endif
 }
 
+
+#if !SKIP
+@available(macOS 14.0, iOS 17.0, *)
+extension WebEngine: ScriptMessageHandler {
+    public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
+        guard let messageHandler = configuration.messageHandlers[message.name] else { return }
+        let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+        Task {
+            await messageHandler(msg)
+        }
+    }
+}
+#endif
 
 extension WebEngine {
     /// The engine delegate that handles client navigation events like the page being loaded or an error occuring
@@ -178,11 +226,6 @@ extension WebEngine {
     }
 }
 
-extension WebEngine : CustomStringConvertible {
-    public var description: String {
-        "WebEngine: \(webView)"
-    }
-}
 
 #if SKIP
 public class WebEngineDelegate : android.webkit.WebViewClient {
