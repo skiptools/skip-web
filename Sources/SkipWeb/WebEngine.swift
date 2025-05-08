@@ -186,6 +186,18 @@ import kotlinx.coroutines.launch
         }
     }
     
+    @MainActor
+    public func updateUserScripts() {
+        let userContentController = webView.configuration.userContentController
+        let allScripts = configuration.userScripts
+        if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
+            userContentController.removeAllUserScripts()
+            for script in allScripts {
+                userContentController.addUserScript(script.webKitUserScript)
+            }
+        }
+    }
+    
     
     #endif
 }

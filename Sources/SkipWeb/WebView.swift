@@ -37,7 +37,6 @@ public struct WebView : View {
     let navigator: WebViewNavigator
 
     @Binding var state: WebViewState
-    @State private var lastInstalledScripts: [WebViewUserScript]
 
     var scriptCaller: WebViewScriptCaller? = nil
     let blockedHosts: Set<String>? = []
@@ -63,7 +62,6 @@ public struct WebView : View {
             navigator.initialHTML = initialHTML
         }
         self._state = state
-        self.lastInstalledScripts = []
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
     }
@@ -291,6 +289,7 @@ extension WebView : ViewRepresentable {
         // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
 
         webEngine.refreshMessageHandlers()
+        webEngine.updateUserScripts()
         
         if (config.customUserAgent != "" ) {
             webEngine.webView.customUserAgent = config.customUserAgent
@@ -472,39 +471,6 @@ extension WebView : ViewRepresentable {
     #endif
     #endif
 }
-
-
-// TODO: translate script logic for Skip
-#if !SKIP
-@available(macOS 14.0, iOS 17.0, *)
-extension WebView {
-
-    @MainActor
-    func updateUserScripts(userContentController: UserContentController, coordinator: WebViewCoordinator, forDomain domain: URL?, config: WebEngineConfiguration) {
-        var scripts = config.userScripts
-        if let domain = domain?.domainURL.host {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty || $0.allowedDomains.contains(domain) }
-        } else {
-            scripts = scripts.filter { $0.allowedDomains.isEmpty }
-        }
-        let allScripts = Self.systemScripts + scripts
-//        guard allScripts.hashValue != coordinator.lastInstalledScriptsHash else { return }
-        if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
-            userContentController.removeAllUserScripts()
-            for script in allScripts {
-                userContentController.addUserScript(script.webKitUserScript)
-            }
-        }
-//        coordinator.lastInstalledScriptsHash = allScripts.hashValue
-    }
-
-    fileprivate static let systemScripts = [
-        LocationChangeUserScript().userScript,
-        ImageChangeUserScript().userScript,
-    ]
-
-}
-#endif
 
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -739,11 +705,6 @@ extension WebViewCoordinator: WebNavigationDelegate {
             self.webView.state = newState
         }
 
-        if navigationResponse.isForMainFrame,
-            let mainDocumentURL = navigationResponse.response.url {
-            self.webView.updateUserScripts(userContentController: webView.configuration.userContentController, coordinator: self, forDomain: mainDocumentURL, config: config)
-        }
-
         return .allow
     }
 
@@ -876,56 +837,6 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
 }
 
-
-fileprivate struct LocationChangeUserScript {
-    let userScript: WebViewUserScript
-
-    init() {
-        let contents = """
-(function() {
-    var pushState = history.pushState;
-    var replaceState = history.replaceState;
-    history.pushState = function () {
-        pushState.apply(history, arguments);
-        window.dispatchEvent(new Event('swiftUIWebViewLocationChanged'));
-    };
-    history.replaceState = function () {
-        replaceState.apply(history, arguments);
-        window.dispatchEvent(new Event('swiftUIWebViewLocationChanged'));
-    };
-    window.addEventListener('popstate', function () {
-        window.dispatchEvent(new Event('swiftUIWebViewLocationChanged'))
-    });
-})();
-window.addEventListener('swiftUIWebViewLocationChanged', function () {
-    if (window.webkit) {
-        window.webkit.messageHandlers.swiftUIWebViewLocationChanged.postMessage(window.location.href);
-    }
-});
-"""
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true)
-    }
-}
-
-fileprivate struct ImageChangeUserScript {
-    let userScript: WebViewUserScript
-    init() {
-        let contents = """
-var lastURL;
-new MutationObserver(function(mutations) {
-    let node = document.querySelector('head meta[property="og:image"]')
-    if (node && window.webkit) {
-        let url = node.getAttribute('content')
-        if (lastURL === url) { return }
-        window.webkit.messageHandlers.swiftUIWebViewImageUpdated.postMessage({
-            imageURL: url, url: window.location.href})
-        lastURL = url
-    }
-}).observe(document, {childList: true, subtree: true, attributes: true, attributeOldValue: false, attributeFilter: ['property', 'content']})
-"""
-        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, world: .defaultClient)
-    }
-}
 
 #endif
 #endif
