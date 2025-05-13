@@ -1,6 +1,6 @@
 # SkipWeb
 
-SkipWeb provides an embedded WebView for [Skip](https://skip.tools) projects.
+SkipWeb provides an embedded WebView for [Skip Lite](https://skip.tools) transpiled Swift.
 On iOS it uses a [WKWebView](https://developer.apple.com/documentation/webkit/wkwebview)
 and on Android it uses an [android.webkit.WebView](https://developer.android.com/develop/ui/views/layout/webapps/webview).
 
