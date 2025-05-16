@@ -163,9 +163,7 @@ import kotlinx.coroutines.launch
     
     fileprivate static var systemMessageHandlers: [String] {
         [
-            // TODO these don't run https://github.com/skiptools/skip-web/issues/14
-            //"swiftUIWebViewLocationChanged",
-            //"swiftUIWebViewImageUpdated",
+            "skipConsoleLog"
         ]
     }
     
@@ -189,7 +187,7 @@ import kotlinx.coroutines.launch
     @MainActor
     public func updateUserScripts() {
         let userContentController = webView.configuration.userContentController
-        let allScripts = configuration.userScripts
+        let allScripts = WebViewUserScript.systemScripts + configuration.userScripts
         if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
             userContentController.removeAllUserScripts()
             for script in allScripts {
@@ -206,6 +204,29 @@ import kotlinx.coroutines.launch
 #if !SKIP
 extension WebEngine: ScriptMessageHandler {
     public func userContentController(_ userContentController: UserContentController, didReceive message: ScriptMessage) {
+        if message.name == "skipConsoleLog" {
+            guard let body = message.body as? [String: String] else {
+                logger.error("JS Console (invalid skipConsoleLog message): \(String(describing: message.body))")
+                return
+            }
+            let level = body["level"] ?? "log"
+            let content = body["content"] ?? ""
+            switch level {
+            case "debug":
+                logger.debug("JS Console \(level): \(content)")
+            case "info":
+                logger.info("JS Console \(level): \(content)")
+            case "log":
+                logger.info("JS Console \(level): \(content)")
+            case "warn":
+                logger.warning("JS Console \(level): \(content)")
+            case "error":
+                logger.error("JS Console \(level): \(content)")
+            default:
+                logger.error("JS Console (unknown level \(level)): \(content)")
+            }
+            return
+        }
         guard let messageHandler = configuration.messageHandlers[message.name] else { return }
         let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
         Task {
@@ -666,7 +687,40 @@ public struct WebViewUserScript: Equatable, Hashable {
         hasher.combine(source)
         hasher.combine(allowedDomains)
     }
+    
+    #if SKIP
+    fileprivate static let systemScripts: [WebViewUserScript] = []
+    #else
+    fileprivate static let systemScripts = [
+        ConsoleLogUserScript().userScript
+    ]
+    #endif
 }
+
+#if !SKIP
+fileprivate struct ConsoleLogUserScript {
+    let userScript: WebViewUserScript
+    
+    init() {
+        let contents = """
+        (function() {
+        function log(level, args) {
+            var content = args.map(v => typeof v === "object" ? JSON.stringify(v) : String(v)).join(" ");
+            webkit.messageHandlers.skipConsoleLog.postMessage({level, content});
+        }
+        for (const method of ['log', 'warn', 'error', 'debug', 'info']) {
+            const original = console[method];
+            console[method] = function() {
+                log(method, [...arguments]);
+                original.apply(console, arguments);
+            }
+        }
+        })();
+        """
+        userScript = WebViewUserScript(source: contents, injectionTime: .atDocumentStart, forMainFrameOnly: true, world: .page)
+    }
+}
+#endif
 
 #if !SKIP
 public typealias ContentWorld = WKContentWorld
