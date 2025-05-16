@@ -186,6 +186,18 @@ import kotlinx.coroutines.launch
         }
     }
     
+    @MainActor
+    public func updateUserScripts() {
+        let userContentController = webView.configuration.userContentController
+        let allScripts = configuration.userScripts
+        if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
+            userContentController.removeAllUserScripts()
+            for script in allScripts {
+                userContentController.addUserScript(script.webKitUserScript)
+            }
+        }
+    }
+    
     
     #endif
 }
@@ -263,6 +275,14 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
         super.onPageFinished(view, url)
+        for userScript in config.userScripts {
+            if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
+        }
     }
 
     /// Notify the host application that a page has started loading.
@@ -282,6 +302,14 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 })
             });
         """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
+        for userScript in config.userScripts {
+            if userScript.webKitUserScript.injectionTime == .atDocumentStart {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
         }
         super.onPageStarted(view, url, favicon)
     }
@@ -628,7 +656,7 @@ public struct WebViewUserScript: Equatable, Hashable {
         && lhs.allowedDomains == rhs.allowedDomains
     }
 
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .defaultClient, allowedDomains: Set<String> = Set()) {
+    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
         self.source = source
         self.webKitUserScript = UserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
         self.allowedDomains = allowedDomains

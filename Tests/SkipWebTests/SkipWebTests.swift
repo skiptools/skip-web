@@ -86,11 +86,22 @@ final class SkipWebTests: XCTestCase {
 
         var handledMessage: String? = nil
         
-        let config = WebEngineConfiguration(messageHandlers: [
-            "test": { message in
-                handledMessage = (message.body as! String)
-            }
-        ])
+        let config = WebEngineConfiguration(
+            userScripts: [
+                WebViewUserScript(
+                    source: "webkit.messageHandlers.test.postMessage('hello')",
+                    injectionTime: .atDocumentEnd,
+                    forMainFrameOnly: true
+                )
+            ],
+            messageHandlers: [
+                "test": { message in
+                    handledMessage = (
+                        message.body as! String
+                    )
+                }
+            ]
+        )
         #if SKIP
         let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
         config.context = ctx
@@ -109,6 +120,7 @@ final class SkipWebTests: XCTestCase {
         }
         #else
         engine.refreshMessageHandlers()
+        engine.updateUserScripts()
         #endif
 
         func html(title: String, body: String = "") -> String {
@@ -169,6 +181,12 @@ final class SkipWebTests: XCTestCase {
             throw XCTSkip("message handler simulator test fails on iOS in CI")
         }
         #endif
+
+        logger.log("user script should have already posted a hello message")
+        XCTAssertEqual("hello", handledMessage)
+        logger.log("directly executing message handler")
+        _ = try await engine.evaluate(js: "void(webkit.messageHandlers.test.postMessage('world'))")
+        XCTAssertEqual("world", handledMessage)
 
         logger.log("executing message handler")
         _ = try await engine.evaluate(js: "void(webkit.messageHandlers.test.postMessage('hello'))")
