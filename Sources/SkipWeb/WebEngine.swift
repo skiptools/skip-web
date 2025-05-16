@@ -241,40 +241,41 @@ extension WebEngine {
 #if SKIP
 public class WebEngineDelegate : android.webkit.WebViewClient {
     let config: WebEngineConfiguration
+    let webViewClient: android.webkit.WebViewClient
     
-    override init(config: WebEngineConfiguration) {
+    override init(config: WebEngineConfiguration, webViewClient: android.webkit.WebViewClient = android.webkit.WebViewClient()) {
         super.init()
         self.config = config
+        self.webViewClient = webViewClient
     }
 
     /// Notify the host application to update its visited links database.
     override func doUpdateVisitedHistory(view: PlatformWebView, url: String, isReload: Bool) {
         logger.log("application")
-        super.doUpdateVisitedHistory(view, url, isReload)
+        webViewClient.doUpdateVisitedHistory(view, url, isReload)
     }
 
     /// As the host application if the browser should resend data as the requested page was a result of a POST.
     override func onFormResubmission(view: PlatformWebView, dontResend: android.os.Message, resend: android.os.Message) {
         logger.log("onFormResubmission")
-        super.onFormResubmission(view, dontResend, resend)
+        webViewClient.onFormResubmission(view, dontResend, resend)
     }
 
     /// Notify the host application that the WebView will load the resource specified by the given url.
     override func onLoadResource(view: PlatformWebView, url: String) {
         logger.log("onLoadResource: \(url)")
-        super.onLoadResource(view, url)
+        webViewClient.onLoadResource(view, url)
     }
 
     /// Notify the host application that WebView content left over from previous page navigations will no longer be drawn.
     override func onPageCommitVisible(view: PlatformWebView, url: String) {
         logger.log("onPageCommitVisible: \(url)")
-        super.onPageCommitVisible(view, url)
+        webViewClient.onPageCommitVisible(view, url)
     }
 
     /// Notify the host application that a page has finished loading.
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
-        super.onPageFinished(view, url)
         for userScript in config.userScripts {
             if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
                 let source = userScript.webKitUserScript.source
@@ -283,6 +284,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 }
             }
         }
+        webViewClient.onPageFinished(view, url)
     }
 
     /// Notify the host application that a page has started loading.
@@ -311,84 +313,84 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 }
             }
         }
-        super.onPageStarted(view, url, favicon)
+        webViewClient.onPageStarted(view, url, favicon)
     }
 
     /// Notify the host application to handle a SSL client certificate request.
     override func onReceivedClientCertRequest(view: PlatformWebView, request: android.webkit.ClientCertRequest) {
         logger.log("onReceivedClientCertRequest: \(request)")
-        super.onReceivedClientCertRequest(view, request)
+        webViewClient.onReceivedClientCertRequest(view, request)
     }
 
     /// Report web resource loading error to the host application.
     override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
         logger.log("onReceivedError: \(error)")
-        super.onReceivedError(view, request, error)
+        webViewClient.onReceivedError(view, request, error)
     }
 
     /// Notifies the host application that the WebView received an HTTP authentication request.
     override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
         logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
-        super.onReceivedHttpAuthRequest(view, handler, host, realm)
+        webViewClient.onReceivedHttpAuthRequest(view, handler, host, realm)
     }
 
     /// Notify the host application that an HTTP error has been received from the server while loading a resource.
     override func onReceivedHttpError(view: PlatformWebView, request: android.webkit.WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
         logger.log("onReceivedHttpError: \(request) \(errorResponse)")
-        super.onReceivedHttpError(view, request, errorResponse)
+        webViewClient.onReceivedHttpError(view, request, errorResponse)
     }
 
     /// Notify the host application that a request to automatically log in the user has been processed.
 //    override func onReceivedLoginRequest(view: PlatformWebView, realm: String, account: String, args: String) {
-//        super.onReceivedLoginRequest(view, realm, account, args)
+//        webViewClient.onReceivedLoginRequest(view, realm, account, args)
 //    }
 
     /// Notifies the host application that an SSL error occurred while loading a resource.
     override func onReceivedSslError(view: PlatformWebView, handler: android.webkit.SslErrorHandler, error: android.net.http.SslError) {
         logger.log("onReceivedSslError: \(error)")
-        super.onReceivedSslError(view, handler, error)
+        webViewClient.onReceivedSslError(view, handler, error)
     }
 
     /// Notify host application that the given WebView's render process has exited.
     override func onRenderProcessGone(view: PlatformWebView, detail: android.webkit.RenderProcessGoneDetail) -> Bool {
         logger.log("onRenderProcessGone: \(detail)")
-        return super.onRenderProcessGone(view, detail)
+        return webViewClient.onRenderProcessGone(view, detail)
     }
 
     /// Notify the host application that a loading URL has been flagged by Safe Browsing.
     override func onSafeBrowsingHit(view: PlatformWebView, request: android.webkit.WebResourceRequest, threatType: Int, callback: android.webkit.SafeBrowsingResponse) {
         logger.log("onSafeBrowsingHit: \(request)")
-        super.onSafeBrowsingHit(view, request, threatType, callback)
+        webViewClient.onSafeBrowsingHit(view, request, threatType, callback)
     }
 
     /// Notify the host application that the scale applied to the WebView has changed.
     override func onScaleChanged(view: PlatformWebView, oldScale: Float, newScale: Float) {
         logger.log("onScaleChanged: \(oldScale) \(newScale)")
-        super.onScaleChanged(view, oldScale, newScale)
+        webViewClient.onScaleChanged(view, oldScale, newScale)
     }
 
     /// Notify the host application that a key was not handled by the WebView.
     override func onUnhandledKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) {
         logger.log("onUnhandledKeyEvent: \(event)")
-        super.onUnhandledKeyEvent(view, event)
+        webViewClient.onUnhandledKeyEvent(view, event)
     }
 
     /// Notify the host application of a resource request and allow the application to return the data.
     override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
         logger.log("shouldInterceptRequest: \(request.url)")
-        return super.shouldInterceptRequest(view, request)
+        return webViewClient.shouldInterceptRequest(view, request)
     }
 
     /// Give the host application a chance to handle the key event synchronously.
     override func shouldOverrideKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) -> Bool {
         logger.log("shouldOverrideKeyEvent: \(event)")
-        return super.shouldOverrideKeyEvent(view, event)
+        return webViewClient.shouldOverrideKeyEvent(view, event)
     }
 
     /// Give the host application a chance to take control when a URL is about to be loaded in the current WebView.
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
         logger.log("shouldOverrideUrlLoading: \(request)")
-        return super.shouldOverrideUrlLoading(view, request)
+        return webViewClient.shouldOverrideUrlLoading(view, request)
     }
 }
 #else

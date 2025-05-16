@@ -196,6 +196,22 @@ public struct MessageHandlerRouter {
         }
     }
 }
+
+struct WebViewClient : android.webkit.WebViewClient {
+    let webView: WebView
+    override func onPageFinished(view: PlatformWebView, url: String) {
+        if let onNavigationFinished = webView.onNavigationFinished {
+            onNavigationFinished()
+        }
+    }
+    
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        if let onNavigationCommitted = webView.onNavigationCommitted {
+            onNavigationCommitted()
+        }
+    }
+}
+
 #endif
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -221,7 +237,7 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
-        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration)
+        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(webView: self))
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
