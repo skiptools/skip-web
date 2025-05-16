@@ -39,12 +39,12 @@ public struct WebView : View {
     @Binding var state: WebViewState
 
     var scriptCaller: WebViewScriptCaller? = nil
-    let blockedHosts: Set<String>? = []
     let htmlInState: Bool = false
     let schemeHandlers: [(URLSchemeHandler, String)] = []
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
     let onNavigationFailed: (() -> Void)?
+    let shouldOverrideUrlLoading: ((_ url: URL) -> Bool)?
     let persistentWebViewID: String? = nil
 
     private static var engineCache: [String: WebEngine] = [:]
@@ -53,7 +53,17 @@ public struct WebView : View {
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
 
-    public init(configuration: WebEngineConfiguration = WebEngineConfiguration(), navigator: WebViewNavigator = WebViewNavigator(), url initialURL: URL? = nil, html initialHTML: String? = nil, state: Binding<WebViewState> = .constant(WebViewState()), onNavigationCommitted: (() -> Void)? = nil, onNavigationFinished: (() -> Void)? = nil, onNavigationFailed: (() -> Void)? = nil) {
+    public init(
+        configuration: WebEngineConfiguration = WebEngineConfiguration(),
+        navigator: WebViewNavigator = WebViewNavigator(),
+        url initialURL: URL? = nil,
+        html initialHTML: String? = nil,
+        state: Binding<WebViewState> = .constant(WebViewState()),
+        onNavigationCommitted: (() -> Void)? = nil,
+        onNavigationFinished: (() -> Void)? = nil,
+        onNavigationFailed: (() -> Void)? = nil,
+        shouldOverrideUrlLoading: ((_ url: URL) -> Bool)? = nil
+    ) {
         self.config = configuration
         self.navigator = navigator
         if let initialURL = initialURL {
@@ -66,6 +76,7 @@ public struct WebView : View {
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
+        self.shouldOverrideUrlLoading = shouldOverrideUrlLoading
     }
 }
 
@@ -222,6 +233,17 @@ struct WebViewClient : android.webkit.WebViewClient {
         if let onNavigationFailed = webView.onNavigationFailed {
             onNavigationFailed()
         }
+    }
+    
+    override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
+        guard let url = URL(string: request.url.toString()) else {
+            return false
+        }
+        let result = webView.shouldOverrideUrlLoading?(url) ?? false
+        if result {
+            logger.log("Override URL loading for \(url)")
+        }
+        return result
     }
 }
 
@@ -613,6 +635,8 @@ extension WebViewCoordinator: WebUIDelegate {
 extension WebViewCoordinator: WebNavigationDelegate {
     @MainActor
     public func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
+        logger.log("webView \(webView) didFinish navigation \(webView.url?.absoluteString ?? "nil")")
+        
         let state = self.webView.state
         state.isLoading = false
         state.pageURL = webView.url
@@ -671,6 +695,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error) {
+        logger.log("webView(\(webView)) didFailProvisionalNavigation: \(navigation), withError: \(error)")
         scriptCaller?.removeAllMultiTargetFrames()
         self.webView.state.isLoading = false
         self.webView.state.isProvisionallyNavigating = false
@@ -687,6 +712,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: Error) {
+        logger.log("webView(\(webView)) didFail navigation: \(navigation), withError: \(error)")
         scriptCaller?.removeAllMultiTargetFrames()
         self.webView.state.isLoading = false
         self.webView.state.isProvisionallyNavigating = false
@@ -715,12 +741,15 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
-        if let host = navigationAction.request.url?.host, let blockedHosts = self.webView.blockedHosts {
-            if blockedHosts.contains(where: { host.contains($0) }) {
-                self.webView.state.isProvisionallyNavigating = false
-                self.webView.state.isLoading = false
-                return (.cancel, preferences)
-            }
+        guard let url = navigationAction.request.url else {
+            return (.allow, preferences)
+        }
+        
+        if (self.webView.shouldOverrideUrlLoading?(url) ?? false) {
+            logger.log("Override URL loading for \(url)")
+            self.webView.state.isProvisionallyNavigating = false
+            self.webView.state.isLoading = false
+            return (.cancel, preferences)
         }
 
         return (.allow, preferences)

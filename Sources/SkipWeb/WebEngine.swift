@@ -410,7 +410,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
 
     /// Give the host application a chance to take control when a URL is about to be loaded in the current WebView.
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
-        logger.log("shouldOverrideUrlLoading: \(request)")
+        logger.log("shouldOverrideUrlLoading: \(request.url)")
         return webViewClient.shouldOverrideUrlLoading(view, request)
     }
 }
