@@ -258,8 +258,6 @@ extension WebView : ViewRepresentable {
     }
 
     @MainActor private func setupWebView(_ webEngine: WebEngine) -> WebEngine {
-        navigator.webEngine = webEngine
-
         // configure JavaScript
         #if SKIP
         let settings = webEngine.webView.settings
@@ -346,6 +344,8 @@ extension WebView : ViewRepresentable {
             webEngine.webView.customUserAgent = config.customUserAgent
         }
         #endif
+
+        navigator.webEngine = webEngine
 
         return webEngine
     }
