@@ -164,6 +164,11 @@ public class WebViewNavigator {
         logger.info("goForward webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.goForward()
     }
+    
+    @MainActor public func evaluateJavaScript(_ js: String) async throws -> String? {
+        logger.info("evaluateJavaScript webView: \(self.webEngine?.description ?? "NONE")")
+        return try await webEngine?.evaluate(js: js)
+    }
 }
 
 
