@@ -44,6 +44,7 @@ public struct WebView : View {
     let schemeHandlers: [(URLSchemeHandler, String)] = []
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
+    let onNavigationFailed: (() -> Void)?
     let persistentWebViewID: String? = nil
 
     private static var engineCache: [String: WebEngine] = [:]
@@ -52,7 +53,7 @@ public struct WebView : View {
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
 
-    public init(configuration: WebEngineConfiguration = WebEngineConfiguration(), navigator: WebViewNavigator = WebViewNavigator(), url initialURL: URL? = nil, html initialHTML: String? = nil, state: Binding<WebViewState> = .constant(WebViewState()), onNavigationCommitted: (() -> Void)? = nil, onNavigationFinished: (() -> Void)? = nil) {
+    public init(configuration: WebEngineConfiguration = WebEngineConfiguration(), navigator: WebViewNavigator = WebViewNavigator(), url initialURL: URL? = nil, html initialHTML: String? = nil, state: Binding<WebViewState> = .constant(WebViewState()), onNavigationCommitted: (() -> Void)? = nil, onNavigationFinished: (() -> Void)? = nil, onNavigationFailed: (() -> Void)? = nil) {
         self.config = configuration
         self.navigator = navigator
         if let initialURL = initialURL {
@@ -64,6 +65,7 @@ public struct WebView : View {
         self._state = state
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
+        self.onNavigationFailed = onNavigationFailed
     }
 }
 
@@ -196,6 +198,28 @@ public struct MessageHandlerRouter {
         }
     }
 }
+
+struct WebViewClient : android.webkit.WebViewClient {
+    let webView: WebView
+    override func onPageFinished(view: PlatformWebView, url: String) {
+        if let onNavigationFinished = webView.onNavigationFinished {
+            onNavigationFinished()
+        }
+    }
+    
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        if let onNavigationCommitted = webView.onNavigationCommitted {
+            onNavigationCommitted()
+        }
+    }
+    
+    override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
+        if let onNavigationFailed = webView.onNavigationFailed {
+            onNavigationFailed()
+        }
+    }
+}
+
 #endif
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -221,7 +245,7 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
-        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration)
+        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(webView: self))
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
@@ -646,6 +670,9 @@ extension WebViewCoordinator: WebNavigationDelegate {
         self.webView.state.isLoading = false
         self.webView.state.isProvisionallyNavigating = false
         self.webView.state.error = error
+        if let onNavigationFailed = self.webView.onNavigationFailed {
+            onNavigationFailed()
+        }
     }
 
     @MainActor
