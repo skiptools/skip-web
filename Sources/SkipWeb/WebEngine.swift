@@ -834,20 +834,9 @@ public class ContentRuleListStore {
 
 #endif
 
-public class BundleURLSchemeHandler : NSObject, URLSchemeHandler {
-    let bundle: Bundle
-    let subdirectory: String?
-    
-    public init(bundle: Bundle = Bundle.main, subdirectory: String? = nil) {
-        self.bundle = bundle
-        self.subdirectory = subdirectory
-    }
-    
-    private func loadData(from fileName: String) -> Data? {
-        guard let fileURL = bundle.url(forResource: fileName, withExtension: nil, subdirectory: subdirectory) else {
-            return nil
-        }
-        return try? Data(contentsOf: fileURL)
+open class AbstractURLSchemeHandler : NSObject, URLSchemeHandler {
+    open func loadData(from fileName: String) -> Data? {
+        fatalError("Implementations must override loadData")
     }
     
     #if SKIP
@@ -950,4 +939,34 @@ public class BundleURLSchemeHandler : NSObject, URLSchemeHandler {
     #endif
 }
 
+public class BundleURLSchemeHandler: AbstractURLSchemeHandler {
+    let bundle: Bundle
+    let subdirectory: String?
+    
+    public init(bundle: Bundle = Bundle.main, subdirectory: String? = nil) {
+        self.bundle = bundle
+        self.subdirectory = subdirectory
+    }
+    
+    public override func loadData(from fileName: String) -> Data? {
+        guard let fileURL = bundle.url(forResource: fileName, withExtension: nil, subdirectory: self.subdirectory) else {
+            return nil
+        }
+        return try? Data(contentsOf: fileURL)
+    }
+}
+
+public class DirectoryURLSchemeHandler: AbstractURLSchemeHandler {
+    let directory: URL
+    
+    public init(directory: URL) {
+        self.directory = directory
+    }
+    
+    public override func loadData(from fileName: String) -> Data? {
+        let file = directory.appendingPathComponent(fileName)
+        logger.info("Reading \(fileName) from \(file)")
+        return try? Data(contentsOf: file)
+    }
+}
 #endif
