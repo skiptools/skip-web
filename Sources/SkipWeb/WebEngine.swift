@@ -540,7 +540,7 @@ public class WebEngineConfiguration : ObservableObject {
 
     #if !SKIP
     /// Create a `WebViewConfiguration` from the properties of this configuration.
-    @MainActor var webViewConfiguration: WebViewConfiguration {
+    @MainActor public var webViewConfiguration: WebViewConfiguration {
         let configuration = WebViewConfiguration()
 
         //let preferences = WebpagePreferences()

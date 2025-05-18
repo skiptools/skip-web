@@ -84,6 +84,11 @@ final class SkipWebTests: XCTestCase {
 
         //assertMainThread()
 
+        func html(title: String, body: String = "") -> String {
+            "<html><head><title>\(title)</title></head><body>\(body)</body></html>"
+        }
+        
+        let tempDirectory = URL.temporaryDirectory
         var handledMessage: String? = nil
         
         let config = WebEngineConfiguration(
@@ -100,6 +105,9 @@ final class SkipWebTests: XCTestCase {
                         message.body as! String
                     )
                 }
+            ],
+            schemeHandlers: [
+                "test": DirectoryURLSchemeHandler(directory: tempDirectory)
             ]
         )
         #if SKIP
@@ -107,7 +115,7 @@ final class SkipWebTests: XCTestCase {
         config.context = ctx
         let platformWebView = PlatformWebView(ctx)
         #else
-        let platformWebView = PlatformWebView()
+        let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
         #endif
 
         let engine = WebEngine(configuration: config, webView: platformWebView)
@@ -122,10 +130,6 @@ final class SkipWebTests: XCTestCase {
         engine.refreshMessageHandlers()
         engine.updateUserScripts()
         #endif
-
-        func html(title: String, body: String = "") -> String {
-            "<html><head><title>\(title)</title></head><body>\(body)</body></html>"
-        }
 
         // needed before JS can be evaluated?
         //try await engine.loadHTML(html(title: "Initial Load"))
@@ -153,7 +157,7 @@ final class SkipWebTests: XCTestCase {
         }
 
         do {
-            let fileURL = URL.temporaryDirectory
+            let fileURL = tempDirectory
                 .appendingPathComponent(UUID().uuidString)
                 .appendingPathExtension("html")
 
@@ -162,6 +166,21 @@ final class SkipWebTests: XCTestCase {
             try html(title: title).write(to: fileURL, atomically: false, encoding: .utf8)
 
             try await engine.load(url: fileURL)
+            let title2 = try await engine.evaluate(js: "document.title")
+            XCTAssertEqual(title, title2)
+        }
+        
+        do {
+            let fileName = UUID().uuidString
+            let fileURL = URL.temporaryDirectory
+                .appendingPathComponent(fileName)
+                .appendingPathExtension("html")
+
+            let title = "scheme handled"
+            logger.log("loading title: \(title)")
+            try html(title: title).write(to: fileURL, atomically: false, encoding: .utf8)
+
+            try await engine.load(url: URL(string: "test:///\(fileName).html")!)
             let title2 = try await engine.evaluate(js: "document.title")
             XCTAssertEqual(title, title2)
         }
