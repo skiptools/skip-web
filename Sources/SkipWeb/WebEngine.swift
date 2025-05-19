@@ -322,7 +322,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
             if (!window.webkit) window.webkit = {};
             webkit.messageHandlers = new Proxy({}, {
                 get: (target, messageHandlerName, receiver) => ({
-                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), String(body))
+                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), JSON.stringify(body))
                 })
             });
         """) { _ in logger.debug("Added webkit.messageHandlers") }

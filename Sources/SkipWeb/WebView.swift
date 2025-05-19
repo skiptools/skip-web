@@ -202,12 +202,13 @@ typealias ViewRepresentable = NSViewRepresentable
 public struct MessageHandlerRouter {
     let webEngine: WebEngine
     // SKIP INSERT: @android.webkit.JavascriptInterface
-    public func postMessage(_ name: String, body: String) {
+    public func postMessage(_ name: String, json: String) {
         guard let messageHandler = webEngine.configuration.messageHandlers[name] else {
             logger.error("no messageHandler for \(name)")
             return
         }
         let frameInfo = FrameInfo(isMainFrame: true, request: URLRequest(url: URL(string: "about:blank")!), securityOrigin: SecurityOrigin(), webView: webEngine.webView)
+        let body = try JSONSerialization.jsonObject(with: json.data(using: .utf8)!, options: [])
         let message = WebViewMessage(frameInfo: frameInfo, uuid: UUID(), name: name, body: body)
         Task {
             await messageHandler(message)
