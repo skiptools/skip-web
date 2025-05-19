@@ -4,6 +4,7 @@ import Foundation
 import SwiftUI
 #if !SKIP
 import WebKit
+import UniformTypeIdentifiers
 #else
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.CoroutineScope
@@ -399,6 +400,10 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application of a resource request and allow the application to return the data.
     override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
         logger.log("shouldInterceptRequest: \(request.url)")
+        let scheme: String = request.url?.scheme ?? ""
+        if let handler = config.schemeHandlers[scheme] {
+            return handler.interceptRequest(view: view, request: request)
+        }
         return webViewClient.shouldInterceptRequest(view, request)
     }
 
@@ -410,7 +415,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
 
     /// Give the host application a chance to take control when a URL is about to be loaded in the current WebView.
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
-        logger.log("shouldOverrideUrlLoading: \(request)")
+        logger.log("shouldOverrideUrlLoading: \(request.url)")
         return webViewClient.shouldOverrideUrlLoading(view, request)
     }
 }
@@ -500,6 +505,7 @@ public class WebEngineConfiguration : ObservableObject {
     @Published public var customUserAgent: String?
     @Published public var userScripts: [WebViewUserScript]
     @Published public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
+    @Published public var schemeHandlers: [String: URLSchemeHandler]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -516,7 +522,8 @@ public class WebEngineConfiguration : ObservableObject {
                 isOpaque: Bool = true,
                 customUserAgent: String? = nil,
                 userScripts: [WebViewUserScript] = [],
-                messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:]) {
+                messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
+                schemeHandlers: [String: URLSchemeHandler] = [:]) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsPullToRefresh = allowsPullToRefresh
@@ -528,11 +535,12 @@ public class WebEngineConfiguration : ObservableObject {
         self.customUserAgent = customUserAgent
         self.userScripts = userScripts
         self.messageHandlers = messageHandlers
+        self.schemeHandlers = schemeHandlers
     }
 
     #if !SKIP
     /// Create a `WebViewConfiguration` from the properties of this configuration.
-    @MainActor var webViewConfiguration: WebViewConfiguration {
+    @MainActor public var webViewConfiguration: WebViewConfiguration {
         let configuration = WebViewConfiguration()
 
         //let preferences = WebpagePreferences()
@@ -544,9 +552,9 @@ public class WebEngineConfiguration : ObservableObject {
         //configuration.defaultWebpagePreferences = preferences
         configuration.dataDetectorTypes = [.calendarEvent, .flightNumber, .link, .lookupSuggestion, .trackingNumber]
 
-//        for (urlSchemeHandler, urlScheme) in schemeHandlers {
-//            configuration.setURLSchemeHandler(urlSchemeHandler, forURLScheme: urlScheme)
-//        }
+        for (schemeName, schemeHandlerObject) in schemeHandlers {
+            configuration.setURLSchemeHandler(schemeHandlerObject, forURLScheme: schemeName)
+        }
         #endif
 
         return configuration
@@ -785,6 +793,7 @@ public class WebpagePreferences {
 public typealias URLSchemeHandler = WKURLSchemeHandler
 #else
 public protocol URLSchemeHandler {
+    func interceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse
 }
 #endif
 
@@ -825,4 +834,139 @@ public class ContentRuleListStore {
 
 #endif
 
+open class AbstractURLSchemeHandler : NSObject, URLSchemeHandler {
+    open func loadData(from fileName: String) -> Data? {
+        fatalError("Implementations must override loadData")
+    }
+    
+    #if SKIP
+    
+    override func interceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse {
+        let responseHeaders: kotlin.collections.Map<String, String> = kotlin.collections.HashMap()
+        guard let url = URL(string: request.url.toString()) else {
+            return android.webkit.WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                500,
+                "Internal Server Error",
+                responseHeaders,
+                "Invalid URL \(request.url)".byteInputStream()
+            )
+        }
+        
+        var resourcePath = url.path
+        if resourcePath.starts(with: "/") {
+            resourcePath = String(resourcePath.dropFirst())
+        }
+        guard let data = loadData(from: resourcePath) else {
+            logger.debug("404 error for URL: \(url)")
+            return android.webkit.WebResourceResponse(
+                "text/plain",
+                "utf-8",
+                404,
+                "Not Found",
+                responseHeaders,
+                "Not Found URL \(request.url)".byteInputStream()
+            )
+        }
+        
+        let fileExtension = android.webkit.MimeTypeMap.getFileExtensionFromUrl(url.absoluteString)
+        let mimeType = android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(fileExtension) ?? "application/octet-stream"
+        
+        let response = android.webkit.WebResourceResponse(
+            mimeType,
+            "utf-8",
+            java.io.ByteArrayInputStream(data.platformData)
+        )
+        
+        logger.debug("Handled URL \(url)")
+        return response
+    }
+    #else
+    public func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+        logger.debug("Requested URL: \(urlSchemeTask.request.url?.absoluteString ?? "<unknown>")");
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(URLError(.badURL))
+            return
+        }
+        var resourcePath = url.path
+        if resourcePath.starts(with: "/") {
+            resourcePath = String(resourcePath.dropFirst())
+        }
+        guard let data = loadData(from: resourcePath) else {
+            let error = NSError(
+                domain: "SchemeHandlerError",
+                code: 404,
+                userInfo: [NSLocalizedDescriptionKey: "Resource not found: \(resourcePath)"]
+            )
+            logger.debug("404 error for URL: \(url)")
+            urlSchemeTask.didFailWithError(error)
+            return
+        }
+        
+        let fileExtension = resourcePath.split(separator: ".").last ?? ""
+        let mimeType = UTType(filenameExtension: String(fileExtension))?.preferredMIMEType ?? "application/octet-stream"
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: [
+                "Content-Type": mimeType,
+                "Content-Length": "\(data.count)"
+            ]
+        )
+        
+        if let response = response {
+            urlSchemeTask.didReceive(response)
+            urlSchemeTask.didReceive(data)
+            urlSchemeTask.didFinish()
+            logger.debug("Handled URL \(url)");
+        } else {
+            let error = NSError(
+                domain: "BundleResourceSchemeHandlerError",
+                code: 500,
+                userInfo: [NSLocalizedDescriptionKey: "Could not create HTTPURLResponse"]
+            )
+            logger.debug("500 error for URL: \(url)")
+            urlSchemeTask.didFailWithError(error)
+        }
+        
+    }
+    
+    public func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {
+        // no stopping
+    }
+    #endif
+}
+
+public class BundleURLSchemeHandler: AbstractURLSchemeHandler {
+    let bundle: Bundle
+    let subdirectory: String?
+    
+    public init(bundle: Bundle = Bundle.main, subdirectory: String? = nil) {
+        self.bundle = bundle
+        self.subdirectory = subdirectory
+    }
+    
+    public override func loadData(from fileName: String) -> Data? {
+        guard let fileURL = bundle.url(forResource: fileName, withExtension: nil, subdirectory: self.subdirectory) else {
+            return nil
+        }
+        return try? Data(contentsOf: fileURL)
+    }
+}
+
+public class DirectoryURLSchemeHandler: AbstractURLSchemeHandler {
+    let directory: URL
+    
+    public init(directory: URL) {
+        self.directory = directory
+    }
+    
+    public override func loadData(from fileName: String) -> Data? {
+        let file = directory.appendingPathComponent(fileName)
+        logger.info("Reading \(fileName) from \(file)")
+        return try? Data(contentsOf: file)
+    }
+}
 #endif
