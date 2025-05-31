@@ -1,6 +1,9 @@
 # Configuration file for https://skip.tools project
 #
 # Kotlin dependencies and Gradle build options for this module can be configured here
+skip:
+  mode: 'transpiled'
+  bridging: true
 
 # the blocks to add to the build.gradle.kts
 build:
@@ -8,7 +11,7 @@ build:
     - block: 'dependencies'
       export: false
       contents:
-        - 'implementation("androidx.webkit:webkit:1.12.1")'
+        - 'implementation("androidx.webkit:webkit:1.13.0")'
         - 'androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")'
         - 'androidTestImplementation("androidx.test.espresso:espresso-web:3.6.1")'
 

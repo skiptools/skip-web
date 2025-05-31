@@ -9,6 +9,8 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class SkipWebTests: XCTestCase {
 
+    #if SKIP || os(iOS)
+
     // SKIP INSERT: @get:org.junit.Rule val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
     func testSkipWeb() throws {
@@ -220,6 +222,8 @@ final class SkipWebTests: XCTestCase {
         XCTAssertTrue((android.os.Looper.myLooper() == android.os.Looper.getMainLooper()), "test case must be run on main thread: \(android.os.Looper.myLooper()) vs. \(android.os.Looper.getMainLooper())") // or else: java.lang.RuntimeException: WebView cannot be initialized on a thread that has no Looper.
         #endif
     }
+
+    #endif
 }
 
 struct TestData : Codable, Hashable {

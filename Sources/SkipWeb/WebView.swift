@@ -91,7 +91,9 @@ public struct WebView : View {
     public internal(set) var pageImageURL: URL?
     public internal(set) var pageHTML: String?
     public internal(set) var error: Error?
+    // SKIP @nobridge
     public internal(set) var themeColor: Color?
+    // SKIP @nobridge
     public internal(set) var backgroundColor: Color?
     public internal(set) var canGoBack: Bool = false
     public internal(set) var canGoForward: Bool = false
@@ -524,9 +526,8 @@ extension WebView : ViewRepresentable {
     #endif
 }
 
-
 @available(macOS 14.0, iOS 17.0, *)
-@MainActor public class WebViewCoordinator: NSObject {
+@MainActor public class WebViewCoordinator: ObjectBase {
     private let webView: WebView
 
     var navigator: WebViewNavigator
@@ -825,6 +826,7 @@ extension UIView {
 
 #endif
 
+// SKIP @nobridge
 public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
     var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
@@ -849,7 +851,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
 
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, frame: FrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: ContentWorld? = .page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, frame: FrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: ContentWorld? = ContentWorld.page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             logger.error("evaluateJavaScript: no asyncCaller set for WebViewScriptCaller \(self.uuid)") // TODO: Error
             return

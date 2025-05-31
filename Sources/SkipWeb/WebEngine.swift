@@ -16,6 +16,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 #endif
 
+#if SKIP
+// Cannot use typealias NSObject = java.lang.Object because it breaks the bridge generation
+protocol ObjectBase { }
+//public typealias ObjectBase = NSObject
+#else
+public typealias ObjectBase = NSObject
+#endif
+
+#if SKIP || os(iOS)
+
 /// An web engine that holds a system web view:
 /// [`WebKit.WKWebView`](https://developer.apple.com/documentation/webkit/wkwebview) on iOS and
 /// [`android.webkit.WebView`](https://developer.android.com/reference/android/webkit/WebView) on Android
@@ -23,7 +33,7 @@ import kotlinx.coroutines.launch
 /// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
 /// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-@MainActor public class WebEngine : NSObject, ObservableObject {
+@MainActor public class WebEngine : ObjectBase {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
     #if !SKIP
@@ -141,6 +151,7 @@ import kotlinx.coroutines.launch
     }
 
     /// Perform the given block and only return once the page has completed loading
+    // SKIP @nobridge
     public func awaitPageLoaded(_ block: () -> ()) async throws {
         let pdelegate = self.engineDelegate
         defer { self.engineDelegate = pdelegate }
@@ -239,6 +250,7 @@ extension WebEngine: ScriptMessageHandler {
 
 extension WebEngine {
     /// The engine delegate that handles client navigation events like the page being loaded or an error occuring
+    // SKIP @nobridge
     public var engineDelegate: WebEngineDelegate? {
         get {
             #if SKIP
@@ -261,6 +273,7 @@ extension WebEngine {
 
 
 #if SKIP
+// SKIP @nobridge
 public class WebEngineDelegate : android.webkit.WebViewClient {
     let config: WebEngineConfiguration
     let webViewClient: android.webkit.WebViewClient
@@ -398,7 +411,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 
     /// Notify the host application of a resource request and allow the application to return the data.
-    override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
+    public override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
         logger.log("shouldInterceptRequest: \(request.url)")
         let scheme: String = request.url?.scheme ?? ""
         if let handler = config.schemeHandlers[scheme] {
@@ -420,7 +433,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 }
 #else
-public class WebEngineDelegate : NSObject, WKNavigationDelegate {
+public class WebEngineDelegate : ObjectBase, WKNavigationDelegate {
 
 }
 #endif
@@ -493,19 +506,19 @@ public struct WebLoadError : Error, CustomStringConvertible {
 
 
 /// The configuration for a WebEngine
-public class WebEngineConfiguration : ObservableObject {
-    @Published public var javaScriptEnabled: Bool
-    @Published public var allowsBackForwardNavigationGestures: Bool
-    @Published public var allowsPullToRefresh: Bool
-    @Published public var allowsInlineMediaPlayback: Bool
-    @Published public var dataDetectorsEnabled: Bool
-    @Published public var isScrollEnabled: Bool
-    @Published public var pageZoom: CGFloat
-    @Published public var isOpaque: Bool
-    @Published public var customUserAgent: String?
-    @Published public var userScripts: [WebViewUserScript]
-    @Published public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
-    @Published public var schemeHandlers: [String: URLSchemeHandler]
+@Observable public class WebEngineConfiguration {
+    public var javaScriptEnabled: Bool
+    public var allowsBackForwardNavigationGestures: Bool
+    public var allowsPullToRefresh: Bool
+    public var allowsInlineMediaPlayback: Bool
+    public var dataDetectorsEnabled: Bool
+    public var isScrollEnabled: Bool
+    public var pageZoom: CGFloat
+    public var isOpaque: Bool
+    public var customUserAgent: String?
+    public var userScripts: [WebViewUserScript]
+    public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
+    public var schemeHandlers: [String: URLSchemeHandler]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -568,14 +581,21 @@ public class WebEngineConfiguration : ObservableObject {
 public typealias BackForwardListItem = WKBackForwardListItem
 #else
 // TODO: wrap https://developer.android.com/reference/android/webkit/WebHistoryItem
-open struct BackForwardListItem {
+public class BackForwardListItem {
     public var url: URL
     public var title: String?
     public var initialURL: URL
+
+    public init(url: URL, title: String? = nil, initialURL: URL) {
+        self.url = url
+        self.title = title
+        self.initialURL = initialURL
+    }
 }
 #endif
 
 public struct WebViewMessage: Equatable {
+    // SKIP @nobridge
     public let frameInfo: FrameInfo
     internal let uuid: UUID
     public let name: String
@@ -591,6 +611,7 @@ public struct WebViewMessage: Equatable {
 #if !SKIP
 public typealias FrameInfo = WKFrameInfo
 #else
+// SKIP @nobridge
 public class FrameInfo {
     open var isMainFrame: Bool
     open var request: URLRequest
@@ -662,7 +683,7 @@ public enum UserScriptInjectionTime : Int {
 #if !SKIP
 public typealias UserScript = WKUserScript
 #else
-open class UserScript : NSObject {
+open class UserScript : ObjectBase {
     open var source: String
     open var injectionTime: UserScriptInjectionTime
     open var isForMainFrameOnly: Bool
@@ -736,14 +757,18 @@ fileprivate struct ConsoleLogUserScript {
 public typealias ContentWorld = WKContentWorld
 #else
 public class ContentWorld {
-    static var page: ContentWorld = ContentWorld()
-    static var defaultClient: ContentWorld = ContentWorld()
+    public static var page: ContentWorld = ContentWorld()
+    public static var defaultClient: ContentWorld = ContentWorld()
 
-    static func world(name: String) -> ContentWorld {
-        fatalError("TODO")
+    public static func world(name: String) -> ContentWorld {
+        ContentWorld(name: name)
     }
 
     public var name: String?
+
+    private init(name: String? = nil) {
+        self.name = name
+    }
 }
 #endif
 
@@ -793,6 +818,7 @@ public class WebpagePreferences {
 public typealias URLSchemeHandler = WKURLSchemeHandler
 #else
 public protocol URLSchemeHandler {
+    // SKIP @nobridge
     func interceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse
 }
 #endif
@@ -834,14 +860,15 @@ public class ContentRuleListStore {
 
 #endif
 
-open class AbstractURLSchemeHandler : NSObject, URLSchemeHandler {
+// SKIP @nobridge
+open class AbstractURLSchemeHandler : ObjectBase, URLSchemeHandler {
     open func loadData(from fileName: String) -> Data? {
         fatalError("Implementations must override loadData")
     }
     
     #if SKIP
-    
-    override func interceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse {
+
+    public override func interceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse {
         let responseHeaders: kotlin.collections.Map<String, String> = kotlin.collections.HashMap()
         guard let url = URL(string: request.url.toString()) else {
             return android.webkit.WebResourceResponse(
@@ -939,6 +966,7 @@ open class AbstractURLSchemeHandler : NSObject, URLSchemeHandler {
     #endif
 }
 
+// SKIP @nobridge
 public class BundleURLSchemeHandler: AbstractURLSchemeHandler {
     let bundle: Bundle
     let subdirectory: String?
@@ -956,6 +984,7 @@ public class BundleURLSchemeHandler: AbstractURLSchemeHandler {
     }
 }
 
+// SKIP @nobridge
 public class DirectoryURLSchemeHandler: AbstractURLSchemeHandler {
     let directory: URL
     
@@ -969,4 +998,5 @@ public class DirectoryURLSchemeHandler: AbstractURLSchemeHandler {
         return try? Data(contentsOf: file)
     }
 }
+#endif
 #endif
