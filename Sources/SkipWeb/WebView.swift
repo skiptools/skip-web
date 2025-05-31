@@ -85,10 +85,9 @@ public struct WebView : View {
 @Observable public class WebViewState {
     public internal(set) var isLoading: Bool = false
     public internal(set) var isProvisionallyNavigating: Bool = false
-    public internal(set) var pageURL: URL?
+    public internal(set) var pageURL: String?
     public internal(set) var estimatedProgress: Double?
     public internal(set) var pageTitle: String?
-    public internal(set) var pageImageURL: URL?
     public internal(set) var pageHTML: String?
     public internal(set) var error: Error?
     // SKIP @nobridge
@@ -97,11 +96,22 @@ public struct WebView : View {
     public internal(set) var backgroundColor: Color?
     public internal(set) var canGoBack: Bool = false
     public internal(set) var canGoForward: Bool = false
-    public internal(set) var backList: [BackForwardListItem] = []
-    public internal(set) var forwardList: [BackForwardListItem] = []
+    public internal(set) var backList: [WebHistoryItem] = []
+    public internal(set) var forwardList: [WebHistoryItem] = []
     public internal(set) var scrollingDown: Bool = false
 
     public init() {
+    }
+
+    func updatePageState(webView: PlatformWebView) {
+        self.pageURL = webView.pageURL
+        self.isLoading = webView.isLoading
+        self.estimatedProgress = webView.estimatedProgress
+        self.pageTitle = webView.title
+        self.canGoBack = webView.canGoBack
+        self.canGoForward = webView.canGoForward
+        self.backList = webView.backList
+        self.forwardList = webView.forwardList
     }
 }
 
@@ -161,11 +171,9 @@ public class WebViewNavigator {
         webEngine?.webView.stopLoading()
     }
 
-    @MainActor public func go(_ item: BackForwardListItem) {
-        logger.info("go: \(item) webView: \(self.webEngine?.description ?? "NONE")")
-        #if !SKIP
+    @MainActor public func go(_ item: WebHistoryItem) {
+        logger.info("go: \(item.item) webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.go(to: item)
-        #endif
     }
 
     @MainActor public func goBack() {
@@ -221,18 +229,24 @@ public struct MessageHandlerRouter {
 struct WebViewClient : android.webkit.WebViewClient {
     let webView: WebView
     override func onPageFinished(view: PlatformWebView, url: String) {
+        webView.state.updatePageState(webView: view)
+
         if let onNavigationFinished = webView.onNavigationFinished {
             onNavigationFinished()
         }
     }
     
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        webView.state.updatePageState(webView: view)
+
         if let onNavigationCommitted = webView.onNavigationCommitted {
             onNavigationCommitted()
         }
     }
     
     override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
+        webView.state.updatePageState(webView: view)
+
         if let onNavigationFailed = webView.onNavigationFailed {
             onNavigationFailed()
         }
@@ -444,7 +458,7 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.url)
             .receive(on: DispatchQueue.main)
             .sink { url in
-                context.coordinator.state.pageURL = url
+                context.coordinator.state.pageURL = url?.absoluteString
             }
             .store(in: &context.coordinator.subscriptions)
 
@@ -527,7 +541,7 @@ extension WebView : ViewRepresentable {
 }
 
 @available(macOS 14.0, iOS 17.0, *)
-@MainActor public class WebViewCoordinator: ObjectBase {
+@MainActor public class WebViewCoordinator: WebObjectBase {
     private let webView: WebView
 
     var navigator: WebViewNavigator
@@ -568,9 +582,9 @@ extension WebView : ViewRepresentable {
     @discardableResult func openURL(url: URL, newTab: Bool) -> PlatformWebView? {
         // TODO: handle newTab
         navigator.load(url: url)
-        return nil // TOOD: return new PlatformWebView
+        return nil // TODO: return new PlatformWebView
     }
-    
+
     #if canImport(UIKit)
     @objc func handleRefreshControl(sender: UIRefreshControl) {
         sender.endRefreshing()
@@ -582,6 +596,55 @@ extension WebView : ViewRepresentable {
     #endif
 }
 
+// Adaptations from android.webkit.WebView to WKWebView
+extension PlatformWebView {
+    var pageURL: String? {
+        #if !SKIP
+        return url?.absoluteString
+        #else
+        return getUrl()
+        #endif
+    }
+
+    var backList: [WebHistoryItem] {
+        #if !SKIP
+        return backForwardList.backList.map { WebHistoryItem(item: $0) }
+        #else
+        let bfl = copyBackForwardList()
+        if bfl.currentIndex == 0 { return [] }
+        return (0..<bfl.currentIndex).map { WebHistoryItem(item: bfl.getItemAtIndex($0)) }
+        #endif
+    }
+
+    var forwardList: [WebHistoryItem] {
+        #if !SKIP
+        return backForwardList.forwardList.map { WebHistoryItem(item: $0) }
+        #else
+        let bfl = copyBackForwardList()
+        if bfl.currentIndex >= (bfl.size - 1) { return [] }
+        return (bfl.currentIndex+1..<bfl.size).map { WebHistoryItem(item: bfl.getItemAtIndex($0)) }
+        #endif
+    }
+
+    #if SKIP
+    var canGoBack: Bool {
+        canGoBack()
+    }
+
+    var canGoForward: Bool {
+        canGoForward()
+    }
+
+    var isLoading: Bool {
+        getProgress() < 100
+    }
+
+    var estimatedProgress: Double {
+        // getProgress(): the progress for the current page between 0 and 100
+        Double(getProgress()) / 100.0
+    }
+    #endif
+}
 
 #if !SKIP
 @available(macOS 14.0, iOS 17.0, *)
@@ -641,57 +704,13 @@ extension WebViewCoordinator: WebNavigationDelegate {
         
         let state = self.webView.state
         state.isLoading = false
-        state.pageURL = webView.url
+        state.pageURL = webView.url?.absoluteString
         state.isProvisionallyNavigating = false
 
-        updatePageState(webView: webView)
+        state.updatePageState(webView: webView)
 
         if let onNavigationFinished = self.webView.onNavigationFinished {
             onNavigationFinished()
-        }
-    }
-
-    private func updatePageState(webView: PlatformWebView) {
-        let state = self.webView.state
-
-        state.isLoading = webView.isLoading
-        state.estimatedProgress = webView.estimatedProgress
-        state.pageTitle = webView.title
-        state.pageURL = webView.url
-        state.canGoBack = webView.canGoBack
-        state.canGoForward = webView.canGoForward
-        state.backList = webView.backForwardList.backList
-        state.forwardList = webView.backForwardList.forwardList
-
-        //updatePageStateJS(webView: webView)
-    }
-
-    private func updatePageStateJS(webView: PlatformWebView) {
-
-        webView.evaluateJavaScript("document.title") { (response, error) in
-            if let title = response as? String {
-                let newState = self.webView.state
-                newState.pageTitle = title
-                self.webView.state = newState
-            }
-        }
-
-        webView.evaluateJavaScript("document.URL.toString()") { (response, error) in
-            if let url = response as? String, let newURL = URL(string: url), self.webView.state.pageURL != newURL {
-                let newState = self.webView.state
-                newState.pageURL = newURL
-                self.webView.state = newState
-            }
-        }
-
-        if self.webView.htmlInState {
-            webView.evaluateJavaScript("document.documentElement.outerHTML.toString()") { (response, error) in
-                if let html = response as? String {
-                    let newState = self.webView.state
-                    newState.pageHTML = html
-                    self.webView.state = newState
-                }
-            }
         }
     }
 
@@ -720,7 +739,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
         self.webView.state.isProvisionallyNavigating = false
         self.webView.state.error = error
 
-        updatePageState(webView: webView)
+        state.updatePageState(webView: webView)
     }
 
     @MainActor
@@ -728,7 +747,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
         scriptCaller?.removeAllMultiTargetFrames()
         self.webView.state.isLoading = true
         self.webView.state.isProvisionallyNavigating = false
-        updatePageState(webView: webView)
+        state.updatePageState(webView: webView)
         if let onNavigationCommitted = self.webView.onNavigationCommitted {
             onNavigationCommitted()
         }
@@ -736,7 +755,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
-        updatePageState(webView: webView)
+        state.updatePageState(webView: webView)
         self.webView.state.estimatedProgress = 0.0
         self.webView.state.isProvisionallyNavigating = true
     }
@@ -759,10 +778,10 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy {
-        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url {
+        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url.absoluteString {
             scriptCaller?.removeAllMultiTargetFrames()
             let newState = self.webView.state
-            newState.pageURL = url
+            newState.pageURL = url.absoluteString
             newState.pageHTML = nil
             newState.error = nil
             self.webView.state = newState

@@ -5,6 +5,15 @@ import OSLog
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "WebView")
 
+#if SKIP
+// Cannot use typealias NSObject = java.lang.Object because it breaks the bridge generation
+//public typealias WebObjectBase = NSObject
+protocol WebObjectBase { }
+#else
+public typealias WebObjectBase = NSObject
+#endif
+
+
 extension URL {
     #if !SKIP
     public func normalizedHost(stripWWWSubdomainOnly: Bool = false) -> String? {

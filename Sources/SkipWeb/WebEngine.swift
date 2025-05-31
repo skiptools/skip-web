@@ -16,14 +16,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 #endif
 
-#if SKIP
-// Cannot use typealias NSObject = java.lang.Object because it breaks the bridge generation
-protocol ObjectBase { }
-//public typealias ObjectBase = NSObject
-#else
-public typealias ObjectBase = NSObject
-#endif
-
 #if SKIP || os(iOS)
 
 /// An web engine that holds a system web view:
@@ -33,7 +25,7 @@ public typealias ObjectBase = NSObject
 /// The `WebEngine` is used both as the render for a `WebView` and `BrowserView`,
 /// and can also be used in a headless context to drive web pages
 /// and evaluate JavaScript.
-@MainActor public class WebEngine : ObjectBase {
+@MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
     #if !SKIP
@@ -66,9 +58,11 @@ public typealias ObjectBase = NSObject
         webView.stopLoading()
     }
 
-    public func go(to item: BackForwardListItem) {
+    public func go(to item: WebHistoryItem) {
         #if !SKIP
-        webView.go(to: item)
+        webView.go(to: item.item)
+        #else
+        // TODO: there's no "go" equivalent in WebView, so we'll probably need to use `goBackOrForward(int steps)` based on matching the item in the back/forward list
         #endif
     }
 
@@ -178,7 +172,7 @@ public typealias ObjectBase = NSObject
             "skipConsoleLog"
         ]
     }
-    
+
     @MainActor
     public func refreshMessageHandlers() {
         let userContentController = webView.configuration.userContentController
@@ -433,7 +427,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 }
 #else
-public class WebEngineDelegate : ObjectBase, WKNavigationDelegate {
+public class WebEngineDelegate : WebObjectBase, WKNavigationDelegate {
 
 }
 #endif
@@ -575,24 +569,46 @@ public struct WebLoadError : Error, CustomStringConvertible {
     #endif
 }
 
+public class WebHistoryItem {
+    #if !SKIP
+    public typealias BackForwardListItem = WKBackForwardListItem
+    #else
+    public typealias BackForwardListItem = android.webkit.WebHistoryItem
+    #endif
 
+    public let item: BackForwardListItem
 
-#if !SKIP
-public typealias BackForwardListItem = WKBackForwardListItem
-#else
-// TODO: wrap https://developer.android.com/reference/android/webkit/WebHistoryItem
-public class BackForwardListItem {
-    public var url: URL
-    public var title: String?
-    public var initialURL: URL
+    init(item: BackForwardListItem) {
+        self.item = item
+    }
 
-    public init(url: URL, title: String? = nil, initialURL: URL) {
-        self.url = url
-        self.title = title
-        self.initialURL = initialURL
+    /// The URL of the webpage represented by this item.
+    public var url: String {
+        #if !SKIP
+        return item.url.absoluteString
+        #else
+        return item.getUrl()
+        #endif
+    }
+
+    /// The URL of the initial request that created this item.
+    public var initialURL: String {
+        #if !SKIP
+        return item.initialURL.absoluteString
+        #else
+        return item.getOriginalUrl()
+        #endif
+    }
+
+    /// The title of the webpage represented by this item.
+    public var title: String? {
+        #if !SKIP
+        return item.title
+        #else
+        return item.getTitle()
+        #endif
     }
 }
-#endif
 
 public struct WebViewMessage: Equatable {
     // SKIP @nobridge
@@ -683,7 +699,7 @@ public enum UserScriptInjectionTime : Int {
 #if !SKIP
 public typealias UserScript = WKUserScript
 #else
-open class UserScript : ObjectBase {
+open class UserScript : WebObjectBase {
     open var source: String
     open var injectionTime: UserScriptInjectionTime
     open var isForMainFrameOnly: Bool
@@ -861,7 +877,7 @@ public class ContentRuleListStore {
 #endif
 
 // SKIP @nobridge
-open class AbstractURLSchemeHandler : ObjectBase, URLSchemeHandler {
+open class AbstractURLSchemeHandler : WebObjectBase, URLSchemeHandler {
     open func loadData(from fileName: String) -> Data? {
         fatalError("Implementations must override loadData")
     }
