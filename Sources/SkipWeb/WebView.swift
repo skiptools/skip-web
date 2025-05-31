@@ -2,6 +2,7 @@
 #if !SKIP_BRIDGE
 import SwiftUI
 import OSLog
+import Combine
 #if !SKIP
 import WebKit
 public typealias PlatformWebView = WKWebView
