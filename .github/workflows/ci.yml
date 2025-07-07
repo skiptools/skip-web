@@ -1,7 +1,7 @@
 name: skip-web
 on:
   push:
-    branches: '*'
+    branches: [ main ]
     tags: "[0-9]+.[0-9]+.[0-9]+"
   schedule:
     - cron:  '0 9,12,2 * * *'
@@ -14,3 +14,6 @@ permissions:
 jobs:
   call-workflow:
     uses: skiptools/actions/.github/workflows/skip-framework.yml@v1
+    with:
+      # error with Text() constructor
+      run-android-native-build: false
