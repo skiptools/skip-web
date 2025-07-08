@@ -14,6 +14,3 @@ permissions:
 jobs:
   call-workflow:
     uses: skiptools/actions/.github/workflows/skip-framework.yml@v1
-    with:
-      # error with Text() constructor
-      run-android-native-build: false
