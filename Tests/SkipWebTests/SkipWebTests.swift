@@ -81,7 +81,7 @@ final class SkipWebTests: XCTestCase {
         }
 
         if isAndroid {
-            throw XCTSkip("WebEngine tests hang in Android")
+            throw XCTSkip("WebEngine page load tests hang in Android")
         }
 
         //assertMainThread()
@@ -135,6 +135,11 @@ final class SkipWebTests: XCTestCase {
 
         // needed before JS can be evaluated?
         //try await engine.loadHTML(html(title: "Initial Load"))
+
+        //do {
+        //    let abc = try await engine.evaluate(js: "'AB' + 'C'")
+        //    XCTAssertEqual(abc, #""AB+C""#)
+        //}
 
         do {
             let url = URL(string: "https://www.example.com")!
