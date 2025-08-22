@@ -141,13 +141,17 @@ final class SkipWebTests: XCTestCase {
         //    XCTAssertEqual(abc, #""AB+C""#)
         //}
 
+        func enquote(_ string: String) -> String {
+            "\"" + string + "\""
+        }
+
         do {
             let url = URL(string: "https://www.example.com")!
             logger.log("loading url: \(url)")
             try await engine.load(url: url)
             logger.log("done loading url: \(url)")
             let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual("Example Domain", title2)
+            XCTAssertEqual(enquote("Example Domain"), title2)
         }
 
         // try async load with both HTML string and file URL loading and ensure the DOM is updated
@@ -160,7 +164,7 @@ final class SkipWebTests: XCTestCase {
             }
 
             let title1 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title1)
+            XCTAssertEqual(enquote(title), title1)
         }
 
         do {
@@ -174,7 +178,7 @@ final class SkipWebTests: XCTestCase {
 
             try await engine.load(url: fileURL)
             let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title2)
+            XCTAssertEqual(enquote(title), title2)
         }
         
         do {
@@ -189,7 +193,7 @@ final class SkipWebTests: XCTestCase {
 
             try await engine.load(url: URL(string: "test:///\(fileName).html")!)
             let titleJSON = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual("\"\(title)\"", titleJSON)
+            XCTAssertEqual(enquote(title), titleJSON)
         }
 
         // FIXME: Android times out and cancels coroutine after 10 seconds
