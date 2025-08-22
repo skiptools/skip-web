@@ -117,7 +117,7 @@ import kotlinx.coroutines.launch
 
     fileprivate func evaluateJavaScriptAsync(_ script: String) async throws -> String? {
         #if !SKIP
-        guard let result = try await webView.evaluateJavaScript(script) else {
+        guard let result = try await webView.evaluateJavaScript(script) as Any? else { // cast needed for older iOS, or else: "error: initializer for conditional binding must have Optional type, not 'Any'"
             return nil
         }
         // in order to match the behavior of Android's evaluateJavascript, we need to return the result as a serialized JavaScript string that can contain fragments (e.g., top-level strings)
