@@ -187,7 +187,7 @@ public class WebViewNavigator {
     }
     
     @MainActor public func evaluateJavaScript(_ js: String) async throws -> String? {
-        logger.info("evaluateJavaScript webView: \(self.webEngine?.description ?? "NONE")")
+        logger.info("evaluateJavaScript: \(js)")
         return try await webEngine?.evaluate(js: js)
     }
 }
