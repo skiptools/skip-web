@@ -81,7 +81,7 @@ final class SkipWebTests: XCTestCase {
         }
 
         if isAndroid {
-            throw XCTSkip("WebEngine tests hang in Android")
+            throw XCTSkip("WebEngine page load tests hang in Android")
         }
 
         //assertMainThread()
@@ -136,13 +136,22 @@ final class SkipWebTests: XCTestCase {
         // needed before JS can be evaluated?
         //try await engine.loadHTML(html(title: "Initial Load"))
 
+        //do {
+        //    let abc = try await engine.evaluate(js: "'AB' + 'C'")
+        //    XCTAssertEqual(abc, #""AB+C""#)
+        //}
+
+        func enquote(_ string: String) -> String {
+            "\"" + string + "\""
+        }
+
         do {
             let url = URL(string: "https://www.example.com")!
             logger.log("loading url: \(url)")
             try await engine.load(url: url)
             logger.log("done loading url: \(url)")
             let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual("Example Domain", title2)
+            XCTAssertEqual(enquote("Example Domain"), title2)
         }
 
         // try async load with both HTML string and file URL loading and ensure the DOM is updated
@@ -155,7 +164,7 @@ final class SkipWebTests: XCTestCase {
             }
 
             let title1 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title1)
+            XCTAssertEqual(enquote(title), title1)
         }
 
         do {
@@ -169,7 +178,7 @@ final class SkipWebTests: XCTestCase {
 
             try await engine.load(url: fileURL)
             let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title2)
+            XCTAssertEqual(enquote(title), title2)
         }
         
         do {
@@ -183,8 +192,8 @@ final class SkipWebTests: XCTestCase {
             try html(title: title).write(to: fileURL, atomically: false, encoding: .utf8)
 
             try await engine.load(url: URL(string: "test:///\(fileName).html")!)
-            let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title2)
+            let titleJSON = try await engine.evaluate(js: "document.title")
+            XCTAssertEqual(enquote(title), titleJSON)
         }
 
         // FIXME: Android times out and cancels coroutine after 10 seconds

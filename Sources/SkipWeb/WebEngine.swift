@@ -74,13 +74,9 @@ import kotlinx.coroutines.launch
         webView.goForward()
     }
 
-    /// Evaluates the given JavaScript string
+    /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
-        let result = try await evaluateJavaScriptAsync(js)
-        guard let res = (result as? NSObject) else {
-            return nil
-        }
-        return res.description
+        return try await evaluateJavaScriptAsync(js)
     }
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
@@ -119,28 +115,28 @@ import kotlinx.coroutines.launch
         }
     }
 
-    fileprivate func evaluateJavaScriptAsync(_ script: String) async throws -> Any {
+    fileprivate func evaluateJavaScriptAsync(_ script: String) async throws -> String? {
         #if !SKIP
-        try await webView.evaluateJavaScript(script)
+        let evaluated: Any? = try await webView.evaluateJavaScript(script) // cast needed for older iOS, or else: "error: initializer for conditional binding must have Optional type, not 'Any'"
+        guard let result = evaluated else {
+            return nil
+        }
+        // in order to match the behavior of Android's evaluateJavascript, we need to return the result as a serialized JavaScript string that can contain fragments (e.g., top-level strings)
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+        return String(data: data, encoding: .utf8)
         #else
         logger.info("WebEngine: calling eval: \(android.os.Looper.myLooper())")
-    //    withContext(Dispatchers.IO) {
-            logger.info("WebEngine: calling eval withContext(Dispatchers.IO): \(android.os.Looper.myLooper())")
-            //suspendCoroutine
-            suspendCancellableCoroutine { continuation in
-                logger.info("WebEngine: calling eval suspendCoroutine: \(android.os.Looper.myLooper())")
-    //            withContext(Dispatchers.Main) {
-                    webView.evaluateJavascript(script) { result in
-                        logger.info("WebEngine: returned webView.evaluateJavascript: \(android.os.Looper.myLooper()): \(result)")
-                        continuation.resume(result)
-                    }
-
-                    continuation.invokeOnCancellation { _ in
-                        continuation.cancel()
-                    }
-    //            }
+        suspendCancellableCoroutine { continuation in
+            logger.info("WebEngine: calling eval suspendCoroutine: \(android.os.Looper.myLooper())")
+            webView.evaluateJavascript(script) { result in
+                logger.info("WebEngine: returned webView.evaluateJavascript: \(android.os.Looper.myLooper()): \(result)")
+                continuation.resume(result)
             }
-    //    }
+
+            continuation.invokeOnCancellation { _ in
+                continuation.cancel()
+            }
+        }
         #endif
     }
 
