@@ -188,8 +188,8 @@ final class SkipWebTests: XCTestCase {
             try html(title: title).write(to: fileURL, atomically: false, encoding: .utf8)
 
             try await engine.load(url: URL(string: "test:///\(fileName).html")!)
-            let title2 = try await engine.evaluate(js: "document.title")
-            XCTAssertEqual(title, title2)
+            let titleJSON = try await engine.evaluate(js: "document.title")
+            XCTAssertEqual("\"\(title)\"", titleJSON)
         }
 
         // FIXME: Android times out and cancels coroutine after 10 seconds
