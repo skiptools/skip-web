@@ -282,6 +282,7 @@ extension WebView : ViewRepresentable {
         settings.setSafeBrowsingEnabled(false)
         settings.setAllowContentAccess(true)
         settings.setAllowFileAccess(true)
+        settings.setDomStorageEnabled(true)
         if (config.customUserAgent != nil ) {
             settings.setUserAgentString(config.customUserAgent)
         }
@@ -307,7 +308,6 @@ extension WebView : ViewRepresentable {
         //settings.setDefaultZoom(WebSettings.ZoomDensity zoom) // deprecated
         //settings.setDisabledActionModeMenuItems(int menuItems)
         //settings.setDisplayZoomControls(boolean enabled)
-        //settings.setDomStorageEnabled(boolean flag)
         //settings.setEnableSmoothTransition(boolean enable) // deprecated
         //settings.setFantasyFontFamily(String font)
         //settings.setFixedFontFamily(String font)
