@@ -4,6 +4,30 @@ SkipWeb provides an embedded WebView for [Skip Lite](https://skip.tools) transpi
 On iOS it uses a [WKWebView](https://developer.apple.com/documentation/webkit/wkwebview)
 and on Android it uses an [android.webkit.WebView](https://developer.android.com/develop/ui/views/layout/webapps/webview).
 
+## Setup
+
+To include this framework in your project, add the following
+dependency to your `Package.swift` file:
+
+```swift
+let package = Package(
+    name: "my-package",
+    products: [
+        .library(name: "MyProduct", targets: ["MyTarget"]),
+    ],
+    dependencies: [
+        .package(url: "https://source.skip.tools/skip-web.git", "0.0.0"..<"2.0.0"),
+    ],
+    targets: [
+        .target(name: "MyTarget", dependencies: [
+            .product(name: "SkipWeb", package: "skip-web")
+        ])
+    ]
+)
+```
+
+## Usage
+
 A simple example of using an embedded WebView with a static URL can be seen:
 
 ```swift
@@ -105,6 +129,7 @@ struct WebViewPlayground: View {
             .accessibilityLabel(Text("Forward"))
 
             Button {
+                self.javaScriptOutput = ""
                 self.showScriptSheet = true
             } label: {
                 Image(systemName: "ellipsis")
