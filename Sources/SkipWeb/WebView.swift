@@ -82,7 +82,7 @@ public struct WebView : View {
 
 /// The current state of a web page, including the loading status and the current URL
 @available(macOS 14.0, iOS 17.0, *)
-@Observable public class WebViewState {
+@Observable public class WebViewState: @unchecked Sendable {
     public internal(set) var isLoading: Bool = false
     public internal(set) var isProvisionallyNavigating: Bool = false
     public internal(set) var pageURL: String?
@@ -116,7 +116,7 @@ public struct WebView : View {
 }
 
 /// A controller that can drive a `WebEngine` from a user interface.
-public class WebViewNavigator {
+public class WebViewNavigator: @unchecked Sendable {
     var initialURL: URL?
     var initialHTML: String?
 
