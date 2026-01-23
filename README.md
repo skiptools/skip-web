@@ -1,6 +1,6 @@
 # SkipWeb
 
-SkipWeb provides an embedded WebView for [Skip Lite](https://skip.tools) transpiled Swift.
+SkipWeb provides an embedded WebView for [Skip Lite](https://skip.dev) transpiled Swift.
 On iOS it uses a [WKWebView](https://developer.apple.com/documentation/webkit/wkwebview)
 and on Android it uses an [android.webkit.WebView](https://developer.android.com/develop/ui/views/layout/webapps/webview).
 
@@ -32,7 +32,7 @@ import SwiftUI
 import SkipWeb
 
 struct ConfigurableWebView : View {
-    let navigator: WebViewNavigator = WebViewNavigator(initialURL: URL("https://skip.tools")!)
+    let navigator: WebViewNavigator = WebViewNavigator(initialURL: URL("https://skip.dev")!)
     @ObservedObject var configuration: WebEngineConfiguration
     @Binding var state: WebViewState
 
@@ -67,7 +67,7 @@ the results in a sheet can be implemented with the following View:
 import SwiftUI
 import SkipWeb
 
-/// This component uses the `SkipWeb` module from https://source.skip.tools/skip-web
+/// This component uses the `SkipWeb` module from https://source.skip.dev/skip-web
 struct WebViewPlayground: View {
     @State var config = WebEngineConfiguration()
     @State var navigator = WebViewNavigator()
@@ -78,7 +78,7 @@ struct WebViewPlayground: View {
 
     var body: some View {
         VStack {
-            WebView(configuration: config, navigator: navigator, url: URL(string: "https://skip.tools")!, state: $state)
+            WebView(configuration: config, navigator: navigator, url: URL(string: "https://skip.dev")!, state: $state)
         }
         .toolbar {
             Button {
@@ -178,14 +178,14 @@ struct WebViewPlayground: View {
 Many delegates that are provided by `WKWebView` are not yet implemented in this project,
 and so deeper customization may require custom implementation work.
 To implement these, you may need to fork the repository and add it to your workspace,
-as described in the [Contributing guide](https://skip.tools/docs/contributing/).
+as described in the [Contributing guide](https://skip.dev/docs/contributing/).
 Please consider creating a [Pull Request](https://github.com/skiptools/skip-web/pulls)
 with features and fixes that you create, as this benefits the entire Skip community.
 
 ## Building
 
 This project is a free Swift Package Manager module that uses the
-[Skip](https://skip.tools) plugin to transpile Swift into Kotlin.
+[Skip](https://skip.dev) plugin to transpile Swift into Kotlin.
 
 Building the module requires that Skip be installed using 
 [Homebrew](https://brew.sh) with `brew install skiptools/skip/skip`.
@@ -210,7 +210,7 @@ The general flow for contributing to this and any other Skip package is:
 
 1. Fork this repository and enable actions from the "Actions" tab
 2. Check out your fork locally
-3. When developing alongside a Skip app, add the package to a [shared workspace](https://skip.tools/docs/contributing) to see your changes incorporated in the app
+3. When developing alongside a Skip app, add the package to a [shared workspace](https://skip.dev/docs/contributing) to see your changes incorporated in the app
 4. Push your changes to your fork and ensure the CI checks all pass in the Actions tab
 5. Add your name to the Skip [Contributor Agreement](https://github.com/skiptools/clabot-config)
 6. Open a Pull Request from your fork with a description of your changes
