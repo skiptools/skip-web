@@ -11,6 +11,7 @@ public typealias PlatformWebView = android.webkit.WebView
 //import android.webkit.WebView // not imported because it conflicts with SkipWeb.WebView
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.key
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat.startActivity
@@ -374,14 +375,28 @@ extension WebView : ViewRepresentable {
     #if SKIP
     public var body: some View {
         ComposeView { ctx in
-            AndroidView(factory: { ctx in
-                config.context = ctx
-                let webEngine = WebEngine(config)
+            if let recreateToken = config.recreateToken {
+                // Apps can bump recreateToken to force a new AndroidView/WebView.
+                key(recreateToken) {
+                    AndroidView(factory: { ctx in
+                        config.context = ctx
+                        let webEngine = WebEngine(config)
 
-                return setupWebView(webEngine).webView
-            }, modifier: ctx.modifier, update: { webView in
-                self.update(webView: webView)
-            })
+                        return setupWebView(webEngine).webView
+                    }, modifier: ctx.modifier, update: { webView in
+                        self.update(webView: webView)
+                    })
+                }
+            } else {
+                AndroidView(factory: { ctx in
+                    config.context = ctx
+                    let webEngine = WebEngine(config)
+
+                    return setupWebView(webEngine).webView
+                }, modifier: ctx.modifier, update: { webView in
+                    self.update(webView: webView)
+                })
+            }
         }
     }
     #else
@@ -923,4 +938,3 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
 
 #endif
 #endif
-

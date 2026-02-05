@@ -506,6 +506,8 @@ public struct WebLoadError : Error, CustomStringConvertible {
     public var pageZoom: CGFloat
     public var isOpaque: Bool
     public var customUserAgent: String?
+    /// Android-only: when changed, forces Compose to recreate the backing WebView.
+    public var recreateToken: String?
     public var userScripts: [WebViewUserScript]
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
@@ -524,6 +526,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
                 customUserAgent: String? = nil,
+                recreateToken: String? = nil,
                 userScripts: [WebViewUserScript] = [],
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
                 schemeHandlers: [String: URLSchemeHandler] = [:]) {
@@ -536,6 +539,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
         self.customUserAgent = customUserAgent
+        self.recreateToken = recreateToken
         self.userScripts = userScripts
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers

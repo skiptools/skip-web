@@ -43,6 +43,51 @@ struct ConfigurableWebView : View {
 
 ```
 
+### Recreating the WebView with a new configuration
+
+When you need to force a fresh web view instance (for example, after changing
+`customUserAgent`), use a parent-owned identity token and rebuild both
+`navigator` and `state`.
+
+On iOS, SwiftUI `.id(...)` recreates the underlying `WKWebView`.
+On Android, `WebEngineConfiguration.recreateToken` is used to signal
+Compose that a new `android.webkit.WebView` should be created.
+`recreateToken` is Android-specific and has no effect on iOS behavior.
+
+```swift
+import Foundation
+import SkipWeb
+import SwiftUI
+
+struct RecreatingWebView: View {
+    @State private var navigator = WebViewNavigator()
+    @State private var webState = WebViewState()
+    @State private var webViewID = UUID()
+    @State private var userAgent: String? = nil
+
+    private var config: WebEngineConfiguration {
+        let config = WebEngineConfiguration(customUserAgent: userAgent)
+        config.recreateToken = webViewID.uuidString
+        return config
+    }
+
+    var body: some View {
+        WebView(configuration: config,
+                navigator: navigator,
+                url: URL(string: "https://www.whatismybrowser.com/detect/what-is-my-user-agent/")!,
+                state: $webState)
+            .id(webViewID)
+    }
+
+    private func replaceWebView(using userAgent: String?) {
+        self.userAgent = userAgent
+        self.navigator = WebViewNavigator()
+        self.webState = WebViewState()
+        self.webViewID = UUID()
+    }
+}
+```
+
 ## JavaScript
 
 JavaScript can be executed against the browser with:
