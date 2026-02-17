@@ -11,6 +11,8 @@ final class SkipWebTests: XCTestCase {
 
     #if SKIP || os(iOS)
 
+    final class DummyUIDelegate: SkipWebUIDelegate { }
+
     // SKIP INSERT: @get:org.junit.Rule val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
     func testSkipWeb() throws {
@@ -21,6 +23,35 @@ final class SkipWebTests: XCTestCase {
         let resourceURL: URL = try XCTUnwrap(Bundle.module.url(forResource: "TestData", withExtension: "json"))
         let testData = try JSONDecoder().decode(TestData.self, from: Data(contentsOf: resourceURL))
         XCTAssertEqual("SkipWeb", testData.testModuleName)
+    }
+
+    func testWindowConfigurationDefaults() {
+        let config = WebEngineConfiguration()
+        XCTAssertFalse(config.javaScriptCanOpenWindowsAutomatically)
+        XCTAssertNil(config.uiDelegate)
+    }
+
+    func testWebWindowRequestCarriesFields() throws {
+        let sourceURL = try XCTUnwrap(URL(string: "https://source.example"))
+        let targetURL = try XCTUnwrap(URL(string: "https://target.example"))
+        let request = WebWindowRequest(
+            sourceURL: sourceURL,
+            targetURL: targetURL,
+            isUserGesture: true,
+            isDialog: false,
+            isMainFrame: true
+        )
+        XCTAssertEqual(request.sourceURL?.absoluteString, sourceURL.absoluteString)
+        XCTAssertEqual(request.targetURL?.absoluteString, targetURL.absoluteString)
+        XCTAssertEqual(request.isUserGesture, true)
+        XCTAssertEqual(request.isDialog, false)
+        XCTAssertEqual(request.isMainFrame, true)
+    }
+
+    func testConfigurationAcceptsUIDelegate() {
+        let config = WebEngineConfiguration()
+        config.uiDelegate = DummyUIDelegate()
+        XCTAssertNotNil(config.uiDelegate)
     }
 
     func testOnWebView() async throws {
@@ -254,4 +285,3 @@ class WebViewActivity : androidx.activity.ComponentActivity {
 
 }
 #endif
-

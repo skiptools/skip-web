@@ -74,6 +74,19 @@ import kotlinx.coroutines.launch
         webView.goForward()
     }
 
+    /// Preferred URL accessor for parity with `WKWebView.url`.
+    /// A typed `URL` keeps call sites aligned with Apple WebKit ergonomics.
+    public var url: URL? {
+        #if SKIP
+        guard let raw = webView.getUrl() else {
+            return nil
+        }
+        return URL(string: raw)
+        #else
+        webView.url
+        #endif
+    }
+
     /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
         return try await evaluateJavaScriptAsync(js)
@@ -494,10 +507,210 @@ public struct WebLoadError : Error, CustomStringConvertible {
 }
 #endif
 
+/// Request metadata for creating a child window/web view.
+public struct WebWindowRequest {
+    /// The URL currently loaded by the parent web view, when available.
+    public let sourceURL: URL?
+    /// The target URL requested for the child view, when available.
+    ///
+    /// On Android this can be `nil` at `onCreateWindow` time.
+    public let targetURL: URL?
+    /// Whether this request was initiated from a user gesture.
+    public let isUserGesture: Bool?
+    /// Whether the child should be treated as a dialog window.
+    public let isDialog: Bool?
+    /// Whether the request targets the main frame.
+    public let isMainFrame: Bool?
+
+    public init(sourceURL: URL?, targetURL: URL?, isUserGesture: Bool?, isDialog: Bool?, isMainFrame: Bool?) {
+        self.sourceURL = sourceURL
+        self.targetURL = targetURL
+        self.isUserGesture = isUserGesture
+        self.isDialog = isDialog
+        self.isMainFrame = isMainFrame
+    }
+}
+
+#if !SKIP
+/// iOS-specific details passed through create-child callback.
+public struct WebKitCreateWindowParams {
+    public let configuration: WKWebViewConfiguration
+    public let navigationAction: WKNavigationAction
+    public let windowFeatures: WKWindowFeatures
+    let parentConfigurationSnapshot: WebEngineConfiguration
+    let parentIsInspectable: Bool
+
+    public init(
+        configuration: WKWebViewConfiguration,
+        navigationAction: WKNavigationAction,
+        windowFeatures: WKWindowFeatures,
+        parentConfigurationSnapshot: WebEngineConfiguration = WebEngineConfiguration(),
+        parentIsInspectable: Bool = true
+    ) {
+        self.configuration = configuration
+        self.navigationAction = navigationAction
+        self.windowFeatures = windowFeatures
+        self.parentConfigurationSnapshot = parentConfigurationSnapshot
+        self.parentIsInspectable = parentIsInspectable
+    }
+}
+
+public extension WebKitCreateWindowParams {
+    /// Creates a popup child engine using the exact WKWebViewConfiguration
+    /// supplied by WebKit for this createWebViewWith callback.
+    ///
+    /// Using this helper preserves WebKit's popup contract and avoids
+    /// NSInternalInconsistencyException ("Returned WKWebView was not created with
+    /// the given configuration.") caused by configuration mismatches.
+    @MainActor public func makeChildWebEngine(
+        configuration webEngineConfiguration: WebEngineConfiguration? = nil,
+        frame: CGRect = .zero,
+        isInspectable: Bool? = nil
+    ) -> WebEngine {
+        let effectiveConfiguration = (webEngineConfiguration ?? parentConfigurationSnapshot).popupChildMirroredConfiguration()
+        let childWebView = WKWebView(frame: frame, configuration: configuration)
+        registerPopupChild(childWebView)
+
+        let preferences = childWebView.configuration.defaultWebpagePreferences!
+        preferences.allowsContentJavaScript = effectiveConfiguration.javaScriptEnabled
+        childWebView.configuration.preferences.javaScriptCanOpenWindowsAutomatically = effectiveConfiguration.javaScriptCanOpenWindowsAutomatically
+        childWebView.allowsBackForwardNavigationGestures = effectiveConfiguration.allowsBackForwardNavigationGestures
+        childWebView.scrollView.isScrollEnabled = effectiveConfiguration.isScrollEnabled
+        childWebView.pageZoom = effectiveConfiguration.pageZoom
+        childWebView.isOpaque = effectiveConfiguration.isOpaque
+        childWebView.isInspectable = isInspectable ?? parentIsInspectable
+        if effectiveConfiguration.customUserAgent != "" {
+            childWebView.customUserAgent = effectiveConfiguration.customUserAgent
+        }
+
+        let childEngine = WebEngine(configuration: effectiveConfiguration, webView: childWebView)
+        childEngine.refreshMessageHandlers()
+        childEngine.updateUserScripts()
+        return childEngine
+    }
+
+    @MainActor func registerPopupChild(_ childWebView: WKWebView) {
+        registerPopupChild(childWebView, initializedWith: configuration)
+    }
+
+    @MainActor func registerPopupChild(_ childWebView: WKWebView, initializedWith initConfiguration: WKWebViewConfiguration) {
+        PopupConfigRegistry.register(
+            childWebViewID: ObjectIdentifier(childWebView),
+            initConfigID: ObjectIdentifier(initConfiguration)
+        )
+    }
+}
+
+/// Tracks popup child construction-time configuration for WKUIDelegate validation.
+///
+/// Why this exists:
+/// - WebKit requires that the WKWebView returned from
+///   `WKUIDelegate.webView(_:createWebViewWith:for:windowFeatures:)`
+///   be initialized with the exact configuration passed into that callback.
+/// - Violating this contract can raise
+///   `NSInternalInconsistencyException` with:
+///   "Returned WKWebView was not created with the given configuration."
+/// - `child.webView.configuration` cannot be used for identity validation after init,
+///   because WebKit may expose a distinct configuration instance there.
+///
+/// To verify the contract reliably, SkipWeb records the configuration identity used
+/// at child construction time (via `makeChildWebEngine`) and compares that recorded
+/// identity in createWebViewWith.
+@MainActor enum PopupConfigRegistry {
+    enum VerificationResult {
+        case matched
+        case mismatch
+        case missingRegistration
+    }
+
+    private static var childInitConfigByWebViewID: [ObjectIdentifier: ObjectIdentifier] = [:]
+    private static var didLogMissingRegistrationWarning = false
+
+    static func register(childWebViewID: ObjectIdentifier, initConfigID: ObjectIdentifier) {
+        childInitConfigByWebViewID[childWebViewID] = initConfigID
+    }
+
+    static func verifyAndConsume(childWebViewID: ObjectIdentifier, expectedConfigID: ObjectIdentifier) -> VerificationResult {
+        guard let initConfigID = childInitConfigByWebViewID.removeValue(forKey: childWebViewID) else {
+            return .missingRegistration
+        }
+        return initConfigID == expectedConfigID ? .matched : .mismatch
+    }
+
+    static func shouldLogMissingRegistrationWarning() -> Bool {
+        if didLogMissingRegistrationWarning {
+            return false
+        }
+        didLogMissingRegistrationWarning = true
+        return true
+    }
+}
+#else
+/// iOS-specific details passed through create-child callback.
+public struct WebKitCreateWindowParams {
+    public init() {
+    }
+}
+#endif
+
+#if SKIP
+/// Android-specific details passed through create-child callback.
+public struct AndroidCreateWindowParams {
+    public let isDialog: Bool
+    public let isUserGesture: Bool
+    public let resultMessage: android.os.Message
+
+    public init(isDialog: Bool, isUserGesture: Bool, resultMessage: android.os.Message) {
+        self.isDialog = isDialog
+        self.isUserGesture = isUserGesture
+        self.resultMessage = resultMessage
+    }
+}
+#else
+/// Android-specific details passed through create-child callback.
+public struct AndroidCreateWindowParams {
+    public init() {
+    }
+}
+#endif
+
+#if !SKIP
+public typealias PlatformCreateWindowContext = WebKitCreateWindowParams
+#else
+public typealias PlatformCreateWindowContext = AndroidCreateWindowParams
+#endif
+
+/// Delegate for web view UI behaviors like popup child-window creation.
+public protocol SkipWebUIDelegate: AnyObject {
+    /// Return a child engine to allow popup creation, or `nil` to deny.
+    ///
+    /// Platform behavior:
+    /// - iOS: called from `WKUIDelegate.webView(_:createWebViewWith:for:windowFeatures:)`.
+    /// - Android: called from `WebChromeClient.onCreateWindow`.
+    ///   `request.targetURL` may be `nil` on Android at creation time.
+    func webView(_ webView: WebView, createWebViewWith request: WebWindowRequest, platformContext: PlatformCreateWindowContext) -> WebEngine?
+
+    /// Called when a previously created child web view is closed.
+    ///
+    /// Platform behavior:
+    /// - iOS: invoked from `WKUIDelegate.webViewDidClose(_:)`.
+    /// - Android: invoked from `WebChromeClient.onCloseWindow`.
+    func webViewDidClose(_ webView: WebView, child: WebEngine)
+}
+
+public extension SkipWebUIDelegate {
+    func webView(_ webView: WebView, createWebViewWith request: WebWindowRequest, platformContext: PlatformCreateWindowContext) -> WebEngine? {
+        nil
+    }
+
+    func webViewDidClose(_ webView: WebView, child: WebEngine) {
+    }
+}
 
 /// The configuration for a WebEngine
 @Observable public class WebEngineConfiguration {
     public var javaScriptEnabled: Bool
+    public var javaScriptCanOpenWindowsAutomatically: Bool
     public var allowsBackForwardNavigationGestures: Bool
     public var allowsPullToRefresh: Bool
     public var allowsInlineMediaPlayback: Bool
@@ -509,6 +722,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
     public var userScripts: [WebViewUserScript]
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
+    public var uiDelegate: (any SkipWebUIDelegate)?
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -516,6 +730,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
     #endif
 
     public init(javaScriptEnabled: Bool = true,
+                javaScriptCanOpenWindowsAutomatically: Bool = false,
                 allowsBackForwardNavigationGestures: Bool = true,
                 allowsPullToRefresh: Bool = true,
                 allowsInlineMediaPlayback: Bool = true,
@@ -526,8 +741,10 @@ public struct WebLoadError : Error, CustomStringConvertible {
                 customUserAgent: String? = nil,
                 userScripts: [WebViewUserScript] = [],
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
-                schemeHandlers: [String: URLSchemeHandler] = [:]) {
+                schemeHandlers: [String: URLSchemeHandler] = [:],
+                uiDelegate: (any SkipWebUIDelegate)? = nil) {
         self.javaScriptEnabled = javaScriptEnabled
+        self.javaScriptCanOpenWindowsAutomatically = javaScriptCanOpenWindowsAutomatically
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsPullToRefresh = allowsPullToRefresh
         self.allowsInlineMediaPlayback = allowsInlineMediaPlayback
@@ -539,6 +756,30 @@ public struct WebLoadError : Error, CustomStringConvertible {
         self.userScripts = userScripts
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
+        self.uiDelegate = uiDelegate
+    }
+
+    public func popupChildMirroredConfiguration() -> WebEngineConfiguration {
+        let copy = WebEngineConfiguration(
+            javaScriptEnabled: javaScriptEnabled,
+            javaScriptCanOpenWindowsAutomatically: javaScriptCanOpenWindowsAutomatically,
+            allowsBackForwardNavigationGestures: allowsBackForwardNavigationGestures,
+            allowsPullToRefresh: allowsPullToRefresh,
+            allowsInlineMediaPlayback: allowsInlineMediaPlayback,
+            dataDetectorsEnabled: dataDetectorsEnabled,
+            isScrollEnabled: isScrollEnabled,
+            pageZoom: pageZoom,
+            isOpaque: isOpaque,
+            customUserAgent: customUserAgent,
+            userScripts: userScripts,
+            messageHandlers: messageHandlers,
+            schemeHandlers: schemeHandlers,
+            uiDelegate: uiDelegate
+        )
+        #if SKIP
+        copy.context = context
+        #endif
+        return copy
     }
 
     #if !SKIP

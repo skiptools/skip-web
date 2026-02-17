@@ -85,7 +85,24 @@ public struct WebView : View {
 @Observable public class WebViewState: @unchecked Sendable {
     public internal(set) var isLoading: Bool = false
     public internal(set) var isProvisionallyNavigating: Bool = false
-    public internal(set) var pageURL: String?
+    /// Preferred URL accessor for parity with `WKWebView.url`.
+    /// Using a typed `URL` avoids string parsing at call sites.
+    public internal(set) var url: URL?
+    /// Deprecated string URL accessor kept for source compatibility.
+    /// Prefer `url` to mirror `WKWebView` ergonomics.
+    @available(*, deprecated, renamed: "url")
+    public internal(set) var pageURL: String? {
+        get {
+            url?.absoluteString
+        }
+        set {
+            if let newValue {
+                url = URL(string: newValue)
+            } else {
+                url = nil
+            }
+        }
+    }
     public internal(set) var estimatedProgress: Double?
     public internal(set) var pageTitle: String?
     public internal(set) var pageHTML: String?
@@ -104,7 +121,7 @@ public struct WebView : View {
     }
 
     func updatePageState(webView: PlatformWebView) {
-        self.pageURL = webView.pageURL
+        self.url = webView.currentURL
         self.isLoading = webView.isLoading
         self.estimatedProgress = webView.estimatedProgress
         self.pageTitle = webView.title
@@ -264,6 +281,88 @@ struct WebViewClient : android.webkit.WebViewClient {
     }
 }
 
+final class SkipWebChromeClient : android.webkit.WebChromeClient {
+    let webView: WebView
+    let webEngine: WebEngine
+    private var childEnginesByWebViewHash: [Int32: WebEngine] = [:]
+
+    init(webView: WebView, webEngine: WebEngine) {
+        self.webView = webView
+        self.webEngine = webEngine
+    }
+
+    private func inheritParentConfiguration(for childEngine: WebEngine) {
+        let parentConfig = webEngine.configuration
+        let settings = childEngine.webView.settings
+
+        settings.setJavaScriptEnabled(parentConfig.javaScriptEnabled)
+        settings.setJavaScriptCanOpenWindowsAutomatically(parentConfig.javaScriptCanOpenWindowsAutomatically)
+        settings.setSupportMultipleWindows(parentConfig.uiDelegate != nil)
+        settings.setSafeBrowsingEnabled(false)
+        settings.setAllowContentAccess(true)
+        settings.setAllowFileAccess(true)
+        settings.setDomStorageEnabled(true)
+        if parentConfig.customUserAgent != nil {
+            settings.setUserAgentString(parentConfig.customUserAgent)
+        }
+
+        childEngine.webView.setBackgroundColor(0x000000)
+        childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
+        childEngine.engineDelegate = WebEngineDelegate(childEngine.configuration, WebViewClient(webView: self.webView))
+        childEngine.webView.webChromeClient = self
+    }
+
+    override func onCreateWindow(view: PlatformWebView, isDialog: Bool, isUserGesture: Bool, resultMsg: android.os.Message) -> Bool {
+        guard let uiDelegate = webEngine.configuration.uiDelegate else {
+            return false
+        }
+
+        let sourceURL = URL(string: view.getUrl() ?? "")
+        let request = WebWindowRequest(
+            sourceURL: sourceURL,
+            targetURL: nil,
+            isUserGesture: isUserGesture,
+            isDialog: isDialog,
+            isMainFrame: nil
+        )
+        let params = AndroidCreateWindowParams(
+            isDialog: isDialog,
+            isUserGesture: isUserGesture,
+            resultMessage: resultMsg
+        )
+
+        guard let childEngine = uiDelegate.webView(
+            webView,
+            createWebViewWith: request,
+            platformContext: params
+        ) else {
+            return false
+        }
+
+        inheritParentConfiguration(for: childEngine)
+
+        guard let transport = resultMsg.obj as? android.webkit.WebView.WebViewTransport else {
+            logger.error("onCreateWindow: invalid WebViewTransport message payload")
+            return false
+        }
+
+        transport.setWebView(childEngine.webView)
+        resultMsg.sendToTarget()
+        childEnginesByWebViewHash[childEngine.webView.hashCode()] = childEngine
+        return true
+    }
+
+    override func onCloseWindow(window: PlatformWebView) {
+        defer {
+            super.onCloseWindow(window)
+        }
+        guard let childEngine = childEnginesByWebViewHash.removeValue(forKey: window.hashCode()) else {
+            return
+        }
+        webEngine.configuration.uiDelegate?.webViewDidClose(webView, child: childEngine)
+    }
+}
+
 #endif
 
 @available(macOS 14.0, iOS 17.0, *)
@@ -279,6 +378,8 @@ extension WebView : ViewRepresentable {
         #if SKIP
         let settings = webEngine.webView.settings
         settings.setJavaScriptEnabled(config.javaScriptEnabled)
+        settings.setJavaScriptCanOpenWindowsAutomatically(config.javaScriptCanOpenWindowsAutomatically)
+        settings.setSupportMultipleWindows(config.uiDelegate != nil)
         settings.setSafeBrowsingEnabled(false)
         settings.setAllowContentAccess(true)
         settings.setAllowFileAccess(true)
@@ -289,6 +390,7 @@ extension WebView : ViewRepresentable {
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
         webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(webView: self))
+        webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
@@ -351,6 +453,7 @@ extension WebView : ViewRepresentable {
 
         let preferences = configuration.defaultWebpagePreferences!
         preferences.allowsContentJavaScript = config.javaScriptEnabled
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = config.javaScriptCanOpenWindowsAutomatically
         preferences.preferredContentMode = .recommended
         // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
 
@@ -458,7 +561,7 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.url)
             .receive(on: DispatchQueue.main)
             .sink { url in
-                context.coordinator.state.pageURL = url?.absoluteString
+                context.coordinator.state.url = url
             }
             .store(in: &context.coordinator.subscriptions)
 
@@ -553,6 +656,7 @@ extension WebView : ViewRepresentable {
     #if !SKIP
     var subscriptions: Set<AnyCancellable> = []
     var lastScrollOffset: CGPoint = .zero
+    var childEnginesByWebViewID: [ObjectIdentifier: WebEngine] = [:]
     #endif
 
     var state: WebViewState {
@@ -572,7 +676,7 @@ extension WebView : ViewRepresentable {
 
         // TODO: Make about:blank history initialization optional via configuration.
 //        #warning("confirm this still works")
-//        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.pageURL.absoluteString == "about:blank" {
+//        if  webView.state.backList.isEmpty && webView.state.forwardList.isEmpty && webView.state.url?.absoluteString == "about:blank" {
 //            Task { @MainActor in
 //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
 //            }
@@ -598,11 +702,14 @@ extension WebView : ViewRepresentable {
 
 // Adaptations from android.webkit.WebView to WKWebView
 extension PlatformWebView {
-    var pageURL: String? {
+    var currentURL: URL? {
         #if !SKIP
-        return url?.absoluteString
+        return url
         #else
-        return getUrl()
+        guard let raw = getUrl() else {
+            return nil
+        }
+        return URL(string: raw)
         #endif
     }
 
@@ -652,10 +759,55 @@ extension WebViewCoordinator: WebUIDelegate {
 
     @MainActor public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         logger.log("createWebViewWith: \(configuration) \(navigationAction)")
-        if let url = navigationAction.request.url {
-            return openURL(url: url, newTab: true)
+        let request = WebWindowRequest(
+            sourceURL: self.navigator.webEngine?.webView.url,
+            targetURL: navigationAction.request.url,
+            isUserGesture: nil,
+            isDialog: nil,
+            isMainFrame: navigationAction.targetFrame?.isMainFrame
+        )
+        let params = WebKitCreateWindowParams(
+            configuration: configuration,
+            navigationAction: navigationAction,
+            windowFeatures: windowFeatures,
+            parentConfigurationSnapshot: config.popupChildMirroredConfiguration(),
+            parentIsInspectable: webView.isInspectable
+        )
+        guard let childEngine = config.uiDelegate?.webView(
+            self.webView,
+            createWebViewWith: request,
+            platformContext: params
+        ) else {
+            return nil
         }
-        return nil // self.navigator.webEngine?.webView // uncaught exception 'NSInternalInconsistencyException', reason: 'Returned WKWebView was not created with the given configuration.'
+
+        // WebKit requires the returned child WKWebView to be initialized with the
+        // exact `configuration` received in this callback. If that contract is
+        // violated, WebKit can raise NSInternalInconsistencyException:
+        // "Returned WKWebView was not created with the given configuration."
+        switch PopupConfigRegistry.verifyAndConsume(
+            childWebViewID: ObjectIdentifier(childEngine.webView),
+            expectedConfigID: ObjectIdentifier(configuration)
+        ) {
+        case .matched:
+            break
+        case .mismatch:
+            logger.error("SkipWeb popup contract violation: child WKWebView was not initialized with the WKWebViewConfiguration provided by WKUIDelegate createWebViewWith. This can trigger NSInternalInconsistencyException: 'Returned WKWebView was not created with the given configuration.' Popup creation will continue.")
+        case .missingRegistration:
+            if PopupConfigRegistry.shouldLogMissingRegistrationWarning() {
+                logger.warning("SkipWeb popup contract could not be verified because no popup construction record was found. Return a child created by platformContext.makeChildWebEngine(...) from your createWebViewWith delegate. Violating this WebKit contract can trigger NSInternalInconsistencyException: 'Returned WKWebView was not created with the given configuration.'")
+            }
+        }
+
+        childEnginesByWebViewID[ObjectIdentifier(childEngine.webView)] = childEngine
+        return childEngine.webView
+    }
+
+    @MainActor public func webViewDidClose(_ webView: WKWebView) {
+        guard let childEngine = childEnginesByWebViewID.removeValue(forKey: ObjectIdentifier(webView)) else {
+            return
+        }
+        config.uiDelegate?.webViewDidClose(self.webView, child: childEngine)
     }
 
     @MainActor public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
@@ -704,7 +856,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
         
         let state = self.webView.state
         state.isLoading = false
-        state.pageURL = webView.url?.absoluteString
+        state.url = webView.url
         state.isProvisionallyNavigating = false
 
         state.updatePageState(webView: webView)
@@ -778,10 +930,10 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy {
-        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.pageURL != url.absoluteString {
+        if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.url != url {
             scriptCaller?.removeAllMultiTargetFrames()
             let newState = self.webView.state
-            newState.pageURL = url.absoluteString
+            newState.url = url
             newState.pageHTML = nil
             newState.error = nil
             self.webView.state = newState
@@ -923,4 +1075,3 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
 
 #endif
 #endif
-
