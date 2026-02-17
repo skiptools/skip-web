@@ -226,6 +226,49 @@ public struct MessageHandlerRouter {
     }
 }
 
+public struct ScriptObjectRouter {
+    let webEngine: WebEngine
+    // SKIP INSERT: @android.webkit.JavascriptInterface
+    public func call(_ objectName: String, _ functionName: String, _ argsJSON: String, _ callbackId: String) {
+        guard let functions = webEngine.configuration.scriptObjects[objectName],
+              let handler = functions[functionName] else {
+            logger.error("ScriptObjectRouter: no handler for \(objectName).\(functionName)")
+            Task { @MainActor in
+                let errorMessage = "No handler for \(objectName).\(functionName)"
+                let errorJS = "window.__skipScriptObjectReject('\(callbackId)', '\(errorMessage)')"
+                webEngine.webView.evaluateJavascript(errorJS) { _ in }
+            }
+            return
+        }
+        var args: [Any] = (try? JSONSerialization.jsonObject(with: argsJSON.data(using: .utf8)!, options: []) as? [Any]) ?? []
+        let arg: Any? = args.count == 1 ? args.first : args
+        Task {
+            do {
+                let result = try await handler(arg)
+                await MainActor.run {
+                    var resolveJS = "window.__skipScriptObjectResolve('\(callbackId)', undefined)"
+                    if let result = result {
+                        if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed, .withoutEscapingSlashes]) {
+                            let jsonString = String(data: jsonData, encoding: .utf8) ?? "null"
+                            let escaped = jsonString.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+                            resolveJS = "window.__skipScriptObjectResolve('\(callbackId)', '\(escaped)')"
+                        } else {
+                            resolveJS = "window.__skipScriptObjectResolve('\(callbackId)', 'null')"
+                        }
+                    }
+                    webEngine.webView.evaluateJavascript(resolveJS) { _ in }
+                }
+            } catch {
+                await MainActor.run {
+                    let errorMessage = "\(error)".replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+                    let errorJS = "window.__skipScriptObjectReject('\(callbackId)', '\(errorMessage)')"
+                    webEngine.webView.evaluateJavascript(errorJS) { _ in }
+                }
+            }
+        }
+    }
+}
+
 struct WebViewClient : android.webkit.WebViewClient {
     let webView: WebView
     override func onPageFinished(view: PlatformWebView, url: String) {
@@ -288,6 +331,9 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
+        if !config.scriptObjects.isEmpty {
+            webEngine.webView.addJavascriptInterface(ScriptObjectRouter(webEngine: webEngine), "skipScriptObjectRouter")
+        }
         webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(webView: self))
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)

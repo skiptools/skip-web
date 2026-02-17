@@ -172,7 +172,11 @@ import kotlinx.coroutines.launch
     @MainActor
     public func refreshMessageHandlers() {
         let userContentController = webView.configuration.userContentController
-        for messageHandlerName in Self.systemMessageHandlers + configuration.messageHandlers.keys {
+        var allHandlerNames = Self.systemMessageHandlers + configuration.messageHandlers.keys
+        if !configuration.scriptObjects.isEmpty {
+            allHandlerNames.append("skipScriptObject")
+        }
+        for messageHandlerName in allHandlerNames {
             if registeredMessageHandlerNames.contains(messageHandlerName) { continue }
 
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
@@ -180,16 +184,20 @@ import kotlinx.coroutines.launch
             userContentController.add(self, contentWorld: .page, name: messageHandlerName)
             registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        for missing in registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + configuration.messageHandlers.keys) {
+        for missing in registeredMessageHandlerNames.subtracting(allHandlerNames) {
             userContentController.removeScriptMessageHandler(forName: missing)
             registeredMessageHandlerNames.remove(missing)
         }
     }
-    
+
     @MainActor
     public func updateUserScripts() {
         let userContentController = webView.configuration.userContentController
-        let allScripts = WebViewUserScript.systemScripts + configuration.userScripts
+        var allScripts = WebViewUserScript.systemScripts + configuration.userScripts
+        let proxyJS = configuration.scriptObjectProxyJavaScript()
+        if !proxyJS.isEmpty {
+            allScripts.insert(WebViewUserScript(source: proxyJS, injectionTime: .atDocumentStart, forMainFrameOnly: true), at: 0)
+        }
         if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
             userContentController.removeAllUserScripts()
             for script in allScripts {
@@ -226,6 +234,45 @@ extension WebEngine: ScriptMessageHandler {
                 logger.error("JS Console \(level): \(content)")
             default:
                 logger.error("JS Console (unknown level \(level)): \(content)")
+            }
+            return
+        }
+        if message.name == "skipScriptObject" {
+            guard let body = message.body as? [String: Any],
+                  let objectName = body["objectName"] as? String,
+                  let functionName = body["functionName"] as? String,
+                  let args = body["args"] as? [Any],
+                  let callbackId = body["callbackId"] as? String else {
+                logger.error("skipScriptObject: invalid message body: \(String(describing: message.body))")
+                return
+            }
+            guard let functions = configuration.scriptObjects[objectName],
+                  let handler = functions[functionName] else {
+                logger.error("skipScriptObject: no handler for \(objectName).\(functionName)")
+                let errorJS = "window.__skipScriptObjectReject('\(callbackId)', 'No handler for \(objectName).\(functionName)')"
+                Task { @MainActor in
+                    try? await self.evaluateJavaScriptAsync(errorJS)
+                }
+                return
+            }
+            let arg: Any? = args.count == 1 ? args.first : args
+            Task { @MainActor in
+                do {
+                    let result = try await handler(arg)
+                    let resultJS: String
+                    if let result = result {
+                        let jsonData = try JSONSerialization.data(withJSONObject: result, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+                        let jsonString = String(data: jsonData, encoding: .utf8) ?? "null"
+                        resultJS = "window.__skipScriptObjectResolve('\(callbackId)', '\(jsonString.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'"))')"
+                    } else {
+                        resultJS = "window.__skipScriptObjectResolve('\(callbackId)', undefined)"
+                    }
+                    _ = try? await self.evaluateJavaScriptAsync(resultJS)
+                } catch {
+                    let errorMessage = "\(error)".replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+                    let errorJS = "window.__skipScriptObjectReject('\(callbackId)', '\(errorMessage)')"
+                    _ = try? await self.evaluateJavaScriptAsync(errorJS)
+                }
             }
             return
         }
@@ -329,6 +376,12 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 })
             });
         """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
+        let proxyJS = config.scriptObjectProxyJavaScript()
+        if !proxyJS.isEmpty {
+            view.evaluateJavascript(proxyJS) { _ in
+                logger.debug("Added script object proxies")
+            }
         }
         for userScript in config.userScripts {
             if userScript.webKitUserScript.injectionTime == .atDocumentStart {
@@ -509,6 +562,7 @@ public struct WebLoadError : Error, CustomStringConvertible {
     public var userScripts: [WebViewUserScript]
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
+    public var scriptObjects: [String: [String: (Any?) async throws -> Any?]]
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -526,7 +580,8 @@ public struct WebLoadError : Error, CustomStringConvertible {
                 customUserAgent: String? = nil,
                 userScripts: [WebViewUserScript] = [],
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
-                schemeHandlers: [String: URLSchemeHandler] = [:]) {
+                schemeHandlers: [String: URLSchemeHandler] = [:],
+                scriptObjects: [String: [String: (Any?) async throws -> Any?]] = [:]) {
         self.javaScriptEnabled = javaScriptEnabled
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
         self.allowsPullToRefresh = allowsPullToRefresh
@@ -539,6 +594,69 @@ public struct WebLoadError : Error, CustomStringConvertible {
         self.userScripts = userScripts
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
+        self.scriptObjects = scriptObjects
+    }
+
+    /// Generates JavaScript that creates Promise-based proxy objects for each script object.
+    public func scriptObjectProxyJavaScript() -> String {
+        guard !scriptObjects.isEmpty else { return "" }
+
+        var js = """
+        (function() {
+        if (!window.__skipScriptObjectCallbacks) {
+            window.__skipScriptObjectCallbacks = {};
+            window.__skipScriptObjectNextId = 0;
+            window.__skipScriptObjectResolve = function(callbackId, resultJSON) {
+                var cb = window.__skipScriptObjectCallbacks[callbackId];
+                if (cb) {
+                    delete window.__skipScriptObjectCallbacks[callbackId];
+                    cb.resolve(resultJSON === undefined ? undefined : JSON.parse(resultJSON));
+                }
+            };
+            window.__skipScriptObjectReject = function(callbackId, errorMessage) {
+                var cb = window.__skipScriptObjectCallbacks[callbackId];
+                if (cb) {
+                    delete window.__skipScriptObjectCallbacks[callbackId];
+                    cb.reject(new Error(errorMessage));
+                }
+            };
+        }
+
+        """
+
+        for (objectName, functions) in scriptObjects {
+            js += "window.\(objectName) = {\n"
+            for (funcName, _) in functions {
+                js += """
+                    \(funcName): function() {
+                        var args = Array.prototype.slice.call(arguments);
+                        var callbackId = String(window.__skipScriptObjectNextId++);
+                        return new Promise(function(resolve, reject) {
+                            window.__skipScriptObjectCallbacks[callbackId] = {resolve: resolve, reject: reject};
+
+                """
+                #if !SKIP
+                js += """
+                            webkit.messageHandlers.skipScriptObject.postMessage({objectName: '\(objectName)', functionName: '\(funcName)', args: args, callbackId: callbackId});
+
+                """
+                #else
+                js += """
+                            skipScriptObjectRouter.call('\(objectName)', '\(funcName)', JSON.stringify(args), callbackId);
+
+                """
+                #endif
+                js += """
+                        });
+                    },
+
+                """
+            }
+            js += "};\n"
+        }
+
+        js += "})();"
+        return js
     }
 
     #if !SKIP

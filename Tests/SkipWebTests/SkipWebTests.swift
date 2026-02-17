@@ -13,16 +13,6 @@ final class SkipWebTests: XCTestCase {
 
     // SKIP INSERT: @get:org.junit.Rule val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
-    func testSkipWeb() throws {
-        logger.log("running testSkipWeb")
-        XCTAssertEqual(1 + 2, 3, "basic test")
-        
-        // load the TestData.json file from the Resources folder and decode it into a struct
-        let resourceURL: URL = try XCTUnwrap(Bundle.module.url(forResource: "TestData", withExtension: "json"))
-        let testData = try JSONDecoder().decode(TestData.self, from: Data(contentsOf: resourceURL))
-        XCTAssertEqual("SkipWeb", testData.testModuleName)
-    }
-
     func testOnWebView() async throws {
         if !isAndroid {
             throw XCTSkip("testOnWebView only works for Android")
@@ -224,6 +214,112 @@ final class SkipWebTests: XCTestCase {
 
     }
 
+    @MainActor func testScriptObjects() async throws {
+        if isMacOS {
+            throw XCTSkip("cannot run WebEngine tests in macOS")
+        }
+
+        if isRobolectric {
+            throw XCTSkip("cannot run WebEngine tests in Robolectric")
+        }
+
+        let config = WebEngineConfiguration(
+            scriptObjects: [
+                "utils": [
+                    "add": { arg in
+                        guard let args = arg as? [Any],
+                              let a = (args[0] as? NSNumber)?.doubleValue,
+                              let b = (args[1] as? NSNumber)?.doubleValue else {
+                            throw NSError(domain: "TestError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid arguments for add"])
+                        }
+                        return a + b
+                    },
+                    "uppercase": { arg in
+                        guard let s = arg as? String else {
+                            throw NSError(domain: "TestError", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid argument for uppercase"])
+                        }
+                        return s.uppercased()
+                    },
+                    "greet": { arg in
+                        guard let name = arg as? String else {
+                            throw NSError(domain: "TestError", code: 3, userInfo: [NSLocalizedDescriptionKey: "Invalid argument for greet"])
+                        }
+                        return "Hello, \(name)!"
+                    }
+                ]
+            ]
+        )
+
+        #if SKIP
+        let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        config.context = ctx
+        let platformWebView = PlatformWebView(ctx)
+        #else
+        let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
+        #endif
+
+        let engine = WebEngine(configuration: config, webView: platformWebView)
+
+        #if SKIP
+        composeRule.setContent {
+            androidx.compose.ui.viewinterop.AndroidView(factory: { ctx in
+                return platformWebView
+            })
+        }
+        #else
+        engine.refreshMessageHandlers()
+        engine.updateUserScripts()
+        #endif
+
+        let html = """
+        <html><head><title>Script Object Test</title></head><body>
+        <script>
+        (async function() {
+            try {
+                var sum = await utils.add(3, 4);
+                window.__testSum = sum;
+                var upper = await utils.uppercase("hello");
+                window.__testUpper = upper;
+                var greeting = await utils.greet("World");
+                window.__testGreeting = greeting;
+                window.__testCompleted = true;
+            } catch(e) {
+                window.__testError = e.message;
+                window.__testCompleted = true;
+            }
+        })();
+        </script>
+        </body></html>
+        """
+
+        try await engine.awaitPageLoaded {
+            engine.loadHTML(html)
+        }
+
+        // Poll for completion
+        for _ in 0..<50 {
+            let completed = try await engine.evaluate(js: "window.__testCompleted === true")
+            if completed == "true" {
+                break
+            }
+            try await Task.sleep(nanoseconds: 100_000_000) // 100ms
+        }
+
+        let errorResult = try await engine.evaluate(js: "window.__testError")
+        if let errorResult = errorResult, errorResult != "null" {
+            XCTFail("Script object test had JS error: \(errorResult)")
+        }
+
+        let sumResult = try await engine.evaluate(js: "window.__testSum")
+        XCTAssertEqual("7", sumResult)
+
+        let upperResult = try await engine.evaluate(js: "window.__testUpper")
+        XCTAssertEqual("\"HELLO\"", upperResult)
+
+        let greetResult = try await engine.evaluate(js: "window.__testGreeting")
+        XCTAssertEqual("\"Hello, World!\"", greetResult)
+    }
+
     func assertMainThread() {
         #if !SKIP
         XCTAssertTrue(Thread.isMainThread)
@@ -234,11 +330,6 @@ final class SkipWebTests: XCTestCase {
 
     #endif
 }
-
-struct TestData : Codable, Hashable {
-    var testModuleName: String
-}
-
 
 #if SKIP
 class WebViewActivity : androidx.activity.ComponentActivity {
