@@ -228,8 +228,12 @@ public enum WebSnapshotError: Error {
         let canvas = Canvas(bitmap)
         let scaleX = Float(Double(targetWidth) / Double(captureWidth))
         let scaleY = Float(Double(targetHeight) / Double(captureHeight))
+        let scrollX = Int(webView.getScrollX())
+        let scrollY = Int(webView.getScrollY())
         canvas.scale(scaleX, scaleY)
-        canvas.translate(-Float(minX), -Float(minY))
+        // Android WebView drawing is offset by the current scroll position,
+        // so we must compensate or the snapshot is padded by blank space.
+        canvas.translate(-Float(minX + scrollX), -Float(minY + scrollY))
         webView.draw(canvas)
 
         let outputStream = java.io.ByteArrayOutputStream()
