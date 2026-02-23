@@ -207,6 +207,13 @@ public class WebViewNavigator: @unchecked Sendable {
         logger.info("evaluateJavaScript: \(js)")
         return try await webEngine?.evaluate(js: js)
     }
+
+    @MainActor public func takeSnapshot(configuration: SkipWebSnapshotConfiguration? = nil) async throws -> SkipWebSnapshot {
+        guard let webEngine else {
+            throw WebSnapshotError.emptySnapshot
+        }
+        return try await webEngine.takeSnapshot(configuration: configuration)
+    }
 }
 
 
