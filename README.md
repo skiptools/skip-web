@@ -43,6 +43,10 @@ struct ConfigurableWebView : View {
 
 ```
 
+`WebViewNavigator` can keep a warm `WebEngine` and reuse it across view recreation.
+When the same navigator is rebound to an engine that already has content/history, `initialURL`/`initialHTML` are not reloaded.
+This lets apps preserve page state when navigating away and back with the same navigator instance.
+
 ## JavaScript
 
 JavaScript can be executed against the browser with:
@@ -238,6 +242,7 @@ let png = snapshot.pngData
 ```
 
 On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
+If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
 
 ## Contribution
 

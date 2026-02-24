@@ -54,7 +54,7 @@ final class SkipWebTests: XCTestCase {
         XCTAssertNotNil(config.uiDelegate)
     }
 
-    /*func testSnapshotConfigurationDefaults() {
+    func testSnapshotConfigurationDefaults() {
         let config = SkipWebSnapshotConfiguration()
         XCTAssertTrue(config.rect.isNull)
         XCTAssertNil(config.snapshotWidth)
@@ -115,7 +115,7 @@ final class SkipWebTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(snapshot.pixelWidth, Int(requestedWidth))
         XCTAssertEqual(Double(snapshot.pixelHeight) / Double(snapshot.pixelWidth), Double(rect.height / rect.width), accuracy: 0.05)
         #endif
-    }*/
+    }
 
     func testTakeSnapshotDefaultAndroid() async throws {
         if !isAndroid {

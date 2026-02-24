@@ -141,6 +141,15 @@ public class WebViewNavigator: @unchecked Sendable {
         didSet {
             logger.info("assigned webEngine: \(self.webEngine?.description ?? "NULL")")
 
+            // Allow re-use of an already-warm WebView engine (for example when
+            // navigating away and back to the same WebView screen).
+            guard oldValue !== self.webEngine else { return }
+            guard let webEngine = self.webEngine else { return }
+            let hasExistingContent = webEngine.webView.currentURL != nil
+                || !webEngine.webView.backList.isEmpty
+                || !webEngine.webView.forwardList.isEmpty
+            guard !hasExistingContent else { return }
+
             if let initialURL = initialURL {
                 logger.log("loading initialURL: \(initialURL)")
                 load(url: initialURL)
@@ -251,27 +260,32 @@ public struct MessageHandlerRouter {
 }
 
 struct WebViewClient : android.webkit.WebViewClient {
-    let webView: WebView
-    override func onPageFinished(view: PlatformWebView, url: String) {
-        webView.state.updatePageState(webView: view)
+    let state: WebViewState
+    let onNavigationCommitted: (() -> Void)?
+    let onNavigationFinished: (() -> Void)?
+    let onNavigationFailed: (() -> Void)?
+    let shouldOverrideUrlLoadingHandler: ((_ url: URL) -> Bool)?
 
-        if let onNavigationFinished = webView.onNavigationFinished {
+    override func onPageFinished(view: PlatformWebView, url: String) {
+        state.updatePageState(webView: view)
+
+        if let onNavigationFinished {
             onNavigationFinished()
         }
     }
     
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
-        webView.state.updatePageState(webView: view)
+        state.updatePageState(webView: view)
 
-        if let onNavigationCommitted = webView.onNavigationCommitted {
+        if let onNavigationCommitted {
             onNavigationCommitted()
         }
     }
     
     override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
-        webView.state.updatePageState(webView: view)
+        state.updatePageState(webView: view)
 
-        if let onNavigationFailed = webView.onNavigationFailed {
+        if let onNavigationFailed {
             onNavigationFailed()
         }
     }
@@ -280,7 +294,7 @@ struct WebViewClient : android.webkit.WebViewClient {
         guard let url = URL(string: request.url.toString()) else {
             return false
         }
-        let result = webView.shouldOverrideUrlLoading?(url) ?? false
+        let result = shouldOverrideUrlLoadingHandler?(url) ?? false
         if result {
             logger.log("Override URL loading for \(url)")
         }
@@ -315,7 +329,13 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
         childEngine.webView.setBackgroundColor(0x000000)
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
-        childEngine.engineDelegate = WebEngineDelegate(childEngine.configuration, WebViewClient(webView: self.webView))
+        childEngine.engineDelegate = WebEngineDelegate(childEngine.configuration, WebViewClient(
+            state: self.webView.state,
+            onNavigationCommitted: self.webView.onNavigationCommitted,
+            onNavigationFinished: self.webView.onNavigationFinished,
+            onNavigationFailed: self.webView.onNavigationFailed,
+            shouldOverrideUrlLoadingHandler: self.webView.shouldOverrideUrlLoading
+        ))
         childEngine.webView.webChromeClient = self
     }
 
@@ -396,8 +416,18 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
-        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(webView: self))
-        webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
+        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(
+            state: state,
+            onNavigationCommitted: onNavigationCommitted,
+            onNavigationFinished: onNavigationFinished,
+            onNavigationFailed: onNavigationFailed,
+            shouldOverrideUrlLoadingHandler: shouldOverrideUrlLoading
+        ))
+        if config.uiDelegate != nil {
+            webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
+        } else {
+            webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
+        }
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
@@ -472,7 +502,10 @@ extension WebView : ViewRepresentable {
         }
         #endif
 
-        navigator.webEngine = webEngine
+        if navigator.webEngine !== webEngine {
+            // Rebind only when needed so we do not re-trigger initial content loading.
+            navigator.webEngine = webEngine
+        }
 
         return webEngine
     }
@@ -486,7 +519,9 @@ extension WebView : ViewRepresentable {
         ComposeView { ctx in
             AndroidView(factory: { ctx in
                 config.context = ctx
-                let webEngine = WebEngine(config)
+                // Re-use the navigator-owned engine so Android WebView survives
+                // screen navigation with the same navigator instance.
+                let webEngine = navigator.webEngine ?? WebEngine(config)
 
                 return setupWebView(webEngine).webView
             }, modifier: ctx.modifier, update: { webView in

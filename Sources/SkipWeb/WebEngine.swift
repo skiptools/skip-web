@@ -20,12 +20,7 @@ import kotlinx.coroutines.launch
 
 #if SKIP || os(iOS)
 
-/// Snapshot configuration for `WebEngine.takeSnapshot(configuration:)`.
-///
-/// This mirrors the key behavior of `WKSnapshotConfiguration`:
-/// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
-/// - `snapshotWidth`: optional output width while preserving aspect ratio
-/// - `afterScreenUpdates`: capture after pending updates when possible
+
 public struct SkipWebSnapshotRect: Equatable, Sendable {
     public static let null = SkipWebSnapshotRect(x: 0.0, y: 0.0, width: -1.0, height: -1.0)
 
@@ -50,6 +45,12 @@ public struct SkipWebSnapshotRect: Equatable, Sendable {
     }
 }
 
+/// Snapshot configuration for `WebEngine.takeSnapshot(configuration:)`.
+///
+/// This mirrors the key behavior of `WKSnapshotConfiguration`:
+/// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
+/// - `snapshotWidth`: optional output width while preserving aspect ratio
+/// - `afterScreenUpdates`: capture after pending updates when possible
 public struct SkipWebSnapshotConfiguration {
     public var rect: SkipWebSnapshotRect
     public var snapshotWidth: Double?
@@ -77,6 +78,7 @@ public struct SkipWebSnapshot {
 
 public enum WebSnapshotError: Error {
     case viewNotLaidOut
+    case afterScreenUpdatesUnavailable
     case invalidRect
     case emptySnapshot
     case pngEncodingFailed
@@ -167,9 +169,6 @@ public enum WebSnapshotError: Error {
         }
         platformConfig.afterScreenUpdates = config.afterScreenUpdates
 
-        /*guard let snapshotImage = try await webView.takeSnapshot(configuration: platformConfig) else {
-            throw WebSnapshotError.emptySnapshot
-        }*/
         let snapshotImage = try await webView.takeSnapshot(configuration: platformConfig)
         guard let pngData = snapshotImage.pngData() else {
             throw WebSnapshotError.pngEncodingFailed
@@ -190,13 +189,20 @@ public enum WebSnapshotError: Error {
         }
 
         if config.afterScreenUpdates {
-            let _: Bool = suspendCancellableCoroutine { continuation in
-                _ = webView.post {
+            let didScheduleUIUpdateWait: Bool = suspendCancellableCoroutine { continuation in
+                let scheduled = webView.post {
                     continuation.resume(true)
+                }
+                guard scheduled else {
+                    continuation.resume(false)
+                    return
                 }
                 continuation.invokeOnCancellation { _ in
                     continuation.cancel()
                 }
+            }
+            guard didScheduleUIUpdateWait else {
+                throw WebSnapshotError.afterScreenUpdatesUnavailable
             }
         }
 
