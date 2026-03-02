@@ -6,6 +6,8 @@ import SwiftUI
 import WebKit
 import UniformTypeIdentifiers
 #else
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -17,6 +19,70 @@ import kotlinx.coroutines.launch
 #endif
 
 #if SKIP || os(iOS)
+
+
+public struct SkipWebSnapshotRect: Equatable, Sendable {
+    public static let null = SkipWebSnapshotRect(x: 0.0, y: 0.0, width: -1.0, height: -1.0)
+
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+
+    public init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    public var isNull: Bool {
+        width < 0.0 || height < 0.0
+    }
+
+    fileprivate var asCGRect: CGRect {
+        isNull ? .null : CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+/// Snapshot configuration for `WebEngine.takeSnapshot(configuration:)`.
+///
+/// This mirrors the key behavior of `WKSnapshotConfiguration`:
+/// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
+/// - `snapshotWidth`: optional output width while preserving aspect ratio
+/// - `afterScreenUpdates`: capture after pending updates when possible
+public struct SkipWebSnapshotConfiguration {
+    public var rect: SkipWebSnapshotRect
+    public var snapshotWidth: Double?
+    public var afterScreenUpdates: Bool
+
+    public init(rect: SkipWebSnapshotRect = .null, snapshotWidth: Double? = nil, afterScreenUpdates: Bool = true) {
+        self.rect = rect
+        self.snapshotWidth = snapshotWidth
+        self.afterScreenUpdates = afterScreenUpdates
+    }
+}
+
+/// A captured web-view snapshot stored as PNG bytes plus pixel dimensions.
+public struct SkipWebSnapshot {
+    public let pngData: Data
+    public let pixelWidth: Int
+    public let pixelHeight: Int
+
+    public init(pngData: Data, pixelWidth: Int, pixelHeight: Int) {
+        self.pngData = pngData
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+    }
+}
+
+public enum WebSnapshotError: Error {
+    case viewNotLaidOut
+    case afterScreenUpdatesUnavailable
+    case invalidRect
+    case emptySnapshot
+    case pngEncodingFailed
+}
 
 /// An web engine that holds a system web view:
 /// [`WebKit.WKWebView`](https://developer.apple.com/documentation/webkit/wkwebview) on iOS and
@@ -90,6 +156,109 @@ import kotlinx.coroutines.launch
     /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
         return try await evaluateJavaScriptAsync(js)
+    }
+
+    @MainActor public func takeSnapshot(configuration: SkipWebSnapshotConfiguration? = nil) async throws -> SkipWebSnapshot {
+        let config = configuration ?? SkipWebSnapshotConfiguration()
+
+        #if !SKIP
+        let platformConfig = WKSnapshotConfiguration()
+        platformConfig.rect = config.rect.asCGRect
+        if let snapshotWidth = config.snapshotWidth {
+            platformConfig.snapshotWidth = NSNumber(value: snapshotWidth)
+        }
+        platformConfig.afterScreenUpdates = config.afterScreenUpdates
+
+        let snapshotImage = try await webView.takeSnapshot(configuration: platformConfig)
+        guard let pngData = snapshotImage.pngData() else {
+            throw WebSnapshotError.pngEncodingFailed
+        }
+
+        let pixelWidth = Int(snapshotImage.size.width * snapshotImage.scale)
+        let pixelHeight = Int(snapshotImage.size.height * snapshotImage.scale)
+        return SkipWebSnapshot(
+            pngData: pngData,
+            pixelWidth: pixelWidth,
+            pixelHeight: pixelHeight
+        )
+        #else
+        let sourceWidth = Int(webView.getWidth())
+        let sourceHeight = Int(webView.getHeight())
+        guard sourceWidth > 0, sourceHeight > 0 else {
+            throw WebSnapshotError.viewNotLaidOut
+        }
+
+        if config.afterScreenUpdates {
+            let didScheduleUIUpdateWait: Bool = suspendCancellableCoroutine { continuation in
+                let scheduled = webView.post {
+                    continuation.resume(true)
+                }
+                guard scheduled else {
+                    continuation.resume(false)
+                    return
+                }
+                continuation.invokeOnCancellation { _ in
+                    continuation.cancel()
+                }
+            }
+            guard didScheduleUIUpdateWait else {
+                throw WebSnapshotError.afterScreenUpdatesUnavailable
+            }
+        }
+
+        let fullRect = CGRect(x: 0.0, y: 0.0, width: CGFloat(sourceWidth), height: CGFloat(sourceHeight))
+        let requestedRect = config.rect.isNull ? fullRect : config.rect.asCGRect
+        let clampedRect = requestedRect.intersection(fullRect)
+        let minX = max(0, Int(floor(clampedRect.minX)))
+        let minY = max(0, Int(floor(clampedRect.minY)))
+        let maxX = min(sourceWidth, Int(ceil(clampedRect.maxX)))
+        let maxY = min(sourceHeight, Int(ceil(clampedRect.maxY)))
+        let captureWidth = maxX - minX
+        let captureHeight = maxY - minY
+        guard captureWidth > 0, captureHeight > 0 else {
+            throw WebSnapshotError.invalidRect
+        }
+
+        let targetWidth: Int
+        if let snapshotWidth = config.snapshotWidth {
+            guard snapshotWidth > 0 else {
+                throw WebSnapshotError.invalidRect
+            }
+            targetWidth = max(1, Int(snapshotWidth.rounded()))
+        } else {
+            targetWidth = captureWidth
+        }
+        let targetHeight = max(1, Int((Double(captureHeight) * (Double(targetWidth) / Double(captureWidth))).rounded()))
+
+        let bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        let canvas = Canvas(bitmap)
+        let scaleX = Float(Double(targetWidth) / Double(captureWidth))
+        let scaleY = Float(Double(targetHeight) / Double(captureHeight))
+        let scrollX = Int(webView.getScrollX())
+        let scrollY = Int(webView.getScrollY())
+        canvas.scale(scaleX, scaleY)
+        // Android WebView drawing is offset by the current scroll position,
+        // so we must compensate or the snapshot is padded by blank space.
+        canvas.translate(-Float(minX + scrollX), -Float(minY + scrollY))
+        webView.draw(canvas)
+
+        let outputStream = java.io.ByteArrayOutputStream()
+        let encoded = bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
+        bitmap.recycle()
+        guard encoded else {
+            throw WebSnapshotError.pngEncodingFailed
+        }
+
+        let base64 = android.util.Base64.encodeToString(outputStream.toByteArray(), android.util.Base64.NO_WRAP)
+        guard let pngData = Data(base64Encoded: base64, options: []) else {
+            throw WebSnapshotError.pngEncodingFailed
+        }
+        return SkipWebSnapshot(
+            pngData: pngData,
+            pixelWidth: targetWidth,
+            pixelHeight: targetHeight
+        )
+        #endif
     }
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {

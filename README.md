@@ -43,6 +43,10 @@ struct ConfigurableWebView : View {
 
 ```
 
+`WebViewNavigator` can keep a warm `WebEngine` and reuse it across view recreation.
+When the same navigator is rebound to an engine that already has content/history, `initialURL`/`initialHTML` are not reloaded.
+This lets apps preserve page state when navigating away and back with the same navigator instance.
+
 ## JavaScript
 
 JavaScript can be executed against the browser with:
@@ -215,6 +219,30 @@ SkipWeb validates this contract at popup creation time:
 For iOS parity, return a child created with `platformContext.makeChildWebEngine(...)`.
 By default this mirrors the parent `WebEngineConfiguration` and inspectability on the popup child. Pass an explicit configuration only when you intentionally want the child to diverge.
 This default mirroring is configuration-level. Platform delegate assignments on the returned child (`WKUIDelegate`, `WKNavigationDelegate`) are not automatically copied from the parent, so assign them explicitly if your app depends on that behavior.
+
+## Snapshots
+
+`SkipWeb` provides `WebEngine.takeSnapshot(configuration:)` and `WebViewNavigator.takeSnapshot(configuration:)`
+using `SkipWebSnapshotConfiguration`, which mirrors the core `WKSnapshotConfiguration` fields:
+
+- `rect` (`.null` captures the full visible web view bounds)
+- `snapshotWidth` (output width while preserving aspect ratio)
+- `afterScreenUpdates`
+
+```swift
+let snapshot = try await navigator.takeSnapshot(
+    configuration: SkipWebSnapshotConfiguration(
+        rect: .null,
+        snapshotWidth: 240,
+        afterScreenUpdates: true
+    )
+)
+
+let png = snapshot.pngData
+```
+
+On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
+If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
 
 ## Contribution
 
