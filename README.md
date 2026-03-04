@@ -220,6 +220,72 @@ For iOS parity, return a child created with `platformContext.makeChildWebEngine(
 By default this mirrors the parent `WebEngineConfiguration` and inspectability on the popup child. Pass an explicit configuration only when you intentionally want the child to diverge.
 This default mirroring is configuration-level. Platform delegate assignments on the returned child (`WKUIDelegate`, `WKNavigationDelegate`) are not automatically copied from the parent, so assign them explicitly if your app depends on that behavior.
 
+## Scroll Delegate
+
+`SkipWeb` exposes a `WebView`-attached scroll delegate API that follows `UIScrollViewDelegate` naming where practical while remaining portable across iOS and Android.
+
+Attach a delegate through `WebView(scrollDelegate:)`:
+
+```swift
+import SwiftUI
+import SkipWeb
+
+final class ScrollProbe: SkipWebScrollDelegate {
+    func scrollViewDidEndDragging(_ scrollView: WebScrollViewProxy, willDecelerate decelerate: Bool) {
+        print("ended drag at y=\(scrollView.contentOffset.y), decelerate=\(decelerate)")
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: WebScrollViewProxy) {
+        print("scroll settled at y=\(scrollView.contentOffset.y)")
+    }
+}
+
+struct ScrollHostView: View {
+    private let scrollDelegate = ScrollProbe()
+    @State private var navigator = WebViewNavigator()
+
+    var body: some View {
+        WebView(
+            navigator: navigator,
+            url: URL(string: "https://example.com")!,
+            scrollDelegate: scrollDelegate
+        )
+    }
+}
+```
+
+Supported callbacks:
+
+- `scrollViewDidScroll(_:)`
+- `scrollViewWillBeginDragging(_:)`
+- `scrollViewDidEndDragging(_:willDecelerate:)`
+- `scrollViewWillBeginDecelerating(_:)`
+- `scrollViewDidEndDecelerating(_:)`
+
+`WebScrollViewProxy` exposes portable geometry through `WebScrollPoint` and `WebScrollSize`:
+
+- `contentOffset`
+- `contentSize`
+- `visibleSize`
+- `isTracking`
+- `isDragging`
+- `isDecelerating`
+- `isScrollEnabled`
+
+### Platform callback semantics
+
+| Callback | iOS | Android |
+| --- | --- | --- |
+| `scrollViewDidScroll(_:)` | Native `UIScrollViewDelegate.scrollViewDidScroll` | `WebView.setOnScrollChangeListener` |
+| `scrollViewWillBeginDragging(_:)` | Native `UIScrollViewDelegate.scrollViewWillBeginDragging` | Inferred from touch movement crossing touch-slop |
+| `scrollViewDidEndDragging(_:willDecelerate:)` | Native `UIScrollViewDelegate.scrollViewDidEndDragging` | Inferred from touch end plus fling velocity |
+| `scrollViewWillBeginDecelerating(_:)` | Native `UIScrollViewDelegate.scrollViewWillBeginDecelerating` | Emitted when fling velocity crosses the deceleration threshold |
+| `scrollViewDidEndDecelerating(_:)` | Native `UIScrollViewDelegate.scrollViewDidEndDecelerating` | Emitted after a brief scroll idle period during momentum |
+
+Android deceleration is heuristic-based because `android.webkit.WebView` does not expose a direct `didEndDecelerating` callback.
+
+`scrollViewDidScrollToTop(_:)` is intentionally deferred from the current API.
+
 ## Snapshots
 
 `SkipWeb` provides `WebEngine.takeSnapshot(configuration:)` and `WebViewNavigator.takeSnapshot(configuration:)`

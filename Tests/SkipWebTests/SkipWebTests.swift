@@ -2,7 +2,7 @@
 import XCTest
 import OSLog
 import Foundation
-import SkipWeb
+@testable import SkipWeb
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
@@ -12,6 +12,50 @@ final class SkipWebTests: XCTestCase {
     #if SKIP || os(iOS)
 
     final class DummyUIDelegate: SkipWebUIDelegate { }
+    final class NoOpScrollDelegate: SkipWebScrollDelegate { }
+
+    @MainActor
+    final class RecordingScrollDelegate: SkipWebScrollDelegate {
+        var events: [String] = []
+        var snapshots: [WebScrollViewProxy] = []
+
+        func scrollViewDidScroll(_ scrollView: WebScrollViewProxy) {
+            events.append("didScroll")
+            snapshots.append(scrollView)
+        }
+
+        func scrollViewWillBeginDragging(_ scrollView: WebScrollViewProxy) {
+            events.append("willBeginDragging")
+            snapshots.append(scrollView)
+        }
+
+        func scrollViewDidEndDragging(_ scrollView: WebScrollViewProxy, willDecelerate decelerate: Bool) {
+            events.append("didEndDragging:\(decelerate)")
+            snapshots.append(scrollView)
+        }
+
+        func scrollViewWillBeginDecelerating(_ scrollView: WebScrollViewProxy) {
+            events.append("willBeginDecelerating")
+            snapshots.append(scrollView)
+        }
+
+        func scrollViewDidEndDecelerating(_ scrollView: WebScrollViewProxy) {
+            events.append("didEndDecelerating")
+            snapshots.append(scrollView)
+        }
+    }
+
+    #if !SKIP
+    final class TestScrollView: UIScrollView {
+        var forcedTracking = false
+        var forcedDragging = false
+        var forcedDecelerating = false
+
+        override var isTracking: Bool { forcedTracking }
+        override var isDragging: Bool { forcedDragging }
+        override var isDecelerating: Bool { forcedDecelerating }
+    }
+    #endif
 
     // SKIP INSERT: @get:org.junit.Rule val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
@@ -53,6 +97,167 @@ final class SkipWebTests: XCTestCase {
         config.uiDelegate = DummyUIDelegate()
         XCTAssertNotNil(config.uiDelegate)
     }
+
+    func testWebScrollViewProxyIdentityEquality() {
+        let proxy = WebScrollViewProxy()
+        XCTAssertEqual(proxy, proxy)
+        XCTAssertNotEqual(proxy, WebScrollViewProxy())
+    }
+
+    func testNoOpScrollDelegateDefaults() {
+        let delegate = NoOpScrollDelegate()
+        let proxy = WebScrollViewProxy()
+        delegate.scrollViewDidScroll(proxy)
+        delegate.scrollViewWillBeginDragging(proxy)
+        delegate.scrollViewDidEndDragging(proxy, willDecelerate: false)
+        delegate.scrollViewWillBeginDecelerating(proxy)
+        delegate.scrollViewDidEndDecelerating(proxy)
+    }
+
+    @MainActor
+    func testWebViewInitializerAcceptsScrollDelegate() {
+        let delegate = NoOpScrollDelegate()
+        let view = WebView(scrollDelegate: delegate)
+        let coordinator = view.makeCoordinator()
+        XCTAssertNotNil(coordinator.publicScrollDelegate)
+    }
+
+    #if !SKIP
+    @MainActor
+    func testIOSScrollDelegateCallbacksUseProxy() {
+        let delegate = RecordingScrollDelegate()
+        let view = WebView(scrollDelegate: delegate)
+        let coordinator = view.makeCoordinator()
+
+        let scrollView = TestScrollView(frame: CGRect(x: 0, y: 0, width: 120, height: 200))
+        scrollView.contentSize = CGSize(width: 120, height: 600)
+        scrollView.contentOffset = CGPoint(x: 0, y: 40)
+        scrollView.forcedTracking = true
+        scrollView.forcedDragging = true
+
+        coordinator.scrollViewWillBeginDragging(scrollView)
+        coordinator.scrollViewDidScroll(scrollView)
+
+        scrollView.forcedTracking = false
+        scrollView.forcedDragging = false
+        coordinator.scrollViewDidEndDragging(scrollView, willDecelerate: true)
+
+        scrollView.forcedDecelerating = true
+        coordinator.scrollViewWillBeginDecelerating(scrollView)
+
+        scrollView.forcedDecelerating = false
+        coordinator.scrollViewDidEndDecelerating(scrollView)
+
+        XCTAssertEqual(
+            delegate.events,
+            ["willBeginDragging", "didScroll", "didEndDragging:true", "willBeginDecelerating", "didEndDecelerating"]
+        )
+        XCTAssertTrue(delegate.snapshots.allSatisfy { $0 === coordinator.scrollViewProxy })
+        XCTAssertEqual(coordinator.scrollViewProxy.contentOffset.y, 40)
+        XCTAssertEqual(coordinator.scrollViewProxy.visibleSize.height, 200)
+        XCTAssertEqual(coordinator.scrollViewProxy.contentSize.height, 600)
+        XCTAssertTrue(coordinator.state.scrollingDown)
+    }
+
+    @MainActor
+    func testIOSScrollDelegateCanBeReplacedOnUpdate() {
+        let initialDelegate = RecordingScrollDelegate()
+        let replacementDelegate = RecordingScrollDelegate()
+        let initialView = WebView(scrollDelegate: initialDelegate)
+        let coordinator = initialView.makeCoordinator()
+        coordinator.update(from: WebView(scrollDelegate: replacementDelegate))
+
+        let scrollView = TestScrollView(frame: CGRect(x: 0, y: 0, width: 120, height: 200))
+        scrollView.contentSize = CGSize(width: 120, height: 600)
+        scrollView.contentOffset = CGPoint(x: 0, y: 40)
+        scrollView.forcedTracking = true
+        scrollView.forcedDragging = true
+
+        coordinator.scrollViewDidScroll(scrollView)
+
+        XCTAssertTrue(initialDelegate.events.isEmpty)
+        XCTAssertEqual(replacementDelegate.events, ["didScroll"])
+    }
+    #endif
+
+    #if SKIP
+    func testAndroidScaledContentSizeUsesScale() {
+        let size = AndroidScrollTracker.scaledContentSize(
+            visibleSize: CGSize(width: 120, height: 200),
+            contentWidth: 80.0,
+            contentHeight: 300.0,
+            scale: 2.0
+        )
+        XCTAssertEqual(size.width, 160.0)
+        XCTAssertEqual(size.height, 600.0)
+    }
+
+    @MainActor
+    func testAndroidScrollTrackerCallbacks() async throws {
+        if !isAndroid {
+            throw XCTSkip("testAndroidScrollTrackerCallbacks only runs on Android")
+        }
+
+        let delegate = RecordingScrollDelegate()
+        let config = WebEngineConfiguration()
+        let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        config.context = ctx
+
+        let view = WebView(configuration: config, scrollDelegate: delegate)
+        let coordinator = view.makeCoordinator()
+        let tracker = try XCTUnwrap(coordinator.androidScrollTracker)
+        let platformWebView = PlatformWebView(ctx)
+        tracker.attach(to: platformWebView)
+        platformWebView.layout(0, 0, 120, 200)
+
+        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0))
+        tracker.handleTouchMove(to: CGPoint(x: 0, y: 40), webView: platformWebView)
+        XCTAssertEqual(delegate.snapshots.first?.visibleSize.height, 200)
+        XCTAssertEqual(delegate.snapshots.first?.contentSize.height, 200)
+        tracker.handleScrollChanged(
+            scrollX: 0,
+            scrollY: 100,
+            oldScrollX: 0,
+            oldScrollY: 20,
+            visibleSize: CGSize(width: 120, height: 200),
+            contentSize: CGSize(width: 120, height: 600)
+        )
+        tracker.handleTouchEnd(at: CGPoint(x: 0, y: 40), velocity: CGPoint(x: 0, y: 10))
+
+        XCTAssertEqual(delegate.events, ["willBeginDragging", "didScroll", "didEndDragging:false"])
+        XCTAssertTrue(coordinator.state.scrollingDown)
+
+        delegate.events.removeAll()
+
+        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0))
+        tracker.handleTouchMove(to: CGPoint(x: 0, y: 50), webView: platformWebView)
+        tracker.handleScrollChanged(
+            scrollX: 0,
+            scrollY: 180,
+            oldScrollX: 0,
+            oldScrollY: 120,
+            visibleSize: CGSize(width: 120, height: 200),
+            contentSize: CGSize(width: 120, height: 600)
+        )
+        tracker.handleTouchEnd(at: CGPoint(x: 0, y: 50), velocity: CGPoint(x: 0, y: 10_000))
+        tracker.handleScrollChanged(
+            scrollX: 0,
+            scrollY: 260,
+            oldScrollX: 0,
+            oldScrollY: 180,
+            visibleSize: CGSize(width: 120, height: 200),
+            contentSize: CGSize(width: 120, height: 600)
+        )
+
+        try await Task.sleep(nanoseconds: 250_000_000)
+
+        XCTAssertEqual(
+            delegate.events,
+            ["willBeginDragging", "didScroll", "didEndDragging:true", "willBeginDecelerating", "didScroll", "didEndDecelerating"]
+        )
+        XCTAssertFalse(coordinator.scrollViewProxy.isDecelerating)
+    }
+    #endif
 
     func testSnapshotConfigurationDefaults() {
         let config = SkipWebSnapshotConfiguration()
