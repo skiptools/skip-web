@@ -98,12 +98,14 @@ final class SkipWebTests: XCTestCase {
         XCTAssertNotNil(config.uiDelegate)
     }
 
+    @MainActor
     func testWebScrollViewProxyIdentityEquality() {
         let proxy = WebScrollViewProxy()
         XCTAssertEqual(proxy, proxy)
         XCTAssertNotEqual(proxy, WebScrollViewProxy())
     }
 
+    @MainActor
     func testNoOpScrollDelegateDefaults() {
         let delegate = NoOpScrollDelegate()
         let proxy = WebScrollViewProxy()
