@@ -79,14 +79,17 @@ Portable geometry is expressed through:
 | Callback | iOS | Android |
 | --- | --- | --- |
 | `scrollViewDidScroll(_:)` | `UIScrollViewDelegate.scrollViewDidScroll` | `WebView.setOnScrollChangeListener` |
-| `scrollViewWillBeginDragging(_:)` | `UIScrollViewDelegate.scrollViewWillBeginDragging` | Inferred when touch movement crosses touch-slop |
-| `scrollViewDidEndDragging(_:willDecelerate:)` | `UIScrollViewDelegate.scrollViewDidEndDragging` | Inferred from touch end and fling velocity |
+| `scrollViewWillBeginDragging(_:)` | `UIScrollViewDelegate.scrollViewWillBeginDragging` | Inferred from touch-slop crossing, or synthesized from first scroll delta while touch is active if `ACTION_MOVE` is missed |
+| `scrollViewDidEndDragging(_:willDecelerate:)` | `UIScrollViewDelegate.scrollViewDidEndDragging` | Inferred from touch end; `willDecelerate` is computed from fling velocity vs Android minimum fling velocity |
 | `scrollViewWillBeginDecelerating(_:)` | `UIScrollViewDelegate.scrollViewWillBeginDecelerating` | Emitted when fling velocity crosses the threshold |
-| `scrollViewDidEndDecelerating(_:)` | `UIScrollViewDelegate.scrollViewDidEndDecelerating` | Emitted after a short quiet period with no further scroll changes |
+| `scrollViewDidEndDecelerating(_:)` | `UIScrollViewDelegate.scrollViewDidEndDecelerating` | Emitted after a short quiet period (~120 ms) with no further scroll changes |
 
 ## Notes
 
 - Android deceleration is heuristic-based because `android.webkit.WebView` does not expose a direct `didEndDecelerating` callback.
+- `SkipWebScrollDelegate` intentionally exposes a focused subset of `UIScrollViewDelegate`; top-scroll, zoom, and scrolling-animation callbacks are not in the public API.
+- On iOS, callback timing comes directly from `UIScrollViewDelegate`; on Android, drag/deceleration lifecycle callbacks are synthesized from touch and scroll signals.
+- On Android, `ACTION_CANCEL` is finalized with a short grace period so nested gesture interception does not prematurely end a drag.
+- On Android, a new touch during momentum immediately ends the synthetic deceleration phase before starting a new drag sequence.
 - `scrollViewDidScroll(_:)` is emitted for any actual scroll offset change, including programmatic scroll updates.
 - Drag and deceleration lifecycle callbacks are user-gesture-driven.
-- `scrollViewDidScrollToTop(_:)` is intentionally not part of the current API.

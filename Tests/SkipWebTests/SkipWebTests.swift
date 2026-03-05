@@ -205,12 +205,12 @@ final class SkipWebTests: XCTestCase {
 
         let view = WebView(configuration: config, scrollDelegate: delegate)
         let coordinator = view.makeCoordinator()
-        let tracker = try XCTUnwrap(coordinator.androidScrollTracker)
         let platformWebView = PlatformWebView(ctx)
-        tracker.attach(to: platformWebView)
+        coordinator.configureAndroidScrollTracking(webView: platformWebView)
+        let tracker = try XCTUnwrap(coordinator.androidScrollTracker)
         platformWebView.layout(0, 0, 120, 200)
 
-        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0))
+        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0), webView: platformWebView)
         tracker.handleTouchMove(to: CGPoint(x: 0, y: 40), webView: platformWebView)
         XCTAssertEqual(delegate.snapshots.first?.visibleSize.height, 200)
         XCTAssertEqual(delegate.snapshots.first?.contentSize.height, 200)
@@ -222,14 +222,14 @@ final class SkipWebTests: XCTestCase {
             visibleSize: CGSize(width: 120, height: 200),
             contentSize: CGSize(width: 120, height: 600)
         )
-        tracker.handleTouchEnd(at: CGPoint(x: 0, y: 40), velocity: CGPoint(x: 0, y: 10))
+        tracker.handleTouchEnd(velocity: CGPoint(x: 0, y: 10))
 
         XCTAssertEqual(delegate.events, ["willBeginDragging", "didScroll", "didEndDragging:false"])
         XCTAssertTrue(coordinator.state.scrollingDown)
 
         delegate.events.removeAll()
 
-        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0))
+        tracker.handleTouchDown(at: CGPoint(x: 0, y: 0), webView: platformWebView)
         tracker.handleTouchMove(to: CGPoint(x: 0, y: 50), webView: platformWebView)
         tracker.handleScrollChanged(
             scrollX: 0,
@@ -239,7 +239,7 @@ final class SkipWebTests: XCTestCase {
             visibleSize: CGSize(width: 120, height: 200),
             contentSize: CGSize(width: 120, height: 600)
         )
-        tracker.handleTouchEnd(at: CGPoint(x: 0, y: 50), velocity: CGPoint(x: 0, y: 10_000))
+        tracker.handleTouchEnd(velocity: CGPoint(x: 0, y: 10_000))
         tracker.handleScrollChanged(
             scrollX: 0,
             scrollY: 260,

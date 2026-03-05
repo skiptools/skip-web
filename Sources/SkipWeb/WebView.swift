@@ -526,9 +526,17 @@ extension WebView : ViewRepresentable {
     }
 
     #if SKIP
+
+    // Without `remember` recompositions recreate WebViewCoordinator, which resets scroll-tracking state and can swap scrollViewProxy identity mid-session
+    @Composable
+    private func rememberedCoordinator() -> WebViewCoordinator {
+        // SKIP INSERT: return androidx.compose.runtime.remember { makeCoordinator() }
+        return makeCoordinator()
+    }
+
     public var body: some View {
         ComposeView { ctx in
-            let coordinator = makeCoordinator()
+            let coordinator = rememberedCoordinator()
             AndroidView(factory: { ctx in
                 config.context = ctx
                 // Re-use the navigator-owned engine so Android WebView survives
@@ -941,7 +949,6 @@ final class AndroidScrollTracker {
         switch motionEvent.actionMasked {
         case android.view.MotionEvent.ACTION_DOWN:
             touchCancelGeneration += 1
-            logger.info("AndroidScrollTracker ACTION_DOWN")
             resetVelocityTracker()
             velocityTracker = android.view.VelocityTracker.obtain()
             velocityTracker?.addMovement(motionEvent)
@@ -952,7 +959,6 @@ final class AndroidScrollTracker {
             handleTouchMove(to: CGPoint(x: Double(motionEvent.x), y: Double(motionEvent.y)), webView: webView)
         case android.view.MotionEvent.ACTION_UP:
             touchCancelGeneration += 1
-            logger.info("AndroidScrollTracker ACTION_UP")
             velocityTracker?.addMovement(motionEvent)
             velocityTracker?.computeCurrentVelocity(1000)
             let velocity = CGPoint(
@@ -962,7 +968,6 @@ final class AndroidScrollTracker {
             handleTouchEnd(velocity: velocity)
             resetVelocityTracker()
         case android.view.MotionEvent.ACTION_CANCEL:
-            logger.info("AndroidScrollTracker ACTION_CANCEL")
             scheduleTouchCancelFinalization()
         default:
             break
@@ -1039,7 +1044,6 @@ final class AndroidScrollTracker {
             visibleSize: currentVisibleSize
         )
         let wasDragging = didBeginDragging
-        logger.info("AndroidScrollTracker handleTouchEnd wasDragging=\(wasDragging) velocityX=\(velocity.x) velocityY=\(velocity.y)")
         defer {
             attachedWebView?.getParent()?.requestDisallowInterceptTouchEvent(false)
             isTrackingTouch = false
@@ -1066,7 +1070,6 @@ final class AndroidScrollTracker {
         )
         let speed = max(abs(velocity.x), abs(velocity.y))
         let willDecelerate = speed >= minimumFlingVelocity
-        logger.info("AndroidScrollTracker didEndDragging willDecelerate=\(willDecelerate) speed=\(speed) minimumFlingVelocity=\(minimumFlingVelocity)")
 
         coordinator.updateScrollProxy(
             contentOffset: snapshot.contentOffset,
@@ -1080,7 +1083,6 @@ final class AndroidScrollTracker {
 
         if willDecelerate {
             isDecelerating = true
-            logger.info("AndroidScrollTracker willBeginDecelerating")
             coordinator.updateScrollProxy(
                 contentOffset: snapshot.contentOffset,
                 contentSize: snapshot.contentSize,
@@ -1111,7 +1113,6 @@ final class AndroidScrollTracker {
             guard self.touchCancelGeneration == generation else {
                 return
             }
-            logger.info("AndroidScrollTracker ACTION_CANCEL finalized")
             self.handleTouchEnd(velocity: .zero)
             self.resetVelocityTracker()
         }
@@ -1134,7 +1135,6 @@ final class AndroidScrollTracker {
         if isTrackingTouch, !isDragging, didMove {
             isDragging = true
             didBeginDragging = true
-            logger.info("AndroidScrollTracker drag-begin from scroll delta")
             let contentOffset = CGPoint(x: Double(scrollX), y: Double(scrollY))
             coordinator.updateScrollProxy(
                 contentOffset: contentOffset,
@@ -1192,7 +1192,6 @@ final class AndroidScrollTracker {
             return
         }
         isDecelerating = false
-        logger.info("AndroidScrollTracker didEndDecelerating")
         decelerationGeneration += 1
         let snapshot = attachedWebView.map(snapshot(from:)) ?? (
             contentOffset: currentContentOffset,
