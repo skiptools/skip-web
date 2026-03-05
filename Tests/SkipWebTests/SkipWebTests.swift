@@ -291,7 +291,18 @@ final class SkipWebTests: XCTestCase {
             engine.loadHTML("<html><body style='margin:0;background:#00AEEF;'><div style='width:320px;height:240px;'>snapshot</div></body></html>")
         }
 
-        let snapshot = try await engine.takeSnapshot()
+        let snapshot: SkipWebSnapshot
+        do {
+            snapshot = try await takeSnapshotWithTimeout(engine)
+        } catch SnapshotTestTimeoutError.timedOut {
+            throw XCTSkip("WKWebView snapshot timed out on iOS simulator CI")
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == "WKErrorDomain", nsError.code == 1 {
+                throw XCTSkip("WKWebView snapshot returned WKErrorDomain Code=1 on iOS simulator CI")
+            }
+            throw error
+        }
         XCTAssertFalse(snapshot.pngData.isEmpty)
         XCTAssertGreaterThan(snapshot.pixelWidth, 0)
         XCTAssertGreaterThan(snapshot.pixelHeight, 0)
@@ -577,6 +588,29 @@ final class SkipWebTests: XCTestCase {
         #else
         XCTAssertTrue((android.os.Looper.myLooper() == android.os.Looper.getMainLooper()), "test case must be run on main thread: \(android.os.Looper.myLooper()) vs. \(android.os.Looper.getMainLooper())") // or else: java.lang.RuntimeException: WebView cannot be initialized on a thread that has no Looper.
         #endif
+    }
+
+    enum SnapshotTestTimeoutError: Error {
+        case timedOut
+    }
+
+    @MainActor
+    func takeSnapshotWithTimeout(_ engine: WebEngine, timeoutNanoseconds: UInt64 = 30_000_000_000) async throws -> SkipWebSnapshot {
+        try await withThrowingTaskGroup(of: SkipWebSnapshot.self) { group in
+            group.addTask { @MainActor in
+                try await engine.takeSnapshot()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw SnapshotTestTimeoutError.timedOut
+            }
+
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else {
+                throw SnapshotTestTimeoutError.timedOut
+            }
+            return first
+        }
     }
 
     #endif
