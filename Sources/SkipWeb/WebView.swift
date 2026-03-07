@@ -33,7 +33,7 @@ import androidx.webkit.WebViewFeature
 ///  and driven with a `WebViewNavigator` which can be associated
 ///  with user interface controls like back/forward buttons and a URL bar.
 public struct WebView : View {
-    private let config: WebEngineConfiguration
+    fileprivate let config: WebEngineConfiguration
     let navigator: WebViewNavigator
 
     @Binding var state: WebViewState
@@ -44,6 +44,7 @@ public struct WebView : View {
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
     let onNavigationFailed: (() -> Void)?
+    let scrollDelegate: (any SkipWebScrollDelegate)?
     let shouldOverrideUrlLoading: ((_ url: URL) -> Bool)?
     let persistentWebViewID: String? = nil
 
@@ -59,6 +60,7 @@ public struct WebView : View {
         url initialURL: URL? = nil,
         html initialHTML: String? = nil,
         state: Binding<WebViewState> = .constant(WebViewState()),
+        scrollDelegate: (any SkipWebScrollDelegate)? = nil,
         onNavigationCommitted: (() -> Void)? = nil,
         onNavigationFinished: (() -> Void)? = nil,
         onNavigationFailed: (() -> Void)? = nil,
@@ -73,6 +75,7 @@ public struct WebView : View {
             navigator.initialHTML = initialHTML
         }
         self._state = state
+        self.scrollDelegate = scrollDelegate
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
@@ -136,6 +139,9 @@ public struct WebView : View {
 public class WebViewNavigator: @unchecked Sendable {
     var initialURL: URL?
     var initialHTML: String?
+    #if SKIP
+    @MainActor var androidScrollTracker: AndroidScrollTracker?
+    #endif
 
     @MainActor public var webEngine: WebEngine? {
         didSet {
@@ -400,7 +406,7 @@ extension WebView : ViewRepresentable {
         WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
     }
 
-    @MainActor private func setupWebView(_ webEngine: WebEngine) -> WebEngine {
+    @MainActor private func setupWebView(_ webEngine: WebEngine, coordinator: WebViewCoordinator? = nil) -> WebEngine {
         // configure JavaScript
         #if SKIP
         let settings = webEngine.webView.settings
@@ -428,6 +434,7 @@ extension WebView : ViewRepresentable {
         } else {
             webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
         }
+        coordinator?.configureAndroidScrollTracking(webView: webEngine.webView)
 
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
@@ -510,22 +517,37 @@ extension WebView : ViewRepresentable {
         return webEngine
     }
 
-    public func update(webView: PlatformWebView) {
+    public func update(webView: PlatformWebView, coordinator: WebViewCoordinator? = nil) {
+        coordinator?.update(from: self)
+        #if !SKIP
+        webView.scrollView.isScrollEnabled = config.isScrollEnabled
+        #endif
         //logger.info("WebView.update: \(webView)")
     }
 
     #if SKIP
+
+    // Without `remember` recompositions recreate WebViewCoordinator, which resets scroll-tracking state and can swap scrollViewProxy identity mid-session
+    @Composable
+    private func rememberedCoordinator() -> WebViewCoordinator {
+        // SKIP INSERT: return androidx.compose.runtime.remember { makeCoordinator() }
+        return makeCoordinator()
+    }
+
     public var body: some View {
         ComposeView { ctx in
+            let coordinator = rememberedCoordinator()
             AndroidView(factory: { ctx in
                 config.context = ctx
                 // Re-use the navigator-owned engine so Android WebView survives
                 // screen navigation with the same navigator instance.
                 let webEngine = navigator.webEngine ?? WebEngine(config)
 
-                return setupWebView(webEngine).webView
+                return setupWebView(webEngine, coordinator: coordinator).webView
             }, modifier: ctx.modifier, update: { webView in
-                self.update(webView: webView)
+                coordinator.update(from: self)
+                coordinator.configureAndroidScrollTracking(webView: webView)
+                self.update(webView: webView, coordinator: coordinator)
             })
         }
     }
@@ -541,7 +563,7 @@ extension WebView : ViewRepresentable {
         if web == nil {
             let engine = WebEngine(configuration: config)
             logger.info("created WebEngine \(id ?? "noid"): \(engine)")
-            web = setupWebView(engine)
+            web = setupWebView(engine, coordinator: coordinator)
             if let id = id {
                 Self.engineCache[id] = engine
             }
@@ -677,28 +699,31 @@ extension WebView : ViewRepresentable {
 
     #if canImport(UIKit)
     public func makeUIView(context: Context) -> WKWebView { create(from: context).webView }
-    public func updateUIView(_ uiView: WKWebView, context: Context) { update(webView: uiView) }
+    public func updateUIView(_ uiView: WKWebView, context: Context) { update(webView: uiView, coordinator: context.coordinator) }
     #elseif canImport(AppKit)
     public func makeNSView(context: Context) -> WKWebView { create(from: context).webView }
-    public func updateNSView(_ nsView: WKWebView, context: Context) { update(webView: nsView) }
+    public func updateNSView(_ nsView: WKWebView, context: Context) { update(webView: nsView, coordinator: context.coordinator) }
     #endif
     #endif
 }
 
 @available(macOS 14.0, iOS 17.0, *)
 @MainActor public class WebViewCoordinator: WebObjectBase {
-    private let webView: WebView
+    private var webView: WebView
 
     var navigator: WebViewNavigator
     var scriptCaller: WebViewScriptCaller?
     var config: WebEngineConfiguration
+    let scrollViewProxy: WebScrollViewProxy
+    var lastScrollOffset: CGPoint = .zero
     
     var compiledContentRules = [String: ContentRuleList]()
 
     #if !SKIP
     var subscriptions: Set<AnyCancellable> = []
-    var lastScrollOffset: CGPoint = .zero
     var childEnginesByWebViewID: [ObjectIdentifier: WebEngine] = [:]
+    #else
+    var androidScrollTracker: AndroidScrollTracker?
     #endif
 
     var state: WebViewState {
@@ -715,6 +740,10 @@ extension WebView : ViewRepresentable {
         self.navigator = navigator
         self.scriptCaller = scriptCaller
         self.config = config
+        self.scrollViewProxy = WebScrollViewProxy(isScrollEnabled: config.isScrollEnabled)
+        #if SKIP
+        self.androidScrollTracker = nil
+        #endif
 
         // TODO: Make about:blank history initialization optional via configuration.
 //        #warning("confirm this still works")
@@ -723,6 +752,24 @@ extension WebView : ViewRepresentable {
 //                webView.action = .load(URLRequest(url: URL(string: "about:blank")!))
 //            }
 //        }
+    }
+
+    func update(from webView: WebView) {
+        self.webView = webView
+        self.navigator = webView.navigator
+        if let scriptCaller = webView.scriptCaller {
+            self.scriptCaller = scriptCaller
+        }
+        self.config = webView.config
+        let snapshot = proxySnapshot()
+        updateScrollProxy(
+            contentOffset: snapshot.contentOffset,
+            contentSize: snapshot.contentSize,
+            visibleSize: snapshot.visibleSize,
+            isTracking: scrollViewProxy.isTracking,
+            isDragging: scrollViewProxy.isDragging,
+            isDecelerating: scrollViewProxy.isDecelerating
+        )
     }
 
     @discardableResult func openURL(url: URL, newTab: Bool) -> PlatformWebView? {
@@ -740,7 +787,434 @@ extension WebView : ViewRepresentable {
         }
     }
     #endif
+
+    var publicScrollDelegate: (any SkipWebScrollDelegate)? {
+        webView.scrollDelegate
+    }
+
+    func proxySnapshot() -> (contentOffset: CGPoint, contentSize: CGSize, visibleSize: CGSize) {
+        (
+            contentOffset: CGPoint(x: scrollViewProxy.contentOffset.x, y: scrollViewProxy.contentOffset.y),
+            contentSize: CGSize(width: scrollViewProxy.contentSize.width, height: scrollViewProxy.contentSize.height),
+            visibleSize: CGSize(width: scrollViewProxy.visibleSize.width, height: scrollViewProxy.visibleSize.height)
+        )
+    }
+
+    func updateScrollProxy(contentOffset: CGPoint,
+                           contentSize: CGSize,
+                           visibleSize: CGSize,
+                           isTracking: Bool,
+                           isDragging: Bool,
+                           isDecelerating: Bool) {
+        scrollViewProxy.update(
+            contentOffset: WebScrollPoint(x: Double(contentOffset.x), y: Double(contentOffset.y)),
+            contentSize: WebScrollSize(width: Double(contentSize.width), height: Double(contentSize.height)),
+            visibleSize: WebScrollSize(width: Double(visibleSize.width), height: Double(visibleSize.height)),
+            isTracking: isTracking,
+            isDragging: isDragging,
+            isDecelerating: isDecelerating,
+            isScrollEnabled: config.isScrollEnabled
+        )
+    }
+
+    func updateScrollingDown(contentOffset: CGPoint,
+                             contentSize: CGSize,
+                             visibleSize: CGSize,
+                             isTracking: Bool) {
+        // Preserve the existing toolbar-direction semantics: only user tracking
+        // updates the state, and inertial scrolling is ignored.
+        if state.isLoading || !isTracking {
+            return
+        }
+
+        defer { lastScrollOffset = contentOffset }
+
+        let offsetY = contentOffset.y
+        let isScrollingDown = ((offsetY + visibleSize.height) >= contentSize.height)
+            || (offsetY > 0 && offsetY > lastScrollOffset.y)
+
+        if state.scrollingDown != isScrollingDown {
+            state.scrollingDown = isScrollingDown
+        }
+    }
+
+    #if SKIP
+    func configureAndroidScrollTracking(webView: PlatformWebView) {
+        if let existingTracker = navigator.androidScrollTracker {
+            existingTracker.updateCoordinator(self)
+            existingTracker.attach(to: webView)
+            androidScrollTracker = existingTracker
+            return
+        }
+
+        let tracker = AndroidScrollTracker(coordinator: self)
+        tracker.attach(to: webView)
+        navigator.androidScrollTracker = tracker
+        androidScrollTracker = tracker
+    }
+    #endif
 }
+
+#if SKIP
+@available(macOS 14.0, iOS 17.0, *)
+@MainActor
+final class AndroidScrollTracker {
+    private weak var coordinator: WebViewCoordinator?
+    private weak var attachedWebView: PlatformWebView?
+    private var touchOrigin: CGPoint?
+    private var velocityTracker: android.view.VelocityTracker?
+    private var isTrackingTouch = false
+    private var isDragging = false
+    private var didBeginDragging = false
+    private var isDecelerating = false
+    private var touchCancelGeneration: Int = 0
+    private var decelerationGeneration: Int = 0
+    private let touchCancelGracePeriodNanoseconds: Int = 120_000_000
+    private let decelerationQuietPeriodNanoseconds: Int = 120_000_000
+
+    private var currentContentOffset: CGPoint {
+        coordinator?.proxySnapshot().contentOffset ?? .zero
+    }
+
+    private var currentContentSize: CGSize {
+        coordinator?.proxySnapshot().contentSize ?? .zero
+    }
+
+    private var currentVisibleSize: CGSize {
+        coordinator?.proxySnapshot().visibleSize ?? .zero
+    }
+
+    init(coordinator: WebViewCoordinator) {
+        self.coordinator = coordinator
+    }
+
+    func updateCoordinator(_ coordinator: WebViewCoordinator) {
+        self.coordinator = coordinator
+    }
+
+    func attach(to webView: PlatformWebView) {
+        attachedWebView = webView
+        webView.setOnScrollChangeListener { [weak self, weak webView] _, scrollX, scrollY, oldScrollX, oldScrollY in
+            guard let self, let webView else {
+                return
+            }
+            let snapshot = self.snapshot(from: webView)
+            self.handleScrollChanged(
+                scrollX: scrollX,
+                scrollY: scrollY,
+                oldScrollX: oldScrollX,
+                oldScrollY: oldScrollY,
+                visibleSize: snapshot.visibleSize,
+                contentSize: snapshot.contentSize
+            )
+        }
+        webView.setOnTouchListener { [weak self, weak webView] _, motionEvent in
+            guard let self, let webView else {
+                return false
+            }
+            guard let motionEvent else {
+                return false
+            }
+            self.handleMotionEvent(motionEvent, on: webView)
+            return false
+        }
+    }
+
+    static func scaledContentSize(visibleSize: CGSize,
+                                  contentWidth: Double,
+                                  contentHeight: Double,
+                                  scale: Double) -> CGSize {
+        CGSize(
+            width: max(visibleSize.width, contentWidth * scale),
+            height: max(visibleSize.height, contentHeight * scale)
+        )
+    }
+
+    private func snapshot(from webView: PlatformWebView) -> (contentOffset: CGPoint, contentSize: CGSize, visibleSize: CGSize) {
+        let visibleSize = CGSize(width: Double(webView.getWidth()), height: Double(webView.getHeight()))
+        let scale = max(Double(webView.getScale()), 1.0)
+        return (
+            contentOffset: CGPoint(x: Double(webView.getScrollX()), y: Double(webView.getScrollY())),
+            contentSize: Self.scaledContentSize(
+                visibleSize: visibleSize,
+                contentWidth: visibleSize.width / scale,
+                contentHeight: Double(webView.getContentHeight()),
+                scale: scale
+            ),
+            visibleSize: visibleSize
+        )
+    }
+
+    func handleMotionEvent(_ motionEvent: android.view.MotionEvent, on webView: PlatformWebView) {
+        switch motionEvent.actionMasked {
+        case android.view.MotionEvent.ACTION_DOWN:
+            touchCancelGeneration += 1
+            resetVelocityTracker()
+            velocityTracker = android.view.VelocityTracker.obtain()
+            velocityTracker?.addMovement(motionEvent)
+            handleTouchDown(at: CGPoint(x: Double(motionEvent.x), y: Double(motionEvent.y)), webView: webView)
+        case android.view.MotionEvent.ACTION_MOVE:
+            touchCancelGeneration += 1
+            velocityTracker?.addMovement(motionEvent)
+            handleTouchMove(to: CGPoint(x: Double(motionEvent.x), y: Double(motionEvent.y)), webView: webView)
+        case android.view.MotionEvent.ACTION_UP:
+            touchCancelGeneration += 1
+            velocityTracker?.addMovement(motionEvent)
+            velocityTracker?.computeCurrentVelocity(1000)
+            let velocity = CGPoint(
+                x: Double(velocityTracker?.xVelocity ?? 0.0),
+                y: Double(velocityTracker?.yVelocity ?? 0.0)
+            )
+            handleTouchEnd(velocity: velocity)
+            resetVelocityTracker()
+        case android.view.MotionEvent.ACTION_CANCEL:
+            scheduleTouchCancelFinalization()
+        default:
+            break
+        }
+    }
+
+    func handleTouchDown(at point: CGPoint, webView: PlatformWebView) {
+        isTrackingTouch = true
+        if isDecelerating {
+            finishDeceleration()
+        }
+        touchOrigin = point
+        isDragging = false
+        didBeginDragging = false
+        // Keep the touch stream owned by WebView so ACTION_UP/CANCEL remains reliable.
+        webView.getParent()?.requestDisallowInterceptTouchEvent(true)
+        guard let coordinator else {
+            return
+        }
+        let snapshot = snapshot(from: webView)
+        coordinator.updateScrollProxy(
+            contentOffset: snapshot.contentOffset,
+            contentSize: snapshot.contentSize,
+            visibleSize: snapshot.visibleSize,
+            isTracking: true,
+            isDragging: false,
+            isDecelerating: isDecelerating
+        )
+    }
+
+    func handleTouchMove(to point: CGPoint, webView: PlatformWebView) {
+        guard let coordinator else {
+            return
+        }
+        guard let touchOrigin else {
+            return
+        }
+        guard !isDragging else {
+            return
+        }
+        let touchSlop = Double(android.view.ViewConfiguration.get(webView.getContext()).scaledTouchSlop)
+        let deltaX = abs(point.x - touchOrigin.x)
+        let deltaY = abs(point.y - touchOrigin.y)
+        guard max(deltaX, deltaY) > touchSlop else {
+            return
+        }
+        isDragging = true
+        didBeginDragging = true
+        webView.getParent()?.requestDisallowInterceptTouchEvent(true)
+        let snapshot = snapshot(from: webView)
+        coordinator.updateScrollProxy(
+            contentOffset: snapshot.contentOffset,
+            contentSize: snapshot.contentSize,
+            visibleSize: snapshot.visibleSize,
+            isTracking: isTrackingTouch,
+            isDragging: true,
+            isDecelerating: false
+        )
+        coordinator.publicScrollDelegate?.scrollViewWillBeginDragging(coordinator.scrollViewProxy)
+    }
+
+    func handleTouchEnd(velocity: CGPoint) {
+        touchCancelGeneration += 1
+        guard let coordinator else {
+            isTrackingTouch = false
+            touchOrigin = nil
+            isDragging = false
+            didBeginDragging = false
+            return
+        }
+        let snapshot = attachedWebView.map(snapshot(from:)) ?? (
+            contentOffset: currentContentOffset,
+            contentSize: currentContentSize,
+            visibleSize: currentVisibleSize
+        )
+        let wasDragging = didBeginDragging
+        defer {
+            attachedWebView?.getParent()?.requestDisallowInterceptTouchEvent(false)
+            isTrackingTouch = false
+            touchOrigin = nil
+            isDragging = false
+            didBeginDragging = false
+        }
+        guard wasDragging else {
+            coordinator.updateScrollProxy(
+                contentOffset: snapshot.contentOffset,
+                contentSize: snapshot.contentSize,
+                visibleSize: snapshot.visibleSize,
+                isTracking: false,
+                isDragging: false,
+                isDecelerating: isDecelerating
+            )
+            return
+        }
+
+        let minimumFlingVelocity = Double(
+            android.view.ViewConfiguration.get(
+                attachedWebView?.getContext() ?? coordinator.config.context ?? ProcessInfo.processInfo.androidContext
+            ).scaledMinimumFlingVelocity
+        )
+        let speed = max(abs(velocity.x), abs(velocity.y))
+        let willDecelerate = speed >= minimumFlingVelocity
+
+        coordinator.updateScrollProxy(
+            contentOffset: snapshot.contentOffset,
+            contentSize: snapshot.contentSize,
+            visibleSize: snapshot.visibleSize,
+            isTracking: false,
+            isDragging: false,
+            isDecelerating: willDecelerate
+        )
+        coordinator.publicScrollDelegate?.scrollViewDidEndDragging(coordinator.scrollViewProxy, willDecelerate: willDecelerate)
+
+        if willDecelerate {
+            isDecelerating = true
+            coordinator.updateScrollProxy(
+                contentOffset: snapshot.contentOffset,
+                contentSize: snapshot.contentSize,
+                visibleSize: snapshot.visibleSize,
+                isTracking: false,
+                isDragging: false,
+                isDecelerating: true
+            )
+            coordinator.publicScrollDelegate?.scrollViewWillBeginDecelerating(coordinator.scrollViewProxy)
+            scheduleDecelerationIdleCheck()
+        } else {
+            isDecelerating = false
+            decelerationGeneration += 1
+        }
+    }
+
+    private func scheduleTouchCancelFinalization() {
+        guard isTrackingTouch || isDragging || didBeginDragging else {
+            return
+        }
+        touchCancelGeneration += 1
+        let generation = touchCancelGeneration
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            try? await Task.sleep(nanoseconds: UInt64(self.touchCancelGracePeriodNanoseconds))
+            guard self.touchCancelGeneration == generation else {
+                return
+            }
+            self.handleTouchEnd(velocity: .zero)
+            self.resetVelocityTracker()
+        }
+    }
+
+    func handleScrollChanged(scrollX: Int,
+                             scrollY: Int,
+                             oldScrollX: Int,
+                             oldScrollY: Int,
+                             visibleSize: CGSize,
+                             contentSize: CGSize) {
+        guard let coordinator else {
+            return
+        }
+        let didMove = (scrollX != oldScrollX) || (scrollY != oldScrollY)
+
+        // Some Android WebView builds do not deliver reliable ACTION_MOVE while
+        // dragging. When touch is active and scroll delta appears, synthesize
+        // drag-begin directly from scroll movement.
+        if isTrackingTouch, !isDragging, didMove {
+            isDragging = true
+            didBeginDragging = true
+            let contentOffset = CGPoint(x: Double(scrollX), y: Double(scrollY))
+            coordinator.updateScrollProxy(
+                contentOffset: contentOffset,
+                contentSize: contentSize,
+                visibleSize: visibleSize,
+                isTracking: true,
+                isDragging: true,
+                isDecelerating: false
+            )
+            coordinator.publicScrollDelegate?.scrollViewWillBeginDragging(coordinator.scrollViewProxy)
+        }
+
+        let contentOffset = CGPoint(x: Double(scrollX), y: Double(scrollY))
+        coordinator.updateScrollProxy(
+            contentOffset: contentOffset,
+            contentSize: contentSize,
+            visibleSize: visibleSize,
+            isTracking: isTrackingTouch,
+            isDragging: isDragging,
+            isDecelerating: isDecelerating
+        )
+        coordinator.publicScrollDelegate?.scrollViewDidScroll(coordinator.scrollViewProxy)
+        coordinator.updateScrollingDown(
+            contentOffset: contentOffset,
+            contentSize: contentSize,
+            visibleSize: visibleSize,
+            isTracking: isTrackingTouch
+        )
+
+        if isDecelerating, didMove {
+            scheduleDecelerationIdleCheck()
+        }
+    }
+
+    private func scheduleDecelerationIdleCheck() {
+        decelerationGeneration += 1
+        let generation = decelerationGeneration
+        Task { @MainActor [weak self] in
+            guard let self else {
+                return
+            }
+            try? await Task.sleep(nanoseconds: UInt64(self.decelerationQuietPeriodNanoseconds))
+            guard self.isDecelerating, self.decelerationGeneration == generation else {
+                return
+            }
+            self.finishDeceleration()
+        }
+    }
+
+    private func finishDeceleration() {
+        guard let coordinator else {
+            return
+        }
+        guard isDecelerating else {
+            return
+        }
+        isDecelerating = false
+        decelerationGeneration += 1
+        let snapshot = attachedWebView.map(snapshot(from:)) ?? (
+            contentOffset: currentContentOffset,
+            contentSize: currentContentSize,
+            visibleSize: currentVisibleSize
+        )
+        coordinator.updateScrollProxy(
+            contentOffset: snapshot.contentOffset,
+            contentSize: snapshot.contentSize,
+            visibleSize: snapshot.visibleSize,
+            isTracking: false,
+            isDragging: false,
+            isDecelerating: false
+        )
+        coordinator.publicScrollDelegate?.scrollViewDidEndDecelerating(coordinator.scrollViewProxy)
+    }
+
+    private func resetVelocityTracker() {
+        velocityTracker?.recycle()
+        velocityTracker = nil
+    }
+}
+#endif
 
 // Adaptations from android.webkit.WebView to WKWebView
 extension PlatformWebView {
@@ -993,19 +1467,57 @@ extension WebViewCoordinator: WebNavigationDelegate {
 @available(macOS 14.0, iOS 17.0, *)
 extension WebViewCoordinator: UIScrollViewDelegate {
     public func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        //logger.log("scrollView: isDecelerating=\(scrollView.isDecelerating) isDragging=\(scrollView.isDragging) isTracking=\(scrollView.isTracking) isZoomBouncing=\(scrollView.isZoomBouncing) contentOffset=\(scrollView.contentOffset.debugDescription)")
-        // ignore scrolling while the page is loading
-        if self.state.isLoading { return }
-        // only change the state if we are actively dragging, not if intertial scrolling is in effect
-        if !scrollView.isTracking { return }
+        updateScrollProxy(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: scrollView.isTracking,
+            isDragging: scrollView.isDragging,
+            isDecelerating: scrollView.isDecelerating
+        )
+        publicScrollDelegate?.scrollViewDidScroll(scrollViewProxy)
+        updateScrollingDown(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: scrollView.isTracking
+        )
+    }
 
-        defer { self.lastScrollOffset = scrollView.contentOffset }
-        let offsetY = scrollView.contentOffset.y
-        let isScrollingDown = ((offsetY + scrollView.visibleSize.height) >= scrollView.contentSize.height) || (offsetY > 0 && offsetY > self.lastScrollOffset.y)
+    public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        updateScrollProxy(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: scrollView.isTracking,
+            isDragging: true,
+            isDecelerating: scrollView.isDecelerating
+        )
+        publicScrollDelegate?.scrollViewWillBeginDragging(scrollViewProxy)
+    }
 
-        if self.state.scrollingDown != isScrollingDown {
-            self.state.scrollingDown = isScrollingDown
-        }
+    public func scrollViewWillBeginDecelerating(_ scrollView: UIScrollView) {
+        updateScrollProxy(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: scrollView.isTracking,
+            isDragging: scrollView.isDragging,
+            isDecelerating: true
+        )
+        publicScrollDelegate?.scrollViewWillBeginDecelerating(scrollViewProxy)
+    }
+
+    public func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        updateScrollProxy(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: false,
+            isDragging: false,
+            isDecelerating: decelerate
+        )
+        publicScrollDelegate?.scrollViewDidEndDragging(scrollViewProxy, willDecelerate: decelerate)
     }
 
     public func scrollViewDidZoom(_ scrollView: UIScrollView) {
@@ -1017,7 +1529,15 @@ extension WebViewCoordinator: UIScrollViewDelegate {
     }
 
     public func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-
+        updateScrollProxy(
+            contentOffset: scrollView.contentOffset,
+            contentSize: scrollView.contentSize,
+            visibleSize: scrollView.bounds.size,
+            isTracking: false,
+            isDragging: false,
+            isDecelerating: false
+        )
+        publicScrollDelegate?.scrollViewDidEndDecelerating(scrollViewProxy)
     }
     
     public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
