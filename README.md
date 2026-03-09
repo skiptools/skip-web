@@ -4,7 +4,21 @@ SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev
 
 - **[WebView](#webview-customizable-embedded-web-browser)** — A fully customizable embedded browser for app-integrated web content. Supports JavaScript execution, navigation control, scroll delegates, snapshots, and popups. Backed by `WKWebView` on iOS and `android.webkit.WebView` on Android.
 
-- **[WebPage](#webpage-lightweight-in-app-browser)** — A lightweight View modifier that opens a URL in the platform's native in-app browser (`SFSafariViewController` on iOS, Chrome Custom Tabs on Android). Ideal for external links where you want a polished browsing experience with minimal code.
+- **[WebBrowser](#webbrowser-lightweight-in-app-browser)** — A lightweight View modifier that opens a URL in the platform's native in-app browser (`SFSafariViewController` on iOS, Chrome Custom Tabs on Android). Ideal for external links where you want a polished browsing experience with minimal code.
+
+## When to use `openWebBrowser` vs `WebView`
+
+| | `openWebBrowser` | `WebView` |
+| --- | --- | --- |
+| **Best for** | Links to external content: docs, terms of service, blog posts, OAuth flows | App-integrated web content where you need programmatic control |
+| **Browser chrome** | Provided by the OS (address bar, back/forward, share) | You build your own toolbar and controls |
+| **JavaScript access** | None — the page runs in a sandboxed browser | Full `evaluateJavaScript` support |
+| **Navigation control** | None — the user navigates freely within the browser | Programmatic back/forward, reload, URL changes |
+| **Cookie/session sharing** | Shares the user's browser cookies and autofill | Isolated web engine per `WebView` instance |
+| **Customization** | Toolbar tint colors, custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
+
+Use `openWebBrowser` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
+
 
 ## WebView: Customizable Embedded Web Browser
 
@@ -325,25 +339,12 @@ let png = snapshot.pngData
 On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
 If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
 
-## WebPage: Lightweight In-App Browser
+## WebBrowser: Lightweight In-App Browser
 
-For cases where you want to display a web page without the full power and complexity of an embedded `WebView`, SkipWeb provides the `View.openWebPage()` modifier. This opens a URL in the platform's native in-app browser:
+For cases where you want to display a web page without the full power and complexity of an embedded `WebView`, SkipWeb provides the `View.openWebBrowser()` modifier. This opens a URL in the platform's native in-app browser:
 
 - **iOS**: [SFSafariViewController](https://developer.apple.com/documentation/safariservices/sfsafariviewcontroller) — a full-featured Safari experience presented within your app, complete with the address bar, share sheet, and reader mode.
 - **Android**: [Chrome Custom Tabs](https://developer.android.com/develop/ui/views/layout/webapps/in-app-browsing-embedded-web) — a Chrome-powered browsing experience that shares cookies, autofill, and saved passwords with the user's browser.
-
-### When to use `openWebPage` vs `WebView`
-
-| | `openWebPage` | `WebView` |
-| --- | --- | --- |
-| **Best for** | Links to external content: docs, terms of service, blog posts, OAuth flows | App-integrated web content where you need programmatic control |
-| **Browser chrome** | Provided by the OS (address bar, back/forward, share) | You build your own toolbar and controls |
-| **JavaScript access** | None — the page runs in a sandboxed browser | Full `evaluateJavaScript` support |
-| **Navigation control** | None — the user navigates freely within the browser | Programmatic back/forward, reload, URL changes |
-| **Cookie/session sharing** | Shares the user's browser cookies and autofill | Isolated web engine per `WebView` instance |
-| **Customization** | Toolbar tint colors, custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
-
-Use `openWebPage` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
 
 ### Basic Usage
 
@@ -360,7 +361,7 @@ struct MyView: View {
         Button("Open Documentation") {
             showPage = true
         }
-        .openWebPage(
+        .openWebBrowser(
             isPresented: $showPage,
             url: "https://skip.dev/docs",
             mode: .embeddedBrowser(params: nil)
@@ -377,7 +378,7 @@ To open the URL in the user's default browser app instead of an in-app browser:
 Button("Open in Safari / Chrome") {
     showPage = true
 }
-.openWebPage(
+.openWebBrowser(
     isPresented: $showPage,
     url: "https://skip.dev",
     mode: .launchBrowser
@@ -392,7 +393,7 @@ Customize the browser toolbar appearance with `EmbeddedParams`:
 Button("Open with Custom Colors") {
     showPage = true
 }
-.openWebPage(
+.openWebBrowser(
     isPresented: $showPage,
     url: "https://skip.dev",
     mode: .embeddedBrowser(params: EmbeddedParams(
@@ -412,15 +413,15 @@ Add custom actions that appear in the share sheet (iOS) or as menu items (Androi
 Button("Open with Actions") {
     showPage = true
 }
-.openWebPage(
+.openWebBrowser(
     isPresented: $showPage,
     url: "https://skip.dev",
     mode: .embeddedBrowser(params: EmbeddedParams(
         customActions: [
-            WebPageAction(label: "Copy Link") { url in
+            WebBrowserAction(label: "Copy Link") { url in
                 // handle the action with the current page URL
             },
-            WebPageAction(label: "Bookmark") { url in
+            WebBrowserAction(label: "Bookmark") { url in
                 // save the URL
             }
         ]
@@ -434,7 +435,7 @@ On iOS, custom actions appear as `UIActivity` items in the Safari share sheet. O
 
 ```swift
 /// The mode for opening a web page.
-public enum WebPageMode {
+public enum WebBrowserMode {
     /// Open the URL in the system's default browser application.
     case launchBrowser
     /// Open the URL in an embedded browser within the app.
@@ -445,21 +446,21 @@ public enum WebPageMode {
 public struct EmbeddedParams {
     public var barTintColor: Color?
     public var controlTintColor: Color?
-    public var customActions: [WebPageAction]
+    public var customActions: [WebBrowserAction]
 }
 
 /// A custom action available on a web page.
-public struct WebPageAction {
+public struct WebBrowserAction {
     public let label: String
     public let handler: (URL) -> Void
 }
 
 /// View modifier to open a web page.
 extension View {
-    public func openWebPage(
+    public func openWebBrowser(
         isPresented: Binding<Bool>,
         url: String,
-        mode: WebPageMode
+        mode: WebBrowserMode
     ) -> some View
 }
 ```
