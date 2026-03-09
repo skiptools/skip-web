@@ -582,6 +582,38 @@ final class SkipWebTests: XCTestCase {
 
     }
 
+    func testWebBrowserTypes() {
+        // Verify cross-platform types can be constructed
+        let _ = WebBrowserMode.launchBrowser
+        let _ = WebBrowserMode.embeddedBrowser(params: nil)
+
+        // EmbeddedParams defaults
+        let defaultParams = EmbeddedParams()
+        XCTAssertNil(defaultParams.barTintColor)
+        XCTAssertNil(defaultParams.controlTintColor)
+        XCTAssertEqual(defaultParams.customActions.count, 0)
+
+        // WebBrowserAction construction
+        let action = WebBrowserAction(label: "Copy Link", handler: { _ in })
+        XCTAssertEqual(action.label, "Copy Link")
+
+        // EmbeddedParams with values
+        let params = EmbeddedParams(
+            customActions: [action]
+        )
+        XCTAssertEqual(params.customActions.count, 1)
+        XCTAssertEqual(params.customActions[0].label, "Copy Link")
+
+        // Embedded mode with params
+        let mode = WebBrowserMode.embeddedBrowser(params: params)
+        if case .embeddedBrowser(let p) = mode {
+            XCTAssertNotNil(p)
+            XCTAssertEqual(p?.customActions.count, 1)
+        } else {
+            XCTFail("Expected embeddedBrowser mode")
+        }
+    }
+
     func assertMainThread() {
         #if !SKIP
         XCTAssertTrue(Thread.isMainThread)

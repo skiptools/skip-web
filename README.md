@@ -1,5 +1,13 @@
 # SkipWeb
 
+SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev) apps:
+
+- **[WebView](#webview-customizable-embedded-web-browser)** — A fully customizable embedded browser for app-integrated web content. Supports JavaScript execution, navigation control, scroll delegates, snapshots, and popups. Backed by `WKWebView` on iOS and `android.webkit.WebView` on Android.
+
+- **[WebPage](#webpage-lightweight-in-app-browser)** — A lightweight View modifier that opens a URL in the platform's native in-app browser (`SFSafariViewController` on iOS, Chrome Custom Tabs on Android). Ideal for external links where you want a polished browsing experience with minimal code.
+
+## WebView: Customizable Embedded Web Browser
+
 SkipWeb provides an embedded WebView for [Skip Lite](https://skip.dev) transpiled Swift.
 On iOS it uses a [WKWebView](https://developer.apple.com/documentation/webkit/wkwebview)
 and on Android it uses an [android.webkit.WebView](https://developer.android.com/develop/ui/views/layout/webapps/webview).
@@ -20,7 +28,8 @@ struct EmbeddedWebView : View {
 }
 ```
 
-## Customization
+
+### Customization
 
 The [`WebView`](https://github.com/skiptools/skip-web/blob/main/Sources/SkipWeb/WebView.swift) is backed by a
 [`WebEngine`](https://github.com/skiptools/skip-web/blob/main/Sources/SkipWeb/WebEngine.swift).
@@ -47,7 +56,7 @@ struct ConfigurableWebView : View {
 When the same navigator is rebound to an engine that already has content/history, `initialURL`/`initialHTML` are not reloaded.
 This lets apps preserve page state when navigating away and back with the same navigator instance.
 
-## JavaScript
+### JavaScript
 
 JavaScript can be executed against the browser with:
 
@@ -177,7 +186,7 @@ struct WebViewPlayground: View {
 }
 ```
 
-## Window Creation & Popups
+### Window Creation & Popups
 
 `SkipWeb` exposes popup/window creation through `SkipWebUIDelegate` on `WebEngineConfiguration`.
 This delegate API lets host apps decide whether a popup should open and which child `WebEngine` should back it.
@@ -193,7 +202,7 @@ JavaScript popup behavior can be configured with:
 
 - `WebEngineConfiguration.javaScriptCanOpenWindowsAutomatically` (maps to both iOS and Android platform settings).
 
-### Platform callback semantics
+#### Platform callback semantics
 
 Callbacks are platform-agnostic, but invocation source differs:
 
@@ -205,7 +214,7 @@ Callbacks are platform-agnostic, but invocation source differs:
 `WebWindowRequest.targetURL` may be `nil` on Android during `onCreateWindow`.
 `PlatformCreateWindowContext` aliases `WebKitCreateWindowParams` on iOS and `AndroidCreateWindowParams` on Android.
 
-### iOS WebKit popup contract
+#### iOS WebKit popup contract
 
 When handling iOS popups through `WKUIDelegate.createWebViewWith`, WebKit requires that the returned child `WKWebView` be initialized with the exact `WKWebViewConfiguration` provided by WebKit for that callback.
 
@@ -220,7 +229,7 @@ For iOS parity, return a child created with `platformContext.makeChildWebEngine(
 By default this mirrors the parent `WebEngineConfiguration` and inspectability on the popup child. Pass an explicit configuration only when you intentionally want the child to diverge.
 This default mirroring is configuration-level. Platform delegate assignments on the returned child (`WKUIDelegate`, `WKNavigationDelegate`) are not automatically copied from the parent, so assign them explicitly if your app depends on that behavior.
 
-## Scroll Delegate
+### Scroll Delegate
 
 `SkipWeb` exposes a `WebView`-attached scroll delegate API that follows `UIScrollViewDelegate` naming where practical while remaining portable across iOS and Android.
 
@@ -272,7 +281,7 @@ Supported callbacks:
 - `isDecelerating`
 - `isScrollEnabled`
 
-### Platform callback semantics
+#### Platform callback semantics
 
 | Callback | iOS | Android |
 | --- | --- | --- |
@@ -284,7 +293,7 @@ Supported callbacks:
 
 Android deceleration is heuristic-based because `android.webkit.WebView` does not expose a direct `didEndDecelerating` callback.
 
-### Important differences from `UIScrollViewDelegate`
+#### Important differences from `UIScrollViewDelegate`
 
 - `SkipWebScrollDelegate` intentionally exposes a focused subset: no `scrollViewDidScrollToTop(_:)`, zoom callbacks, or scrolling-animation callbacks in the public API.
 - On iOS, callback timing comes directly from `UIScrollViewDelegate`; on Android, drag/deceleration lifecycle callbacks are synthesized from touch and scroll signals.
@@ -292,7 +301,7 @@ Android deceleration is heuristic-based because `android.webkit.WebView` does no
 - On Android, a new touch during momentum immediately ends the synthetic deceleration phase before starting a new drag sequence.
 - `scrollViewDidScroll(_:)` is offset-change-driven (including programmatic scroll changes), while drag/deceleration lifecycle callbacks are user-gesture-driven.
 
-## Snapshots
+### Snapshots
 
 `SkipWeb` provides `WebEngine.takeSnapshot(configuration:)` and `WebViewNavigator.takeSnapshot(configuration:)`
 using `SkipWebSnapshotConfiguration`, which mirrors the core `WKSnapshotConfiguration` fields:
@@ -315,6 +324,145 @@ let png = snapshot.pngData
 
 On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
 If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
+
+## WebPage: Lightweight In-App Browser
+
+For cases where you want to display a web page without the full power and complexity of an embedded `WebView`, SkipWeb provides the `View.openWebPage()` modifier. This opens a URL in the platform's native in-app browser:
+
+- **iOS**: [SFSafariViewController](https://developer.apple.com/documentation/safariservices/sfsafariviewcontroller) — a full-featured Safari experience presented within your app, complete with the address bar, share sheet, and reader mode.
+- **Android**: [Chrome Custom Tabs](https://developer.android.com/develop/ui/views/layout/webapps/in-app-browsing-embedded-web) — a Chrome-powered browsing experience that shares cookies, autofill, and saved passwords with the user's browser.
+
+### When to use `openWebPage` vs `WebView`
+
+| | `openWebPage` | `WebView` |
+| --- | --- | --- |
+| **Best for** | Links to external content: docs, terms of service, blog posts, OAuth flows | App-integrated web content where you need programmatic control |
+| **Browser chrome** | Provided by the OS (address bar, back/forward, share) | You build your own toolbar and controls |
+| **JavaScript access** | None — the page runs in a sandboxed browser | Full `evaluateJavaScript` support |
+| **Navigation control** | None — the user navigates freely within the browser | Programmatic back/forward, reload, URL changes |
+| **Cookie/session sharing** | Shares the user's browser cookies and autofill | Isolated web engine per `WebView` instance |
+| **Customization** | Toolbar tint colors, custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
+
+Use `openWebPage` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
+
+### Basic Usage
+
+Open a URL in the platform's native in-app browser:
+
+```swift
+import SwiftUI
+import SkipWeb
+
+struct MyView: View {
+    @State var showPage = false
+
+    var body: some View {
+        Button("Open Documentation") {
+            showPage = true
+        }
+        .openWebPage(
+            isPresented: $showPage,
+            url: "https://skip.dev/docs",
+            mode: .embeddedBrowser(params: nil)
+        )
+    }
+}
+```
+
+### Launch in System Browser
+
+To open the URL in the user's default browser app instead of an in-app browser:
+
+```swift
+Button("Open in Safari / Chrome") {
+    showPage = true
+}
+.openWebPage(
+    isPresented: $showPage,
+    url: "https://skip.dev",
+    mode: .launchBrowser
+)
+```
+
+### Custom Toolbar Colors
+
+Customize the browser toolbar appearance with `EmbeddedParams`:
+
+```swift
+Button("Open with Custom Colors") {
+    showPage = true
+}
+.openWebPage(
+    isPresented: $showPage,
+    url: "https://skip.dev",
+    mode: .embeddedBrowser(params: EmbeddedParams(
+        barTintColor: .blue,
+        controlTintColor: .white
+    ))
+)
+```
+
+On iOS, `barTintColor` maps to `preferredBarTintColor` and `controlTintColor` maps to `preferredControlTintColor`. On Android, `barTintColor` sets both the toolbar and navigation bar color.
+
+### Custom Actions
+
+Add custom actions that appear in the share sheet (iOS) or as menu items (Android):
+
+```swift
+Button("Open with Actions") {
+    showPage = true
+}
+.openWebPage(
+    isPresented: $showPage,
+    url: "https://skip.dev",
+    mode: .embeddedBrowser(params: EmbeddedParams(
+        customActions: [
+            WebPageAction(label: "Copy Link") { url in
+                // handle the action with the current page URL
+            },
+            WebPageAction(label: "Bookmark") { url in
+                // save the URL
+            }
+        ]
+    ))
+)
+```
+
+On iOS, custom actions appear as `UIActivity` items in the Safari share sheet. On Android, they appear as menu items in Chrome Custom Tabs (maximum 5 items).
+
+### API Reference
+
+```swift
+/// The mode for opening a web page.
+public enum WebPageMode {
+    /// Open the URL in the system's default browser application.
+    case launchBrowser
+    /// Open the URL in an embedded browser within the app.
+    case embeddedBrowser(params: EmbeddedParams?)
+}
+
+/// Configuration for the embedded browser.
+public struct EmbeddedParams {
+    public var barTintColor: Color?
+    public var controlTintColor: Color?
+    public var customActions: [WebPageAction]
+}
+
+/// A custom action available on a web page.
+public struct WebPageAction {
+    public let label: String
+    public let handler: (URL) -> Void
+}
+
+/// View modifier to open a web page.
+extension View {
+    public func openWebPage(
+        isPresented: Binding<Bool>,
+        url: String,
+        mode: WebPageMode
+    ) -> some View
+}
+```
 
 ## Contribution
 

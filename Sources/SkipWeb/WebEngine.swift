@@ -250,7 +250,7 @@ public enum WebSnapshotError: Error {
         }
 
         let base64 = android.util.Base64.encodeToString(outputStream.toByteArray(), android.util.Base64.NO_WRAP)
-        guard let pngData = Data(base64Encoded: base64, options: []) else {
+        guard let pngData: Data = Data(base64Encoded: base64, options: []) else {
             throw WebSnapshotError.pngEncodingFailed
         }
         return SkipWebSnapshot(
@@ -731,7 +731,7 @@ public extension WebKitCreateWindowParams {
     /// Using this helper preserves WebKit's popup contract and avoids
     /// NSInternalInconsistencyException ("Returned WKWebView was not created with
     /// the given configuration.") caused by configuration mismatches.
-    @MainActor public func makeChildWebEngine(
+    @MainActor func makeChildWebEngine(
         configuration webEngineConfiguration: WebEngineConfiguration? = nil,
         frame: CGRect = .zero,
         isInspectable: Bool? = nil
@@ -1199,14 +1199,6 @@ public typealias UserContentController = WKUserContentController
 #else
 public class UserContentController { }
 #endif
-
-
-#if !SKIP
-public typealias ProcessPool = WKProcessPool
-#else
-public class ProcessPool { }
-#endif
-
 
 #if !SKIP
 public typealias NavigationActionPolicy = WKNavigationActionPolicy
