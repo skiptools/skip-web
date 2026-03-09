@@ -49,7 +49,6 @@ public struct WebView : View {
     let persistentWebViewID: String? = nil
 
     private static var engineCache: [String: WebEngine] = [:]
-    private static let processPool = ProcessPool()
 
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
