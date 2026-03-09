@@ -15,7 +15,7 @@ SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev
 | **JavaScript access** | None — the page runs in a sandboxed browser | Full `evaluateJavaScript` support |
 | **Navigation control** | None — the user navigates freely within the browser | Programmatic back/forward, reload, URL changes |
 | **Cookie/session sharing** | Shares the user's browser cookies and autofill | Isolated web engine per `WebView` instance |
-| **Customization** | Toolbar tint colors, custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
+| **Customization** | Custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
 
 Use `openWebBrowser` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
 
@@ -385,25 +385,31 @@ Button("Open in Safari / Chrome") {
 )
 ```
 
-### Custom Toolbar Colors
+### Presentation Mode
 
-Customize the browser toolbar appearance with `EmbeddedParams`:
+By default the embedded browser slides up vertically as a modal sheet. Set `presentationMode` to `.navigation` for a horizontal slide transition that feels like a navigation push:
 
 ```swift
-Button("Open with Custom Colors") {
+Button("Open with Navigation Style") {
     showPage = true
 }
 .openWebBrowser(
     isPresented: $showPage,
     url: "https://skip.dev",
     mode: .embeddedBrowser(params: EmbeddedParams(
-        barTintColor: .blue,
-        controlTintColor: .white
+        presentationMode: .navigation
     ))
 )
 ```
 
-On iOS, `barTintColor` maps to `preferredBarTintColor` and `controlTintColor` maps to `preferredControlTintColor`. On Android, `barTintColor` sets both the toolbar and navigation bar color.
+| Mode | iOS | Android |
+| --- | --- | --- |
+| `.sheet` (default) | Full-screen cover (slides up vertically) | [Partial Custom Tabs](https://developer.chrome.com/docs/android/custom-tabs/guide-partial-custom-tabs/) bottom sheet (resizable, initially half-screen height). Falls back to full-screen if the browser does not support partial tabs. |
+| `.navigation` | Navigation push (slides in horizontally) | Standard full-screen Chrome Custom Tabs launch |
+
+**Limitations:**
+- **iOS:** The `.navigation` presentation mode requires the calling view to be inside a `NavigationStack` (or `NavigationView`). If the view is not hosted in a navigation container, the modifier will have no effect.
+- **Android:** In `.sheet` mode, if the user's browser does not support the Partial Custom Tabs API, the tab launches full-screen as a fallback.
 
 ### Custom Actions
 
@@ -434,6 +440,14 @@ On iOS, custom actions appear as `UIActivity` items in the Safari share sheet. O
 ### API Reference
 
 ```swift
+/// Controls how the embedded browser is presented.
+public enum WebBrowserPresentationMode {
+    /// Present as a vertically-sliding modal sheet (default).
+    case sheet
+    /// Present as a horizontally-sliding navigation push.
+    case navigation
+}
+
 /// The mode for opening a web page.
 public enum WebBrowserMode {
     /// Open the URL in the system's default browser application.
@@ -444,8 +458,7 @@ public enum WebBrowserMode {
 
 /// Configuration for the embedded browser.
 public struct EmbeddedParams {
-    public var barTintColor: Color?
-    public var controlTintColor: Color?
+    public var presentationMode: WebBrowserPresentationMode
     public var customActions: [WebBrowserAction]
 }
 

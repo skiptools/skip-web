@@ -15,7 +15,6 @@ import android.content.Intent
 import android.net.Uri
 import android.app.PendingIntent
 import androidx.browser.customtabs.CustomTabsIntent
-import androidx.browser.customtabs.CustomTabColorSchemeParams
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.platform.LocalContext
 #endif
@@ -35,31 +34,41 @@ public struct WebBrowserAction {
     }
 }
 
+/// Controls how the embedded browser is presented.
+///
+/// - `sheet`: The browser slides up vertically as a bottom sheet.
+/// - `navigation`: The browser slides in horizontally like a navigation push.
+public enum WebBrowserPresentationMode {
+    /// Present as a vertically-sliding bottom sheet.
+    /// On iOS, uses a full-screen cover that slides up.
+    /// On Android, uses the Partial Custom Tabs API to display
+    /// Chrome Custom Tabs as a resizable bottom sheet.
+    /// If the browser does not support partial tabs, it falls back
+    /// to a full-screen Custom Tab.
+    case sheet
+    /// Present as a horizontally-sliding navigation push.
+    /// On iOS, the calling view must be inside a `NavigationStack` for this to take effect.
+    /// On Android, launches Chrome Custom Tabs full-screen with the default transition.
+    case navigation
+}
+
 /// Configuration parameters for the embedded browser.
 public struct EmbeddedParams {
-    /// The tint color for the browser's toolbar/navigation bar.
-    /// On iOS, maps to `SFSafariViewController.preferredBarTintColor`.
-    /// On Android, maps to Custom Tabs toolbar and navigation bar color.
-    public var barTintColor: Color?
-
-    /// The tint color for the browser's control buttons.
-    /// On iOS, maps to `SFSafariViewController.preferredControlTintColor`.
-    /// On Android, best-effort mapping via secondary toolbar color.
-    public var controlTintColor: Color?
-
     /// Custom actions available on the web page.
     /// On iOS, these appear in the Safari activity/share sheet.
     /// On Android, these appear as menu items in Chrome Custom Tabs (max 5).
     public var customActions: [WebBrowserAction]
 
+    /// Controls how the embedded browser is presented.
+    /// Defaults to `.sheet` (vertically-sliding modal).
+    public var presentationMode: WebBrowserPresentationMode
+
     public init(
-        barTintColor: Color? = nil,
-        controlTintColor: Color? = nil,
+        presentationMode: WebBrowserPresentationMode = .sheet,
         customActions: [WebBrowserAction] = []
     ) {
-        self.barTintColor = barTintColor
-        self.controlTintColor = controlTintColor
         self.customActions = customActions
+        self.presentationMode = presentationMode
     }
 }
 
@@ -125,32 +134,21 @@ extension View {
             #endif
             #else
             let context = LocalContext.current
-            // Resolve Color to ARGB int in the Composable context (before onChange)
-            // SKIP INSERT: var resolvedBarArgb: Int? = null
-            // SKIP INSERT: var resolvedControlArgb: Int? = null
-            if let params = params {
-                if let barColor = params.barTintColor {
-                    let composed = barColor.colorImpl()
-                    // SKIP INSERT: resolvedBarArgb = android.graphics.Color.argb((composed.alpha * 255).toInt(), (composed.red * 255).toInt(), (composed.green * 255).toInt(), (composed.blue * 255).toInt())
-                    _ = composed
-                }
-                if let controlColor = params.controlTintColor {
-                    let composed = controlColor.colorImpl()
-                    // SKIP INSERT: resolvedControlArgb = android.graphics.Color.argb((composed.alpha * 255).toInt(), (composed.red * 255).toInt(), (composed.green * 255).toInt(), (composed.blue * 255).toInt())
-                    _ = composed
-                }
-            }
+            let useSheet = params?.presentationMode != WebBrowserPresentationMode.navigation
             return onChange(of: isPresented.wrappedValue) { oldPresented, newPresented in
                 if newPresented == true {
                     let builder = CustomTabsIntent.Builder()
 
-                    // Apply color customization
-                    // SKIP INSERT: if (resolvedBarArgb != null || resolvedControlArgb != null) {
-                    // SKIP INSERT:     val colorBuilder = CustomTabColorSchemeParams.Builder()
-                    // SKIP INSERT:     resolvedBarArgb?.let { colorBuilder.setToolbarColor(it); colorBuilder.setNavigationBarColor(it) }
-                    // SKIP INSERT:     resolvedControlArgb?.let { colorBuilder.setSecondaryToolbarColor(it) }
-                    // SKIP INSERT:     builder.setDefaultColorSchemeParams(colorBuilder.build())
-                    // SKIP INSERT: }
+                    // In sheet mode, use the Partial Custom Tabs API to present
+                    // Chrome Custom Tabs as a bottom sheet that slides up from
+                    // the bottom. The initial height is set to 90% of the screen
+                    // so the host app peeks behind the sheet. The user can drag
+                    // the toolbar handle to resize or dismiss.
+                    if useSheet {
+                        let displayMetrics = context.resources.displayMetrics
+                        let sheetHeight = (displayMetrics.heightPixels * 9) / 10
+                        builder.setInitialActivityHeightPx(sheetHeight, CustomTabsIntent.ACTIVITY_HEIGHT_DEFAULT)
+                    }
 
                     // Add custom menu items
                     if let params = params {
@@ -162,7 +160,7 @@ extension View {
                             WebBrowserActionRegistry.register(actionId: actionId, handler: action.handler)
 
                             let menuIntent = Intent(context, context.asActivity().javaClass)
-                            menuIntent.setAction("skip.kit.WEB_PAGE_ACTION")
+                            menuIntent.setAction("skip.web.WEB_PAGE_ACTION")
                             menuIntent.putExtra("actionId", actionId)
 
                             // SKIP INSERT: val pendingFlags = PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
@@ -210,14 +208,6 @@ private struct SafariViewWrapper: UIViewControllerRepresentable {
         let config = SFSafariViewController.Configuration()
         let safariVC = SFSafariViewController(url: url, configuration: config)
         safariVC.delegate = context.coordinator
-
-        if let barTint = params?.barTintColor {
-            safariVC.preferredBarTintColor = UIColor(barTint)
-        }
-        if let controlTint = params?.controlTintColor {
-            safariVC.preferredControlTintColor = UIColor(controlTint)
-        }
-
         return safariVC
     }
 
@@ -290,7 +280,7 @@ class WebBrowserActionRegistry {
 
     @discardableResult
     static func handleIntent(_ intent: Intent) -> Bool {
-        guard intent.action == "skip.kit.WEB_PAGE_ACTION" else { return false }
+        guard intent.action == "skip.web.WEB_PAGE_ACTION" else { return false }
         guard let actionId = intent.getStringExtra("actionId") else { return false }
         guard let handler = handlers.removeValue(forKey: actionId) else { return false }
 

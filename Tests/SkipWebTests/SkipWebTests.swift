@@ -589,9 +589,16 @@ final class SkipWebTests: XCTestCase {
 
         // EmbeddedParams defaults
         let defaultParams = EmbeddedParams()
-        XCTAssertNil(defaultParams.barTintColor)
-        XCTAssertNil(defaultParams.controlTintColor)
         XCTAssertEqual(defaultParams.customActions.count, 0)
+        XCTAssertEqual(defaultParams.presentationMode, WebBrowserPresentationMode.sheet)
+
+        // WebBrowserPresentationMode construction
+        let _ = WebBrowserPresentationMode.sheet
+        let _ = WebBrowserPresentationMode.navigation
+
+        // EmbeddedParams with navigation presentation mode
+        let navParams = EmbeddedParams(presentationMode: .navigation)
+        XCTAssertEqual(navParams.presentationMode, WebBrowserPresentationMode.navigation)
 
         // WebBrowserAction construction
         let action = WebBrowserAction(label: "Copy Link", handler: { _ in })
