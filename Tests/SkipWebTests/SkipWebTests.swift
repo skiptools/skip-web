@@ -683,6 +683,7 @@ final class SkipWebTests: XCTestCase {
         XCTAssertEqual(cookies.count, 2)
     }
 
+    @MainActor
     func testAndroidRemovalBucketsAreDeterministicAndDeduplicated() {
         let allTypes = Set(WebSiteDataType.allCases)
         let allBuckets = WebEngine.androidRemovalBucketNames(for: allTypes)
@@ -694,6 +695,7 @@ final class SkipWebTests: XCTestCase {
     }
 
     #if !SKIP
+    @MainActor
     func testWebKitDataTypeMappingIncludesExpectedDataTypes() {
         let mapped = WebEngine.webKitDataTypes(for: Set(WebSiteDataType.allCases))
         let expected: Set<String> = [
@@ -827,10 +829,23 @@ final class SkipWebTests: XCTestCase {
     private func makeCookieTestEngine() -> WebEngine {
         let config = WebEngineConfiguration()
         #if SKIP
-        let context = ProcessInfo.processInfo.androidContext
-        config.context = context
-        let platformWebView = PlatformWebView(context)
-        return WebEngine(configuration: config, webView: platformWebView)
+        let instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        let isMainLooperThread = (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        if isMainLooperThread {
+            let context = instrumentation.targetContext
+            config.context = context
+            let platformWebView = PlatformWebView(context)
+            return WebEngine(configuration: config, webView: platformWebView)
+        } else {
+            var createdEngine: WebEngine? = nil
+            instrumentation.runOnMainSync {
+                let context = instrumentation.targetContext
+                config.context = context
+                let platformWebView = PlatformWebView(context)
+                createdEngine = WebEngine(configuration: config, webView: platformWebView)
+            }
+            return try! XCTUnwrap(createdEngine)
+        }
         #else
         let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
         return WebEngine(configuration: config, webView: platformWebView)

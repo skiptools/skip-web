@@ -907,34 +907,22 @@ extension WebCookie {
         }
     }
     #else
-    private func setAndroidCookie(
+    nonisolated private func setAndroidCookie(
         _ cookieManager: android.webkit.CookieManager,
         forURLString urlString: String,
         cookieString: String
     ) async {
-        // Wait for CookieManager callback so callers see completion after mutation.
-        let _: Void = suspendCancellableCoroutine { continuation in
-            cookieManager.setCookie(urlString, cookieString) { _ in
-                continuation.resume(())
-            }
-            continuation.invokeOnCancellation { _ in
-                continuation.cancel()
-            }
-        }
-        // Persist the updated cookie store once the mutation callback fires.
+        cookieManager.setCookie(urlString, cookieString, nil)
         cookieManager.flush()
+        // Android cookie writes are asynchronous; a short delay avoids racing immediate reads.
+        try? await Task.sleep(nanoseconds: 50_000_000)
     }
 
-    private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
-        // Wait for async removal callback to avoid stale reads after clear calls.
-        let _: Void = suspendCancellableCoroutine { continuation in
-            cookieManager.removeAllCookies { _ in
-                continuation.resume(())
-            }
-            continuation.invokeOnCancellation { _ in
-                continuation.cancel()
-            }
-        }
+    nonisolated private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
+        cookieManager.removeAllCookies(nil)
+        cookieManager.flush()
+        // Mirror setCookie behavior: allow async cookie-store mutation to settle before reads.
+        try? await Task.sleep(nanoseconds: 50_000_000)
     }
     #endif
 

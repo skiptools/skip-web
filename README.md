@@ -14,7 +14,7 @@ SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev
 | **Browser chrome** | Provided by the OS (address bar, back/forward, share) | You build your own toolbar and controls |
 | **JavaScript access** | None — the page runs in a sandboxed browser | Full `evaluateJavaScript` support |
 | **Navigation control** | None — the user navigates freely within the browser | Programmatic back/forward, reload, URL changes |
-| **Cookie/session sharing** | Shares the user's browser cookies and autofill | Isolated web engine per `WebView` instance |
+| **Cookie/session sharing** | Shares the user's browser cookies and autofill | Uses the app's WebView cookie store (shared across WebViews by default; not the same store as Safari/Chrome) |
 | **Customization** | Custom share-sheet actions | Full layout control, scroll delegates, snapshot API |
 
 Use `openWebBrowser` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
@@ -519,7 +519,11 @@ try await navigator.removeData(
 Platform behavior:
 
 - iOS uses the web view's `websiteDataStore.httpCookieStore`.
+- On iOS, cookie scope follows the `WKWebsiteDataStore` attached to that `WKWebView`.
+- In default SkipWeb usage, that is WebKit's shared default data store, so cookies are shared across SkipWeb web views in the app.
+- On iOS, a custom `WKWebView` with a different data store (for example `WKWebsiteDataStore.nonPersistent()`) uses that store instead.
 - Android uses `android.webkit.CookieManager`.
+- On Android, `CookieManager` is a process-wide singleton store shared by all `WebView` instances (not per-`WebView` configurable).
 - `cookies(for:)` returns URL-matching cookies; on Android this is best-effort because `CookieManager` reads as a cookie-header string (limited metadata).
 - `setCookie(_:requestURL:)` requires either `cookie.domain` or a `requestURL` host; otherwise it throws `WebCookieError.missingCookieDomain`.
 - `removeData(ofTypes:modifiedSince:)` maps to iOS `WKWebsiteDataStore.removeData`.
