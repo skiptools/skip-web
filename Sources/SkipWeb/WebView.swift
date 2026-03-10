@@ -228,6 +228,48 @@ public class WebViewNavigator: @unchecked Sendable {
         }
         return try await webEngine.takeSnapshot(configuration: configuration)
     }
+
+    @MainActor public func cookies(for url: URL) async -> [WebCookie] {
+        guard let webEngine else {
+            return []
+        }
+        return await webEngine.cookies(for: url)
+    }
+
+    @MainActor public func cookieHeader(for url: URL) async -> String? {
+        guard let webEngine else {
+            return nil
+        }
+        return await webEngine.cookieHeader(for: url)
+    }
+
+    @MainActor public func setCookie(_ cookie: WebCookie, requestURL: URL? = nil) async throws {
+        guard let webEngine else {
+            return
+        }
+        try await webEngine.setCookie(cookie, requestURL: requestURL)
+    }
+
+    @MainActor public func applySetCookieHeaders(_ headers: [String], for responseURL: URL) async throws {
+        guard let webEngine else {
+            return
+        }
+        try await webEngine.applySetCookieHeaders(headers, for: responseURL)
+    }
+
+    @MainActor public func clearCookies() async {
+        guard let webEngine else {
+            return
+        }
+        await webEngine.clearCookies()
+    }
+
+    @MainActor public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
+        guard let webEngine else {
+            return
+        }
+        try await webEngine.removeData(ofTypes: types, modifiedSince: modifiedSince)
+    }
 }
 
 
