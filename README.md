@@ -478,6 +478,54 @@ extension View {
 }
 ```
 
+## Cookies, Storage, and Cache
+
+`SkipWeb` exposes portable browser-data APIs through `WebEngine` and `WebViewNavigator`:
+
+- `cookies(for:)`
+- `cookieHeader(for:)`
+- `setCookie(_:requestURL:)`
+- `applySetCookieHeaders(_:for:)`
+- `clearCookies()`
+- `removeData(ofTypes:modifiedSince:)`
+
+Supporting types:
+
+- `WebCookie` (`name`, `value`, optional `domain`/`path`/`expires`, plus `isSecure`/`isHTTPOnly`)
+- `WebSiteDataType` (`cookies`, `diskCache`, `memoryCache`, `offlineWebApplicationCache`, `localStorage`, `sessionStorage`, `webSQLDatabases`, `indexedDBDatabases`)
+
+Example:
+
+```swift
+let url = URL(string: "https://example.com/path")!
+
+try await navigator.setCookie(
+    WebCookie(name: "session", value: "abc123"),
+    requestURL: url
+)
+
+let header = await navigator.cookieHeader(for: url)
+try await navigator.applySetCookieHeaders(
+    ["pref=1; Path=/; HttpOnly"],
+    for: url
+)
+await navigator.clearCookies()
+try await navigator.removeData(
+    ofTypes: Set([.diskCache, .memoryCache, .localStorage]),
+    modifiedSince: .distantPast
+)
+```
+
+Platform behavior:
+
+- iOS uses the web view's `websiteDataStore.httpCookieStore`.
+- Android uses `android.webkit.CookieManager`.
+- `cookies(for:)` returns URL-matching cookies; on Android this is best-effort because `CookieManager` reads as a cookie-header string (limited metadata).
+- `setCookie(_:requestURL:)` requires either `cookie.domain` or a `requestURL` host; otherwise it throws `WebCookieError.missingCookieDomain`.
+- `removeData(ofTypes:modifiedSince:)` maps to iOS `WKWebsiteDataStore.removeData`.
+- On Android, `removeData` requires `modifiedSince == .distantPast` when `ofTypes` is non-empty; otherwise it throws `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`.
+- Android data removal is bucket-level (cookies/cache/storage), not timestamp-granular, and may clear a broader bucket than an individual requested data type.
+
 ## Contribution
 
 Many delegates that are provided by `WKWebView` are not yet implemented in this project,

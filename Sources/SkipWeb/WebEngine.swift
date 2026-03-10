@@ -84,6 +84,404 @@ public enum WebSnapshotError: Error {
     case pngEncodingFailed
 }
 
+/// Portable cookie representation shared by iOS and Android implementations.
+public struct WebCookie: Equatable, Hashable, Sendable {
+    public var name: String
+    public var value: String
+    public var domain: String?
+    public var path: String?
+    public var expires: Date?
+    public var isSecure: Bool
+    public var isHTTPOnly: Bool
+
+    public init(
+        name: String,
+        value: String,
+        domain: String? = nil,
+        path: String? = nil,
+        expires: Date? = nil,
+        isSecure: Bool = false,
+        isHTTPOnly: Bool = false
+    ) {
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+        self.expires = expires
+        self.isSecure = isSecure
+        self.isHTTPOnly = isHTTPOnly
+    }
+}
+
+public enum WebCookieError: Error {
+    case invalidCookieName
+    case missingCookieDomain
+    case invalidCookie
+}
+
+public enum WebSiteDataType: String, CaseIterable, Hashable, Sendable {
+    case cookies
+    case diskCache
+    case memoryCache
+    case offlineWebApplicationCache
+    case localStorage
+    case sessionStorage
+    case webSQLDatabases
+    case indexedDBDatabases
+}
+
+public enum WebDataRemovalError: Error, Equatable {
+    case unsupportedModifiedSinceOnAndroid
+}
+
+enum WebDataRemovalBucket: Hashable {
+    case cookies
+    case cache
+    case storage
+}
+
+extension WebSiteDataType {
+    var androidRemovalBucket: WebDataRemovalBucket {
+        switch self {
+        case .cookies:
+            return .cookies
+        case .diskCache, .memoryCache, .offlineWebApplicationCache:
+            return .cache
+        case .localStorage, .sessionStorage, .webSQLDatabases, .indexedDBDatabases:
+            return .storage
+        }
+    }
+
+    #if !SKIP
+    var webKitDataType: String {
+        switch self {
+        case .cookies:
+            return WKWebsiteDataTypeCookies
+        case .diskCache:
+            return WKWebsiteDataTypeDiskCache
+        case .memoryCache:
+            return WKWebsiteDataTypeMemoryCache
+        case .offlineWebApplicationCache:
+            return WKWebsiteDataTypeOfflineWebApplicationCache
+        case .localStorage:
+            return WKWebsiteDataTypeLocalStorage
+        case .sessionStorage:
+            return WKWebsiteDataTypeSessionStorage
+        case .webSQLDatabases:
+            return WKWebsiteDataTypeWebSQLDatabases
+        case .indexedDBDatabases:
+            return WKWebsiteDataTypeIndexedDBDatabases
+        }
+    }
+    #endif
+}
+
+extension WebCookie {
+    func matches(url: URL, now: Date = Date()) -> Bool {
+        guard let host = url.host?.lowercased(), !host.isEmpty else {
+            return false
+        }
+        if isSecure && (url.scheme?.lowercased() != "https") {
+            return false
+        }
+        if let expires, expires <= now {
+            return false
+        }
+
+        if let domain = normalizedDomain, !domain.isEmpty {
+            // Treat no-dot domains as host-only so they don't leak to subdomains.
+            if isHostOnlyDomain {
+                if host != domain {
+                    return false
+                }
+            } else if host != domain && !host.hasSuffix("." + domain) {
+                return false
+            }
+        }
+
+        let requestPath = normalizedRequestPath(url.path)
+        let cookiePath = normalizedCookiePath
+        // Enforce RFC-style path boundary matching ("/a" does not match "/ab").
+        return requestPathMatchesCookiePath(requestPath, cookiePath: cookiePath)
+    }
+
+    static func parseRequestCookieHeader(_ header: String) -> [WebCookie] {
+        let rawComponents = header.split(separator: ";")
+        var cookies: [WebCookie] = []
+        for rawComponent in rawComponents {
+            let component = String(rawComponent).trimmingCharacters(in: .whitespacesAndNewlines)
+            if component.isEmpty {
+                continue
+            }
+            guard let equalIndex = component.firstIndex(of: "=") else {
+                continue
+            }
+            let name = String(component[..<equalIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let valueIndex = component.index(after: equalIndex)
+            let value = String(component[valueIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if name.isEmpty {
+                continue
+            }
+            cookies.append(WebCookie(name: name, value: value))
+        }
+        return cookies
+    }
+
+    static func parseSetCookieHeaders(_ headers: [String], responseURL: URL) -> [WebCookie] {
+        #if !SKIP
+        var parsedCookies: [WebCookie] = []
+        for header in headers {
+            let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                continue
+            }
+            let nativeCookies = HTTPCookie.cookies(
+                withResponseHeaderFields: ["Set-Cookie": trimmed],
+                for: responseURL
+            )
+            for nativeCookie in nativeCookies {
+                parsedCookies.append(WebCookie(nativeCookie: nativeCookie))
+            }
+        }
+        return parsedCookies
+        #else
+        var parsedCookies: [WebCookie] = []
+        for header in headers {
+            if let cookie = parseSingleSetCookieHeader(header, responseURL: responseURL) {
+                parsedCookies.append(cookie)
+            }
+        }
+        return parsedCookies
+        #endif
+    }
+
+    fileprivate static func parseSingleSetCookieHeader(_ header: String, responseURL: URL) -> WebCookie? {
+        let segments = header.split(separator: ";")
+        guard let firstSegment = segments.first else {
+            return nil
+        }
+        let first = String(firstSegment).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let firstEqualIndex = first.firstIndex(of: "=") else {
+            return nil
+        }
+
+        let name = String(first[..<firstEqualIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let valueStartIndex = first.index(after: firstEqualIndex)
+        let value = String(first[valueStartIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.isEmpty {
+            return nil
+        }
+
+        var domain: String? = responseURL.host
+        var path: String? = "/"
+        var expires: Date?
+        var isSecure = false
+        var isHTTPOnly = false
+
+        if segments.count > 1 {
+            for segmentIndex in 1..<segments.count {
+                let rawAttribute = String(segments[segmentIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if rawAttribute.isEmpty {
+                    continue
+                }
+
+                let lowercasedAttribute = rawAttribute.lowercased()
+                if lowercasedAttribute == "secure" {
+                    isSecure = true
+                    continue
+                }
+                if lowercasedAttribute == "httponly" {
+                    isHTTPOnly = true
+                    continue
+                }
+
+                guard let equalIndex = rawAttribute.firstIndex(of: "=") else {
+                    continue
+                }
+                let key = String(rawAttribute[..<equalIndex]).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                let valueIndex = rawAttribute.index(after: equalIndex)
+                let attributeValue = String(rawAttribute[valueIndex...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if attributeValue.isEmpty {
+                    continue
+                }
+
+                if key == "domain" {
+                    // Preserve "Domain=" semantics as subdomain-capable for matching.
+                    domain = attributeValue.hasPrefix(".") ? attributeValue : "." + attributeValue
+                } else if key == "path" {
+                    path = attributeValue
+                } else if key == "max-age", let maxAgeSeconds = Int(attributeValue) {
+                    expires = Date(timeIntervalSinceNow: TimeInterval(maxAgeSeconds))
+                }
+            }
+        }
+
+        return WebCookie(
+            name: name,
+            value: value,
+            domain: domain,
+            path: path,
+            expires: expires,
+            isSecure: isSecure,
+            isHTTPOnly: isHTTPOnly
+        )
+    }
+
+    fileprivate var normalizedDomain: String? {
+        guard let domain else {
+            return nil
+        }
+        let trimmed = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.isEmpty {
+            return nil
+        }
+        if trimmed.hasPrefix(".") {
+            let start = trimmed.index(after: trimmed.startIndex)
+            let stripped = String(trimmed[start...])
+            return stripped.isEmpty ? nil : stripped
+        }
+        return trimmed
+    }
+
+    fileprivate var isHostOnlyDomain: Bool {
+        // A leading dot indicates explicit subdomain matching semantics.
+        guard let domain else {
+            return false
+        }
+        let trimmed = domain.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return false
+        }
+        return !trimmed.hasPrefix(".")
+    }
+
+    fileprivate var normalizedCookiePath: String {
+        guard let rawPath = path?.trimmingCharacters(in: .whitespacesAndNewlines), !rawPath.isEmpty else {
+            return "/"
+        }
+        if rawPath.hasPrefix("/") {
+            return rawPath
+        }
+        return "/" + rawPath
+    }
+
+    fileprivate func normalizedRequestPath(_ requestPath: String) -> String {
+        if requestPath.isEmpty {
+            return "/"
+        }
+        if requestPath.hasPrefix("/") {
+            return requestPath
+        }
+        return "/" + requestPath
+    }
+
+    fileprivate func requestPathMatchesCookiePath(_ requestPath: String, cookiePath: String) -> Bool {
+        // Follow cookie path-match rules so sibling prefixes are not accepted.
+        if requestPath == cookiePath {
+            return true
+        }
+        if !requestPath.hasPrefix(cookiePath) {
+            return false
+        }
+        if cookiePath.hasSuffix("/") {
+            return true
+        }
+        let boundaryIndex = requestPath.index(requestPath.startIndex, offsetBy: cookiePath.count)
+        return boundaryIndex < requestPath.endIndex && requestPath[boundaryIndex] == "/"
+    }
+
+    fileprivate func androidTargetURL(requestURL: URL?) -> URL? {
+        if let requestURL {
+            return requestURL
+        }
+        guard let domain = normalizedDomain, !domain.isEmpty else {
+            return nil
+        }
+        let normalizedPath = normalizedCookiePath
+        return URL(string: "https://\(domain)\(normalizedPath)")
+    }
+
+    fileprivate func asAndroidSetCookieString(requestURL: URL?) throws -> String {
+        if name.isEmpty {
+            throw WebCookieError.invalidCookieName
+        }
+
+        var cookieParts: [String] = ["\(name)=\(value)"]
+        if let domain = normalizedDomain, !domain.isEmpty {
+            cookieParts.append("Domain=\(domain)")
+        } else if let fallbackDomain = requestURL?.host?.lowercased(), !fallbackDomain.isEmpty {
+            cookieParts.append("Domain=\(fallbackDomain)")
+        } else {
+            throw WebCookieError.missingCookieDomain
+        }
+
+        cookieParts.append("Path=\(normalizedCookiePath)")
+
+        if let expires {
+            let maxAge = max(0, Int(expires.timeIntervalSinceNow.rounded()))
+            cookieParts.append("Max-Age=\(maxAge)")
+        }
+        if isSecure {
+            cookieParts.append("Secure")
+        }
+        if isHTTPOnly {
+            cookieParts.append("HttpOnly")
+        }
+        return cookieParts.joined(separator: "; ")
+    }
+}
+
+#if !SKIP
+extension WebCookie {
+    fileprivate init(nativeCookie: HTTPCookie) {
+        self.init(
+            name: nativeCookie.name,
+            value: nativeCookie.value,
+            domain: nativeCookie.domain,
+            path: nativeCookie.path,
+            expires: nativeCookie.expiresDate,
+            isSecure: nativeCookie.isSecure,
+            isHTTPOnly: nativeCookie.isHTTPOnly
+        )
+    }
+
+    fileprivate func asNativeCookie(requestURL: URL?) throws -> HTTPCookie {
+        if name.isEmpty {
+            throw WebCookieError.invalidCookieName
+        }
+        // Preserve an explicit leading-dot domain so domain cookies keep subdomain scope.
+        let explicitDomain = domain?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let fallbackDomain = requestURL?.host?.lowercased()
+        guard let effectiveDomain = (explicitDomain?.isEmpty == false ? explicitDomain : nil) ?? fallbackDomain, !effectiveDomain.isEmpty else {
+            throw WebCookieError.missingCookieDomain
+        }
+
+        var properties: [HTTPCookiePropertyKey: Any] = [
+            .name: name,
+            .value: value,
+            .domain: effectiveDomain,
+            .path: normalizedCookiePath
+        ]
+        if let expires {
+            properties[.expires] = expires
+        }
+        if isSecure {
+            properties[.secure] = "TRUE"
+        }
+        if isHTTPOnly {
+            properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE"
+        }
+
+        guard let nativeCookie = HTTPCookie(properties: properties) else {
+            throw WebCookieError.invalidCookie
+        }
+        return nativeCookie
+    }
+}
+#endif
+
 /// An web engine that holds a system web view:
 /// [`WebKit.WKWebView`](https://developer.apple.com/documentation/webkit/wkwebview) on iOS and
 /// [`android.webkit.WebView`](https://developer.android.com/reference/android/webkit/WebView) on Android
@@ -156,6 +554,160 @@ public enum WebSnapshotError: Error {
     /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
         return try await evaluateJavaScriptAsync(js)
+    }
+
+    static func androidRemovalBuckets(for types: Set<WebSiteDataType>) -> Set<WebDataRemovalBucket> {
+        var buckets = Set<WebDataRemovalBucket>()
+        for type in types {
+            buckets.insert(type.androidRemovalBucket)
+        }
+        return buckets
+    }
+
+    static func androidRemovalBucketNames(for types: Set<WebSiteDataType>) -> Set<String> {
+        var names = Set<String>()
+        for bucket in androidRemovalBuckets(for: types) {
+            switch bucket {
+            case .cookies:
+                names.insert("cookies")
+            case .cache:
+                names.insert("cache")
+            case .storage:
+                names.insert("storage")
+            }
+        }
+        return names
+    }
+
+    #if !SKIP
+    static func webKitDataTypes(for types: Set<WebSiteDataType>) -> Set<String> {
+        var mapped = Set<String>()
+        for type in types {
+            mapped.insert(type.webKitDataType)
+        }
+        return mapped
+    }
+    #endif
+
+    public func cookies(for url: URL) async -> [WebCookie] {
+        #if !SKIP
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        let allCookies = await getAllCookies(from: store)
+        var filtered: [WebCookie] = []
+        for nativeCookie in allCookies {
+            let webCookie = WebCookie(nativeCookie: nativeCookie)
+            if webCookie.matches(url: url) {
+                filtered.append(webCookie)
+            }
+        }
+        return filtered
+        #else
+        let cookieHeader = android.webkit.CookieManager.getInstance().getCookie(url.absoluteString) ?? ""
+        if cookieHeader.isEmpty {
+            return []
+        }
+        return WebCookie.parseRequestCookieHeader(cookieHeader)
+        #endif
+    }
+
+    public func cookieHeader(for url: URL) async -> String? {
+        #if !SKIP
+        let matchingCookies = await cookies(for: url)
+        if matchingCookies.isEmpty {
+            return nil
+        }
+        var cookiePairs: [String] = []
+        for cookie in matchingCookies {
+            cookiePairs.append("\(cookie.name)=\(cookie.value)")
+        }
+        return cookiePairs.joined(separator: "; ")
+        #else
+        let cookieHeader = android.webkit.CookieManager.getInstance().getCookie(url.absoluteString) ?? ""
+        return cookieHeader.isEmpty ? nil : cookieHeader
+        #endif
+    }
+
+    public func setCookie(_ cookie: WebCookie, requestURL: URL? = nil) async throws {
+        #if !SKIP
+        let nativeCookie = try cookie.asNativeCookie(requestURL: requestURL)
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        await setCookie(nativeCookie, in: store)
+        #else
+        let targetURL = cookie.androidTargetURL(requestURL: requestURL)
+        guard let targetURL else {
+            throw WebCookieError.missingCookieDomain
+        }
+        let cookieString = try cookie.asAndroidSetCookieString(requestURL: requestURL)
+        let cookieManager = android.webkit.CookieManager.getInstance()
+        await setAndroidCookie(cookieManager, forURLString: targetURL.absoluteString, cookieString: cookieString)
+        #endif
+    }
+
+    public func applySetCookieHeaders(_ headers: [String], for responseURL: URL) async throws {
+        #if !SKIP
+        let parsedCookies = WebCookie.parseSetCookieHeaders(headers, responseURL: responseURL)
+        for cookie in parsedCookies {
+            try await setCookie(cookie, requestURL: responseURL)
+        }
+        #else
+        let cookieManager = android.webkit.CookieManager.getInstance()
+        let targetURLString = responseURL.absoluteString
+        for header in headers {
+            let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                continue
+            }
+            await setAndroidCookie(cookieManager, forURLString: targetURLString, cookieString: trimmed)
+        }
+        #endif
+    }
+
+    public func clearCookies() async {
+        #if !SKIP
+        let store = webView.configuration.websiteDataStore.httpCookieStore
+        let allCookies = await getAllCookies(from: store)
+        for cookie in allCookies {
+            await deleteCookie(cookie, from: store)
+        }
+        #else
+        let cookieManager = android.webkit.CookieManager.getInstance()
+        await removeAllAndroidCookies(cookieManager)
+        #endif
+    }
+
+    @MainActor
+    public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
+        if types.isEmpty {
+            return
+        }
+
+        #if !SKIP
+        let webKitTypes = Self.webKitDataTypes(for: types)
+        if webKitTypes.isEmpty {
+            return
+        }
+        await removeData(
+            from: webView.configuration.websiteDataStore,
+            ofTypes: webKitTypes,
+            modifiedSince: modifiedSince
+        )
+        #else
+        if modifiedSince != .distantPast {
+            throw WebDataRemovalError.unsupportedModifiedSinceOnAndroid
+        }
+
+        let buckets = Self.androidRemovalBuckets(for: types)
+        if buckets.contains(.cookies) {
+            let cookieManager = android.webkit.CookieManager.getInstance()
+            await removeAllAndroidCookies(cookieManager)
+        }
+        if buckets.contains(.cache) {
+            webView.clearCache(true)
+        }
+        if buckets.contains(.storage) {
+            android.webkit.WebStorage.getInstance().deleteAllData()
+        }
+        #endif
     }
 
     @MainActor public func takeSnapshot(configuration: SkipWebSnapshotConfiguration? = nil) async throws -> SkipWebSnapshot {
@@ -321,6 +873,70 @@ public enum WebSnapshotError: Error {
         }
         #endif
     }
+
+    #if !SKIP
+    private func getAllCookies(from cookieStore: WKHTTPCookieStore) async -> [HTTPCookie] {
+        await withCheckedContinuation { continuation in
+            cookieStore.getAllCookies { cookies in
+                continuation.resume(returning: cookies)
+            }
+        }
+    }
+
+    private func setCookie(_ cookie: HTTPCookie, in cookieStore: WKHTTPCookieStore) async {
+        await withCheckedContinuation { continuation in
+            cookieStore.setCookie(cookie) {
+                continuation.resume(returning: ())
+            }
+        }
+    }
+
+    private func deleteCookie(_ cookie: HTTPCookie, from cookieStore: WKHTTPCookieStore) async {
+        await withCheckedContinuation { continuation in
+            cookieStore.delete(cookie) {
+                continuation.resume(returning: ())
+            }
+        }
+    }
+
+    private func removeData(from dataStore: WKWebsiteDataStore, ofTypes types: Set<String>, modifiedSince: Date) async {
+        await withCheckedContinuation { continuation in
+            dataStore.removeData(ofTypes: types, modifiedSince: modifiedSince) {
+                continuation.resume(returning: ())
+            }
+        }
+    }
+    #else
+    private func setAndroidCookie(
+        _ cookieManager: android.webkit.CookieManager,
+        forURLString urlString: String,
+        cookieString: String
+    ) async {
+        // Wait for CookieManager callback so callers see completion after mutation.
+        let _: Void = suspendCancellableCoroutine { continuation in
+            cookieManager.setCookie(urlString, cookieString) { _ in
+                continuation.resume(())
+            }
+            continuation.invokeOnCancellation { _ in
+                continuation.cancel()
+            }
+        }
+        // Persist the updated cookie store once the mutation callback fires.
+        cookieManager.flush()
+    }
+
+    private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
+        // Wait for async removal callback to avoid stale reads after clear calls.
+        let _: Void = suspendCancellableCoroutine { continuation in
+            cookieManager.removeAllCookies { _ in
+                continuation.resume(())
+            }
+            continuation.invokeOnCancellation { _ in
+                continuation.cancel()
+            }
+        }
+    }
+    #endif
 
     /// Perform the given block and only return once the page has completed loading
     // SKIP @nobridge
