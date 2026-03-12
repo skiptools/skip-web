@@ -360,8 +360,12 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
         self.webEngine = webEngine
     }
 
-    private func inheritParentConfiguration(for childEngine: WebEngine) {
+    private func inheritParentConfiguration(for childEngine: WebEngine) -> Bool {
         let parentConfig = webEngine.configuration
+        if let profileError = childEngine.inheritAndroidProfile(from: parentConfig.profile) {
+            logger.error("onCreateWindow: failed to inherit parent WebProfile \(String(describing: parentConfig.profile)): \(String(describing: profileError))")
+            return false
+        }
         let settings = childEngine.webView.settings
 
         settings.setJavaScriptEnabled(parentConfig.javaScriptEnabled)
@@ -385,6 +389,7 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
             shouldOverrideUrlLoadingHandler: self.webView.shouldOverrideUrlLoading
         ))
         childEngine.webView.webChromeClient = self
+        return true
     }
 
     override func onCreateWindow(view: PlatformWebView, isDialog: Bool, isUserGesture: Bool, resultMsg: android.os.Message) -> Bool {
@@ -414,7 +419,9 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
             return false
         }
 
-        inheritParentConfiguration(for: childEngine)
+        guard inheritParentConfiguration(for: childEngine) else {
+            return false
+        }
 
         guard let transport = resultMsg.obj as? android.webkit.WebView.WebViewTransport else {
             logger.error("onCreateWindow: invalid WebViewTransport message payload")

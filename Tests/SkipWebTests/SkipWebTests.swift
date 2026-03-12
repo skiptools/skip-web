@@ -766,6 +766,34 @@ final class SkipWebTests: XCTestCase {
     }
 
     @MainActor
+    func testAndroidChildProfileInheritanceRejectsInvalidProfile() async throws {
+        let child = makeCookieTestEngine(profile: .default)
+        let profileError = child.inheritAndroidProfile(from: WebProfile.named(" "))
+        XCTAssertEqual(profileError, WebProfileError.invalidProfileName)
+
+        let requestURL = try XCTUnwrap(URL(string: "https://android-profile.example.com/path"))
+        do {
+            try await child.setCookie(WebCookie(name: "session", value: "1"), requestURL: requestURL)
+            XCTFail("Expected inherited invalid profile to block cookie operations")
+        } catch let error as WebProfileError {
+            XCTAssertEqual(error, WebProfileError.invalidProfileName)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    @MainActor
+    func testAndroidChildProfileInheritanceMatchesSupportMatrix() async throws {
+        let child = makeCookieTestEngine(profile: .default)
+        let profileError = child.inheritAndroidProfile(from: WebProfile.named("android-profile-inherited"))
+        if WebEngine.isAndroidMultiProfileSupported() {
+            XCTAssertNil(profileError)
+        } else {
+            XCTAssertEqual(profileError, WebProfileError.unsupportedOnAndroid)
+        }
+    }
+
+    @MainActor
     func testAndroidNamedProfileThrowsWhenUnsupported() async throws {
         if WebEngine.isAndroidMultiProfileSupported() {
             throw XCTSkip("device WebView runtime supports multi-profile")

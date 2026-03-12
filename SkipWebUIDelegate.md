@@ -129,4 +129,5 @@ struct PopupHostView: View {
 - For iOS popup creation, return a child created via `platformContext.makeChildWebEngine(...)`.
 - `makeChildWebEngine()` mirrors the parent `WebEngineConfiguration` and inspectability by default. Pass an explicit configuration only when you intentionally want different child behavior.
 - `makeChildWebEngine()` does not automatically copy platform delegate assignments (`WKUIDelegate`, `WKNavigationDelegate`) from the parent web view; assign those explicitly when needed.
+- On Android, after your delegate returns a child `WebEngine`, SkipWeb mirrors key parent web settings and inherits the parent `WebProfile` onto that child; if profile inheritance fails, popup creation is denied.
 - `PlatformCreateWindowContext` aliases `WebKitCreateWindowParams` on iOS and `AndroidCreateWindowParams` on Android.

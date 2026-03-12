@@ -686,6 +686,24 @@ extension WebCookie {
         }
     }
 
+    @discardableResult
+    func inheritAndroidProfile(from parentProfile: WebProfile) -> WebProfileError? {
+        if configuration.profile == parentProfile, profileSetupError == nil {
+            return nil
+        }
+        configuration.profile = parentProfile
+        switch Self.configureAndroidProfile(parentProfile, for: webView) {
+        case .success(let androidProfileResources):
+            self.androidProfileCookieManager = androidProfileResources.cookieManager
+            self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.profileSetupError = nil
+            return nil
+        case .failure(let error):
+            self.profileSetupError = error
+            return error
+        }
+    }
+
     private static func applyAndroidProfile(_ identifier: String, to webView: PlatformWebView) -> Bool {
         // SKIP INSERT: try { androidx.webkit.WebViewCompat.setProfile(webView, identifier); return true } catch (t: Throwable) { return false }
         WebViewCompat.setProfile(webView, identifier)
