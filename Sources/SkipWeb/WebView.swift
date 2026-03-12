@@ -175,21 +175,22 @@ public class WebViewNavigator: @unchecked Sendable {
     }
 
     @MainActor public func load(url: URL) {
+        Task { @MainActor in
+            do {
+                try await loadOrThrow(url: url)
+            } catch {
+                logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
+            }
+        }
+    }
+
+    /// Loads a URL and throws any profile setup/navigation preflight errors.
+    @MainActor public func loadOrThrow(url: URL) async throws {
         // TODO: handle newTab
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.webEngine?.description ?? "NONE")")
-        guard let webView = webEngine?.webView else { return }
-        #if SKIP
-        // TODO: create a WebViewAssetLoader for jar:file: URLs to handle loading the HTML and resources from the apk
-        // https://github.com/skiptools/skip-web/issues/1
-        webView.loadUrl(urlString ?? "about:blank")
-        #else
-        if url.isFileURL {
-            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
-        } else {
-            webView.load(URLRequest(url: url))
-        }
-        #endif
+        guard let webEngine else { return }
+        try await webEngine.load(url: url)
     }
 
     @MainActor public func reload() {
@@ -199,7 +200,7 @@ public class WebViewNavigator: @unchecked Sendable {
 
     @MainActor public func stopLoading() {
         logger.info("stopLoading webView: \(self.webEngine?.description ?? "NONE")")
-        webEngine?.webView.stopLoading()
+        webEngine?.stopLoading()
     }
 
     @MainActor public func go(_ item: WebHistoryItem) {

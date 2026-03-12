@@ -4,6 +4,8 @@ import OSLog
 import Foundation
 #if !SKIP
 import WebKit
+#else
+import androidx.webkit.WebViewFeature
 #endif
 @testable import SkipWeb
 
@@ -76,6 +78,13 @@ final class SkipWebTests: XCTestCase {
         let config = WebEngineConfiguration()
         XCTAssertFalse(config.javaScriptCanOpenWindowsAutomatically)
         XCTAssertNil(config.uiDelegate)
+        XCTAssertEqual(config.profile, WebProfile.default)
+    }
+
+    func testPopupChildMirroredConfigurationPreservesProfile() {
+        let config = WebEngineConfiguration(profile: .named("popup-profile"))
+        let mirrored = config.popupChildMirroredConfiguration()
+        XCTAssertEqual(mirrored.profile, .named("popup-profile"))
     }
 
     func testWebWindowRequestCarriesFields() throws {
@@ -583,6 +592,360 @@ final class SkipWebTests: XCTestCase {
         _ = try await engine.evaluate(js: "void(webkit.messageHandlers.test.postMessage('hello'))")
         XCTAssertEqual("hello", handledMessage)
 
+    }
+
+    func testWebCookieURLMatchRules() throws {
+        let secureCookie = WebCookie(
+            name: "auth",
+            value: "token",
+            domain: "example.com",
+            path: "/media",
+            isSecure: true
+        )
+
+        XCTAssertTrue(secureCookie.matches(url: try XCTUnwrap(URL(string: "https://example.com/media/item.m3u8"))))
+        XCTAssertFalse(secureCookie.matches(url: try XCTUnwrap(URL(string: "http://example.com/media/item.m3u8"))))
+        XCTAssertFalse(secureCookie.matches(url: try XCTUnwrap(URL(string: "https://not-example.com/media/item.m3u8"))))
+        XCTAssertFalse(secureCookie.matches(url: try XCTUnwrap(URL(string: "https://example.com/other/path"))))
+        // Path matching must respect segment boundaries.
+        XCTAssertFalse(secureCookie.matches(url: try XCTUnwrap(URL(string: "https://example.com/media2/item.m3u8"))))
+
+        // Host-only cookies should stay on their exact host.
+        let hostOnlyCookie = WebCookie(
+            name: "hostonly",
+            value: "1",
+            domain: "example.com",
+            path: "/"
+        )
+        XCTAssertTrue(hostOnlyCookie.matches(url: try XCTUnwrap(URL(string: "https://example.com/"))))
+        XCTAssertFalse(hostOnlyCookie.matches(url: try XCTUnwrap(URL(string: "https://sub.example.com/"))))
+
+        // Dot-prefixed domains should permit subdomain matching.
+        let domainCookie = WebCookie(
+            name: "domain",
+            value: "1",
+            domain: ".example.com",
+            path: "/"
+        )
+        XCTAssertTrue(domainCookie.matches(url: try XCTUnwrap(URL(string: "https://sub.example.com/"))))
+
+        let expiredCookie = WebCookie(
+            name: "stale",
+            value: "1",
+            domain: "example.com",
+            path: "/",
+            expires: Date(timeIntervalSinceNow: -60)
+        )
+        XCTAssertFalse(expiredCookie.matches(url: try XCTUnwrap(URL(string: "https://example.com/"))))
+    }
+
+    func testSetCookieHeaderParsingIgnoresInvalidHeaders() throws {
+        let responseURL = try XCTUnwrap(URL(string: "https://example.com/playlist.m3u8"))
+        let cookies = WebCookie.parseSetCookieHeaders(
+            [
+                "session=abc123; Path=/; HttpOnly",
+                "badheaderwithoutseparator",
+                "pref=1; Max-Age=3600; Path=/"
+            ],
+            responseURL: responseURL
+        )
+        XCTAssertEqual(Set(cookies.map(\.name)), Set(["session", "pref"]))
+        XCTAssertEqual(cookies.count, 2)
+    }
+
+    @MainActor
+    func testAndroidRemovalBucketsAreDeterministicAndDeduplicated() {
+        let allTypes = Set(WebSiteDataType.allCases)
+        let allBuckets = WebEngine.androidRemovalBucketNames(for: allTypes)
+        XCTAssertEqual(allBuckets, Set(["cookies", "cache", "storage"]))
+
+        let cacheTypes: Set<WebSiteDataType> = [.diskCache, .memoryCache, .offlineWebApplicationCache]
+        let cacheOnlyBuckets = WebEngine.androidRemovalBucketNames(for: cacheTypes)
+        XCTAssertEqual(cacheOnlyBuckets, Set(["cache"]))
+    }
+
+    @MainActor
+    func testWebProfileValidationRules() {
+        XCTAssertNil(WebEngine.profileValidationError(for: WebProfile.default))
+        XCTAssertNil(WebEngine.profileValidationError(for: WebProfile.named("profile-a")))
+        XCTAssertEqual(WebEngine.profileValidationError(for: WebProfile.named(" ")), WebProfileError.invalidProfileName)
+        XCTAssertEqual(WebEngine.profileValidationError(for: WebProfile.named("default")), WebProfileError.invalidProfileName)
+    }
+
+    @MainActor
+    func testNavigatorLoadOrThrowPropagatesInvalidProfileError() async throws {
+        let navigator = WebViewNavigator()
+        navigator.webEngine = makeCookieTestEngine(profile: .named(" "))
+        let requestURL = try XCTUnwrap(URL(string: "https://invalid-profile.example.com/path"))
+
+        do {
+            try await navigator.loadOrThrow(url: requestURL)
+            XCTFail("Expected navigator loadOrThrow to fail for invalid profile")
+        } catch let error as WebProfileError {
+            XCTAssertEqual(error, .invalidProfileName)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    #if !SKIP
+    @MainActor
+    func testWebKitDataTypeMappingIncludesExpectedDataTypes() {
+        let mapped = WebEngine.webKitDataTypes(for: Set(WebSiteDataType.allCases))
+        let expected: Set<String> = [
+            WKWebsiteDataTypeCookies,
+            WKWebsiteDataTypeDiskCache,
+            WKWebsiteDataTypeMemoryCache,
+            WKWebsiteDataTypeOfflineWebApplicationCache,
+            WKWebsiteDataTypeLocalStorage,
+            WKWebsiteDataTypeSessionStorage,
+            WKWebsiteDataTypeWebSQLDatabases,
+            WKWebsiteDataTypeIndexedDBDatabases
+        ]
+        XCTAssertEqual(mapped, expected)
+    }
+
+    @MainActor
+    func testIOSNamedProfileIsolatesCookiesAcrossDifferentProfiles() async throws {
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let profileA: WebProfile = .named("ios_profile_a_\(suffix)")
+        let profileB: WebProfile = .named("ios_profile_b_\(suffix)")
+        let engineA = makeCookieTestEngine(profile: profileA)
+        let engineB = makeCookieTestEngine(profile: profileB)
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://ios-profiles.example.com/path"))
+        let cookieName = "ios_profile_cookie_\(suffix)"
+        try await engineA.setCookie(WebCookie(name: cookieName, value: "one"), requestURL: requestURL)
+
+        let headerA = await engineA.cookieHeader(for: requestURL)
+        let headerB = await engineB.cookieHeader(for: requestURL)
+        XCTAssertTrue(headerA?.contains("\(cookieName)=one") == true)
+        XCTAssertFalse(headerB?.contains("\(cookieName)=one") == true)
+
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+    }
+
+    @MainActor
+    func testIOSNamedProfileSharesCookiesAcrossEnginesWithSameIdentifier() async throws {
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let sharedProfile: WebProfile = .named("ios_profile_shared_\(suffix)")
+        let engineA = makeCookieTestEngine(profile: sharedProfile)
+        let engineB = makeCookieTestEngine(profile: sharedProfile)
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://ios-profiles.example.com/shared"))
+        let cookieName = "ios_shared_cookie_\(suffix)"
+        try await engineA.setCookie(WebCookie(name: cookieName, value: "two"), requestURL: requestURL)
+
+        let headerB = await engineB.cookieHeader(for: requestURL)
+        XCTAssertTrue(headerB?.contains("\(cookieName)=two") == true)
+
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+    }
+    #endif
+
+    #if SKIP
+    func testAndroidProfileSupportMatrix() {
+        XCTAssertNil(WebEngine.androidProfileSupportError(for: WebProfile.default, isMultiProfileFeatureSupported: false))
+        XCTAssertEqual(
+            WebEngine.androidProfileSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: false),
+            WebProfileError.unsupportedOnAndroid
+        )
+        XCTAssertNil(
+            WebEngine.androidProfileSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: true)
+        )
+        XCTAssertEqual(
+            WebEngine.androidProfileSupportError(for: WebProfile.named(" "), isMultiProfileFeatureSupported: true),
+            WebProfileError.invalidProfileName
+        )
+    }
+
+    @MainActor
+    func testAndroidNamedProfileThrowsWhenUnsupported() async throws {
+        if WebEngine.isAndroidMultiProfileSupported() {
+            throw XCTSkip("device WebView runtime supports multi-profile")
+        }
+        let engine = makeCookieTestEngine(profile: .named("android-profile"))
+        let requestURL = try XCTUnwrap(URL(string: "https://android-profile.example.com/path"))
+        do {
+            try await engine.setCookie(WebCookie(name: "session", value: "1"), requestURL: requestURL)
+            XCTFail("Expected named profile operations to throw when multi-profile is unsupported")
+        } catch let error as WebProfileError {
+            XCTAssertEqual(error, WebProfileError.unsupportedOnAndroid)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
+    @MainActor
+    func testAndroidNamedProfilesIsolateCookiesWhenSupported() async throws {
+        if !WebEngine.isAndroidMultiProfileSupported() {
+            throw XCTSkip("device WebView runtime does not support multi-profile")
+        }
+        if isRobolectric {
+            throw XCTSkip("cookie store is not reliable in Robolectric")
+        }
+
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let engineA = makeCookieTestEngine(profile: .named("android_profile_a_\(suffix)"))
+        let engineB = makeCookieTestEngine(profile: .named("android_profile_b_\(suffix)"))
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://android-profile.example.com/path"))
+        let cookieName = "android_profile_cookie_\(suffix)"
+        try await engineA.setCookie(WebCookie(name: cookieName, value: "1"), requestURL: requestURL)
+        let headerA = await engineA.cookieHeader(for: requestURL)
+        let headerB = await engineB.cookieHeader(for: requestURL)
+        XCTAssertTrue(headerA?.contains("\(cookieName)=1") == true)
+        XCTAssertFalse(headerB?.contains("\(cookieName)=1") == true)
+
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+    }
+
+    @MainActor
+    func testAndroidRemoveDataThrowsForNonDistantPastModifiedSince() async throws {
+        let engine = makeCookieTestEngine()
+        let types: Set<WebSiteDataType> = [.cookies]
+        do {
+            try await engine.removeData(ofTypes: types, modifiedSince: Date())
+            XCTFail("Expected removeData to throw for non-distantPast modifiedSince on Android")
+        } catch let error as WebDataRemovalError {
+            XCTAssertEqual(error, .unsupportedModifiedSinceOnAndroid)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+    #endif
+
+    @MainActor
+    func testRemoveDataAllowsDistantPastForEmptyTypes() async throws {
+        let engine = makeCookieTestEngine()
+        try await engine.removeData(ofTypes: [], modifiedSince: .distantPast)
+    }
+
+    @MainActor
+    func testSetCookieWithRequestURLFallbackAndReadHeader() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie store is not reliable in Robolectric")
+        }
+
+        let engine = makeCookieTestEngine()
+        await engine.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://cookies.example.com/path"))
+        let cookieName = "skip_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let cookie = WebCookie(name: cookieName, value: "value")
+
+        try await engine.setCookie(cookie, requestURL: requestURL)
+        let header = await engine.cookieHeader(for: requestURL)
+        XCTAssertTrue(header?.contains("\(cookieName)=value") == true)
+
+        await engine.clearCookies()
+    }
+
+    @MainActor
+    func testSecureCookieNotReturnedForHTTP() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie store is not reliable in Robolectric")
+        }
+
+        let engine = makeCookieTestEngine()
+        await engine.clearCookies()
+
+        let cookieName = "secure_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let secureCookie = WebCookie(name: cookieName, value: "1", isSecure: true)
+        let httpsURL = try XCTUnwrap(URL(string: "https://secure.example.com/resource"))
+        let httpURL = try XCTUnwrap(URL(string: "http://secure.example.com/resource"))
+
+        try await engine.setCookie(secureCookie, requestURL: httpsURL)
+        let secureHeader = await engine.cookieHeader(for: httpsURL)
+        let insecureHeader = await engine.cookieHeader(for: httpURL)
+
+        XCTAssertTrue(secureHeader?.contains("\(cookieName)=1") == true)
+        XCTAssertFalse(insecureHeader?.contains("\(cookieName)=1") == true)
+
+        await engine.clearCookies()
+    }
+
+    @MainActor
+    func testClearCookiesRemovesStoredCookies() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie store is not reliable in Robolectric")
+        }
+
+        let engine = makeCookieTestEngine()
+        await engine.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://cleanup.example.com/"))
+        let cookieName = "clear_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let cookie = WebCookie(name: cookieName, value: "to-delete")
+
+        try await engine.setCookie(cookie, requestURL: requestURL)
+        let headerBeforeClear = await engine.cookieHeader(for: requestURL)
+        XCTAssertTrue(headerBeforeClear?.contains("\(cookieName)=to-delete") == true)
+
+        await engine.clearCookies()
+        let headerAfterClear = await engine.cookieHeader(for: requestURL)
+        XCTAssertFalse(headerAfterClear?.contains("\(cookieName)=to-delete") == true)
+    }
+
+    @MainActor
+    func testApplySetCookieHeadersRoundTrip() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie store is not reliable in Robolectric")
+        }
+
+        let engine = makeCookieTestEngine()
+        await engine.clearCookies()
+
+        let responseURL = try XCTUnwrap(URL(string: "https://headers.example.com/media/master.m3u8"))
+        let cookieName = "header_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        try await engine.applySetCookieHeaders(
+            [
+                "\(cookieName)=ok; Path=/; HttpOnly",
+                "not-a-cookie-header"
+            ],
+            for: responseURL
+        )
+
+        let header = await engine.cookieHeader(for: responseURL)
+        XCTAssertTrue(header?.contains("\(cookieName)=ok") == true)
+
+        await engine.clearCookies()
+    }
+
+    @MainActor
+    private func makeCookieTestEngine(profile: WebProfile = WebProfile.default) -> WebEngine {
+        let config = WebEngineConfiguration(profile: profile)
+        #if SKIP
+        let instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        let isMainLooperThread = (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+        if isMainLooperThread {
+            let context = instrumentation.targetContext
+            config.context = context
+            let platformWebView = PlatformWebView(context)
+            return WebEngine(configuration: config, webView: platformWebView)
+        } else {
+            var createdEngine: WebEngine? = nil
+            instrumentation.runOnMainSync {
+                let context = instrumentation.targetContext
+                config.context = context
+                let platformWebView = PlatformWebView(context)
+                createdEngine = WebEngine(configuration: config, webView: platformWebView)
+            }
+            return try! XCTUnwrap(createdEngine)
+        }
+        #else
+        let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
+        return WebEngine(configuration: config, webView: platformWebView)
+        #endif
     }
 
     func assertMainThread() {
