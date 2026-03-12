@@ -724,10 +724,23 @@ final class SkipWebTests: XCTestCase {
         let cookieName = "ios_profile_cookie_\(suffix)"
         try await engineA.setCookie(WebCookie(name: cookieName, value: "one"), requestURL: requestURL)
 
-        let headerA = await engineA.cookieHeader(for: requestURL)
+        let expectedPair = "\(cookieName)=one"
+        let headerA = await awaitCookieHeaderContains(
+            expectedPair,
+            for: engineA,
+            url: requestURL,
+            shouldContain: true,
+            timeoutNanoseconds: 5_000_000_000
+        )
         let headerB = await engineB.cookieHeader(for: requestURL)
-        XCTAssertTrue(headerA?.contains("\(cookieName)=one") == true)
-        XCTAssertFalse(headerB?.contains("\(cookieName)=one") == true)
+        XCTAssertTrue(
+            headerA?.contains(expectedPair) == true,
+            "Expected cookie in profile A header. headerA=\(String(describing: headerA)) headerB=\(String(describing: headerB))"
+        )
+        XCTAssertFalse(
+            headerB?.contains(expectedPair) == true,
+            "Cookie leaked into profile B header. headerA=\(String(describing: headerA)) headerB=\(String(describing: headerB))"
+        )
 
         await engineA.clearCookies()
         await engineB.clearCookies()
@@ -746,8 +759,18 @@ final class SkipWebTests: XCTestCase {
         let cookieName = "ios_shared_cookie_\(suffix)"
         try await engineA.setCookie(WebCookie(name: cookieName, value: "two"), requestURL: requestURL)
 
-        let headerB = await engineB.cookieHeader(for: requestURL)
-        XCTAssertTrue(headerB?.contains("\(cookieName)=two") == true)
+        let expectedPair = "\(cookieName)=two"
+        let headerB = await awaitCookieHeaderContains(
+            expectedPair,
+            for: engineB,
+            url: requestURL,
+            shouldContain: true,
+            timeoutNanoseconds: 5_000_000_000
+        )
+        XCTAssertTrue(
+            headerB?.contains(expectedPair) == true,
+            "Expected shared profile cookie in engine B header. headerB=\(String(describing: headerB))"
+        )
 
         await engineA.clearCookies()
         await engineB.clearCookies()
@@ -1006,6 +1029,28 @@ final class SkipWebTests: XCTestCase {
 
     enum SnapshotTestTimeoutError: Error {
         case timedOut
+    }
+
+    @MainActor
+    private func awaitCookieHeaderContains(
+        _ token: String,
+        for engine: WebEngine,
+        url: URL,
+        shouldContain: Bool,
+        timeoutNanoseconds: UInt64,
+        pollNanoseconds: UInt64 = 50_000_000
+    ) async -> String? {
+        let start = DispatchTime.now().uptimeNanoseconds
+        var lastHeader: String?
+        while DispatchTime.now().uptimeNanoseconds - start < timeoutNanoseconds {
+            let header = await engine.cookieHeader(for: url)
+            lastHeader = header
+            if (header?.contains(token) == true) == shouldContain {
+                return header
+            }
+            try? await Task.sleep(nanoseconds: pollNanoseconds)
+        }
+        return lastHeader
     }
 
     @MainActor
