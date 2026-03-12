@@ -13,6 +13,7 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class SkipWebTests: XCTestCase {
+    // SKIP INSERT: companion object { @org.junit.BeforeClass @JvmStatic fun ensureRobolectricFingerprint() { if (android.os.Build.FINGERPRINT == null) { try { val shadowBuildClass = Class.forName("org.robolectric.shadows.ShadowBuild"); val method = shadowBuildClass.getMethod("setFingerprint", String::class.java); method.invoke(null, "robolectric") } catch (_: Throwable) { } } } }
 
     #if SKIP || os(iOS)
 
