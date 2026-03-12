@@ -13,8 +13,6 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class SkipWebTests: XCTestCase {
-    // SKIP INSERT: companion object { @org.junit.BeforeClass @JvmStatic fun ensureRobolectricFingerprint() { if (android.os.Build.FINGERPRINT == null) { try { val shadowBuildClass = Class.forName("org.robolectric.shadows.ShadowBuild"); val method = shadowBuildClass.getMethod("setFingerprint", String::class.java); method.invoke(null, "robolectric") } catch (_: Throwable) { } } } }
-
     #if SKIP || os(iOS)
 
     final class DummyUIDelegate: SkipWebUIDelegate { }
@@ -62,8 +60,6 @@ final class SkipWebTests: XCTestCase {
         override var isDecelerating: Bool { forcedDecelerating }
     }
     #endif
-
-    // SKIP INSERT: @get:org.junit.Rule val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
     func testSkipWeb() throws {
         logger.log("running testSkipWeb")
@@ -410,17 +406,12 @@ final class SkipWebTests: XCTestCase {
         var outerEngine: WebEngine? = nil
 
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-            composeRule.setContent {
-                androidx.compose.ui.viewinterop.AndroidView(factory: { ctx in
-                    //let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
-                    //config.context = ctx
-                    let platformWebView = PlatformWebView(ctx)
-                    let webEngine = WebEngine(configuration: config, webView: platformWebView)
-                    webEngine.loadHTML(html(title: "HELLO"))
-                    outerEngine = webEngine
-                    return platformWebView
-                })
-            }
+            let ctx = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+            config.context = ctx
+            let platformWebView = PlatformWebView(ctx)
+            let webEngine = WebEngine(configuration: config, webView: platformWebView)
+            webEngine.loadHTML(html(title: "HELLO"))
+            outerEngine = webEngine
         }
 
         let engine = try XCTUnwrap(outerEngine)
@@ -493,13 +484,7 @@ final class SkipWebTests: XCTestCase {
 
         let engine = WebEngine(configuration: config, webView: platformWebView)
 
-        #if SKIP
-        composeRule.setContent {
-            androidx.compose.ui.viewinterop.AndroidView(factory: { ctx in
-                return platformWebView
-            })
-        }
-        #else
+        #if !SKIP
         engine.refreshMessageHandlers()
         engine.updateUserScripts()
         #endif
