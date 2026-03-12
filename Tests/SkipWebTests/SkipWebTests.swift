@@ -660,6 +660,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testNavigatorLoadOrThrowPropagatesInvalidProfileError() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebEngine-backed navigator tests require instrumented Android context")
+        }
         let navigator = WebViewNavigator()
         navigator.webEngine = makeCookieTestEngine(profile: .named(" "))
         let requestURL = try XCTUnwrap(URL(string: "https://invalid-profile.example.com/path"))
@@ -753,6 +756,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testAndroidChildProfileInheritanceRejectsInvalidProfile() async throws {
+        if isRobolectric {
+            throw XCTSkip("Android profile inheritance tests require instrumented Android context")
+        }
         let child = makeCookieTestEngine(profile: .default)
         let profileError = child.inheritAndroidProfile(from: WebProfile.named(" "))
         XCTAssertEqual(profileError, WebProfileError.invalidProfileName)
@@ -770,6 +776,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testAndroidChildProfileInheritanceMatchesSupportMatrix() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebView feature probes are unavailable in Robolectric")
+        }
         let child = makeCookieTestEngine(profile: .default)
         let profileError = child.inheritAndroidProfile(from: WebProfile.named("android-profile-inherited"))
         if WebEngine.isAndroidMultiProfileSupported() {
@@ -781,6 +790,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testAndroidNamedProfileThrowsWhenUnsupported() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebView feature probes are unavailable in Robolectric")
+        }
         if WebEngine.isAndroidMultiProfileSupported() {
             throw XCTSkip("device WebView runtime supports multi-profile")
         }
@@ -798,11 +810,11 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testAndroidNamedProfilesIsolateCookiesWhenSupported() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie/profile store tests are not reliable in Robolectric")
+        }
         if !WebEngine.isAndroidMultiProfileSupported() {
             throw XCTSkip("device WebView runtime does not support multi-profile")
-        }
-        if isRobolectric {
-            throw XCTSkip("cookie store is not reliable in Robolectric")
         }
 
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -825,6 +837,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testAndroidRemoveDataThrowsForNonDistantPastModifiedSince() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebEngine-backed data removal tests require instrumented Android context")
+        }
         let engine = makeCookieTestEngine()
         let types: Set<WebSiteDataType> = [.cookies]
         do {
@@ -840,6 +855,9 @@ final class SkipWebTests: XCTestCase {
 
     @MainActor
     func testRemoveDataAllowsDistantPastForEmptyTypes() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebEngine-backed data removal tests require instrumented Android context")
+        }
         let engine = makeCookieTestEngine()
         try await engine.removeData(ofTypes: [], modifiedSince: .distantPast)
     }
