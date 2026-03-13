@@ -1031,6 +1031,7 @@ final class SkipWebTests: XCTestCase {
         case timedOut
     }
 
+    #if !SKIP
     @MainActor
     private func awaitCookieHeaderContains(
         _ token: String,
@@ -1052,6 +1053,7 @@ final class SkipWebTests: XCTestCase {
         }
         return lastHeader
     }
+    #endif
 
     @MainActor
     func takeSnapshotWithTimeout(_ engine: WebEngine, timeoutNanoseconds: UInt64 = UInt64(30_000_000_000)) async throws -> SkipWebSnapshot {
