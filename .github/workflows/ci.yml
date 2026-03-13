@@ -14,3 +14,7 @@ permissions:
 jobs:
   call-workflow:
     uses: skiptools/actions/.github/workflows/skip-framework.yml@v1
+    with:
+      # macos-15-intel runners can lack concrete iOS simulator devices,
+      # which breaks the reusable workflow's fixed simulator selection.
+      runs-on: "['macos-15']"
