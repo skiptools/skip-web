@@ -2,6 +2,9 @@
 import XCTest
 import OSLog
 import Foundation
+#if !SKIP
+import WebKit
+#endif
 @testable import SkipWeb
 
 let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
