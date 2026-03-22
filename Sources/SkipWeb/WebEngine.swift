@@ -5,9 +5,12 @@ import SwiftUI
 #if !SKIP
 import WebKit
 import UniformTypeIdentifiers
+import CryptoKit
 #else
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
 import kotlin.coroutines.suspendCoroutine
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -117,6 +120,31 @@ public enum WebCookieError: Error {
     case invalidCookieName
     case missingCookieDomain
     case invalidCookie
+}
+
+public enum WebProfile: Equatable, Hashable, Sendable {
+    case `default`
+    case named(String)
+
+    fileprivate var normalizedNamedIdentifier: String? {
+        guard case .named(let rawIdentifier) = self else {
+            return nil
+        }
+        let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty else {
+            return nil
+        }
+        if identifier.lowercased() == "default" {
+            return nil
+        }
+        return identifier
+    }
+}
+
+public enum WebProfileError: Error, Equatable {
+    case unsupportedOnAndroid
+    case invalidProfileName
+    case profileSetupFailed
 }
 
 public enum WebSiteDataType: String, CaseIterable, Hashable, Sendable {
@@ -497,6 +525,11 @@ extension WebCookie {
         "WebEngine: \(webView)"
     }
     private var observers: [NSKeyValueObservation] = []
+    private var profileSetupError: WebProfileError?
+    #else
+    private var profileSetupError: WebProfileError?
+    private var androidProfileCookieManager: android.webkit.CookieManager?
+    private var androidProfileWebStorage: android.webkit.WebStorage?
     #endif
 
     /// Create a WebEngine with the specified configuration.
@@ -508,21 +541,41 @@ extension WebCookie {
 
         #if !SKIP
         self.webView = webView ?? WKWebView(frame: .zero, configuration: configuration.webViewConfiguration)
+        if case .named = configuration.profile, configuration.profile.normalizedNamedIdentifier == nil {
+            self.profileSetupError = .invalidProfileName
+        }
         #else
         // fall back to using the global android context if the activity context is not set in the configuration
         self.webView = webView ?? PlatformWebView(configuration.context ?? ProcessInfo.processInfo.androidContext)
+        switch Self.configureAndroidProfile(configuration.profile, for: self.webView) {
+        case .success(let androidProfileResources):
+            self.androidProfileCookieManager = androidProfileResources.cookieManager
+            self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.profileSetupError = nil
+        case .failure(let error):
+            self.profileSetupError = error
+        }
         #endif
     }
 
     public func reload() {
+        if profileSetupError != nil {
+            return
+        }
         webView.reload()
     }
 
     public func stopLoading() {
+        if profileSetupError != nil {
+            return
+        }
         webView.stopLoading()
     }
 
     public func go(to item: WebHistoryItem) {
+        if profileSetupError != nil {
+            return
+        }
         #if !SKIP
         webView.go(to: item.item)
         #else
@@ -531,10 +584,16 @@ extension WebCookie {
     }
 
     public func goBack() {
+        if profileSetupError != nil {
+            return
+        }
         webView.goBack()
     }
 
     public func goForward() {
+        if profileSetupError != nil {
+            return
+        }
         webView.goForward()
     }
 
@@ -553,6 +612,7 @@ extension WebCookie {
 
     /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
+        try throwProfileSetupErrorIfNeeded()
         return try await evaluateJavaScriptAsync(js)
     }
 
@@ -563,6 +623,101 @@ extension WebCookie {
         }
         return buckets
     }
+
+    static func profileValidationError(for profile: WebProfile) -> WebProfileError? {
+        switch profile {
+        case .default:
+            return nil
+        case .named:
+            return profile.normalizedNamedIdentifier == nil ? .invalidProfileName : nil
+        }
+    }
+
+    private func throwProfileSetupErrorIfNeeded() throws {
+        if let profileSetupError {
+            throw profileSetupError
+        }
+    }
+
+    #if SKIP
+    struct AndroidProfileResources {
+        let cookieManager: android.webkit.CookieManager?
+        let webStorage: android.webkit.WebStorage?
+    }
+
+    public static func isAndroidMultiProfileSupported() -> Bool {
+        WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+    }
+
+    private static func configureAndroidProfile(_ profile: WebProfile, for webView: PlatformWebView) -> Result<AndroidProfileResources, WebProfileError> {
+        if let supportError = androidProfileSupportError(for: profile, isMultiProfileFeatureSupported: isAndroidMultiProfileSupported()) {
+            return .failure(supportError)
+        }
+
+        switch profile {
+        case .default:
+            return .success(AndroidProfileResources(cookieManager: nil, webStorage: nil))
+        case .named:
+            guard let identifier = profile.normalizedNamedIdentifier else {
+                return .failure(.invalidProfileName)
+            }
+            guard applyAndroidProfile(identifier, to: webView) else {
+                return .failure(.profileSetupFailed)
+            }
+            let profile = WebViewCompat.getProfile(webView)
+            return .success(
+                AndroidProfileResources(
+                    cookieManager: profile.getCookieManager(),
+                    webStorage: profile.getWebStorage()
+                )
+            )
+        }
+    }
+
+    static func androidProfileSupportError(for profile: WebProfile, isMultiProfileFeatureSupported: Bool) -> WebProfileError? {
+        if let validationError = profileValidationError(for: profile) {
+            return validationError
+        }
+        switch profile {
+        case .default:
+            return nil
+        case .named:
+            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
+        }
+    }
+
+    @discardableResult
+    func inheritAndroidProfile(from parentProfile: WebProfile) -> WebProfileError? {
+        if configuration.profile == parentProfile, profileSetupError == nil {
+            return nil
+        }
+        configuration.profile = parentProfile
+        switch Self.configureAndroidProfile(parentProfile, for: webView) {
+        case .success(let androidProfileResources):
+            self.androidProfileCookieManager = androidProfileResources.cookieManager
+            self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.profileSetupError = nil
+            return nil
+        case .failure(let error):
+            self.profileSetupError = error
+            return error
+        }
+    }
+
+    private static func applyAndroidProfile(_ identifier: String, to webView: PlatformWebView) -> Bool {
+        // SKIP INSERT: try { androidx.webkit.WebViewCompat.setProfile(webView, identifier); return true } catch (t: Throwable) { return false }
+        WebViewCompat.setProfile(webView, identifier)
+        return true
+    }
+
+    private func androidCookieManager() -> android.webkit.CookieManager {
+        androidProfileCookieManager ?? android.webkit.CookieManager.getInstance()
+    }
+
+    private func androidWebStorage() -> android.webkit.WebStorage {
+        androidProfileWebStorage ?? android.webkit.WebStorage.getInstance()
+    }
+    #endif
 
     static func androidRemovalBucketNames(for types: Set<WebSiteDataType>) -> Set<String> {
         var names = Set<String>()
@@ -590,6 +745,9 @@ extension WebCookie {
     #endif
 
     public func cookies(for url: URL) async -> [WebCookie] {
+        if profileSetupError != nil {
+            return []
+        }
         #if !SKIP
         let store = webView.configuration.websiteDataStore.httpCookieStore
         let allCookies = await getAllCookies(from: store)
@@ -602,7 +760,7 @@ extension WebCookie {
         }
         return filtered
         #else
-        let cookieHeader = android.webkit.CookieManager.getInstance().getCookie(url.absoluteString) ?? ""
+        let cookieHeader = androidCookieManager().getCookie(url.absoluteString) ?? ""
         if cookieHeader.isEmpty {
             return []
         }
@@ -611,6 +769,9 @@ extension WebCookie {
     }
 
     public func cookieHeader(for url: URL) async -> String? {
+        if profileSetupError != nil {
+            return nil
+        }
         #if !SKIP
         let matchingCookies = await cookies(for: url)
         if matchingCookies.isEmpty {
@@ -622,12 +783,13 @@ extension WebCookie {
         }
         return cookiePairs.joined(separator: "; ")
         #else
-        let cookieHeader = android.webkit.CookieManager.getInstance().getCookie(url.absoluteString) ?? ""
+        let cookieHeader = androidCookieManager().getCookie(url.absoluteString) ?? ""
         return cookieHeader.isEmpty ? nil : cookieHeader
         #endif
     }
 
     public func setCookie(_ cookie: WebCookie, requestURL: URL? = nil) async throws {
+        try throwProfileSetupErrorIfNeeded()
         #if !SKIP
         let nativeCookie = try cookie.asNativeCookie(requestURL: requestURL)
         let store = webView.configuration.websiteDataStore.httpCookieStore
@@ -638,19 +800,20 @@ extension WebCookie {
             throw WebCookieError.missingCookieDomain
         }
         let cookieString = try cookie.asAndroidSetCookieString(requestURL: requestURL)
-        let cookieManager = android.webkit.CookieManager.getInstance()
+        let cookieManager = androidCookieManager()
         await setAndroidCookie(cookieManager, forURLString: targetURL.absoluteString, cookieString: cookieString)
         #endif
     }
 
     public func applySetCookieHeaders(_ headers: [String], for responseURL: URL) async throws {
+        try throwProfileSetupErrorIfNeeded()
         #if !SKIP
         let parsedCookies = WebCookie.parseSetCookieHeaders(headers, responseURL: responseURL)
         for cookie in parsedCookies {
             try await setCookie(cookie, requestURL: responseURL)
         }
         #else
-        let cookieManager = android.webkit.CookieManager.getInstance()
+        let cookieManager = androidCookieManager()
         let targetURLString = responseURL.absoluteString
         for header in headers {
             let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -663,6 +826,9 @@ extension WebCookie {
     }
 
     public func clearCookies() async {
+        if profileSetupError != nil {
+            return
+        }
         #if !SKIP
         let store = webView.configuration.websiteDataStore.httpCookieStore
         let allCookies = await getAllCookies(from: store)
@@ -670,13 +836,14 @@ extension WebCookie {
             await deleteCookie(cookie, from: store)
         }
         #else
-        let cookieManager = android.webkit.CookieManager.getInstance()
+        let cookieManager = androidCookieManager()
         await removeAllAndroidCookies(cookieManager)
         #endif
     }
 
     @MainActor
     public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
+        try throwProfileSetupErrorIfNeeded()
         if types.isEmpty {
             return
         }
@@ -698,19 +865,19 @@ extension WebCookie {
 
         let buckets = Self.androidRemovalBuckets(for: types)
         if buckets.contains(.cookies) {
-            let cookieManager = android.webkit.CookieManager.getInstance()
-            await removeAllAndroidCookies(cookieManager)
+            await removeAllAndroidCookies(androidCookieManager())
         }
         if buckets.contains(.cache) {
             webView.clearCache(true)
         }
         if buckets.contains(.storage) {
-            android.webkit.WebStorage.getInstance().deleteAllData()
+            androidWebStorage().deleteAllData()
         }
         #endif
     }
 
     @MainActor public func takeSnapshot(configuration: SkipWebSnapshotConfiguration? = nil) async throws -> SkipWebSnapshot {
+        try throwProfileSetupErrorIfNeeded()
         let config = configuration ?? SkipWebSnapshotConfiguration()
 
         #if !SKIP
@@ -814,6 +981,9 @@ extension WebCookie {
     }
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
+        if profileSetupError != nil {
+            return
+        }
         logger.info("loadHTML webView: \(self.description)")
         let encoding: String = "UTF-8"
 
@@ -834,6 +1004,7 @@ extension WebCookie {
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        try throwProfileSetupErrorIfNeeded()
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
         try await awaitPageLoaded {
@@ -929,6 +1100,7 @@ extension WebCookie {
     /// Perform the given block and only return once the page has completed loading
     // SKIP @nobridge
     public func awaitPageLoaded(_ block: () -> ()) async throws {
+        try throwProfileSetupErrorIfNeeded()
         let pdelegate = self.engineDelegate
         defer { self.engineDelegate = pdelegate }
 
@@ -1492,6 +1664,7 @@ public extension SkipWebUIDelegate {
     public var pageZoom: CGFloat
     public var isOpaque: Bool
     public var customUserAgent: String?
+    public var profile: WebProfile
     public var userScripts: [WebViewUserScript]
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
@@ -1512,6 +1685,7 @@ public extension SkipWebUIDelegate {
                 pageZoom: CGFloat = 1.0,
                 isOpaque: Bool = true,
                 customUserAgent: String? = nil,
+                profile: WebProfile = .default,
                 userScripts: [WebViewUserScript] = [],
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
                 schemeHandlers: [String: URLSchemeHandler] = [:],
@@ -1526,6 +1700,7 @@ public extension SkipWebUIDelegate {
         self.pageZoom = pageZoom
         self.isOpaque = isOpaque
         self.customUserAgent = customUserAgent
+        self.profile = profile
         self.userScripts = userScripts
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
@@ -1544,6 +1719,7 @@ public extension SkipWebUIDelegate {
             pageZoom: pageZoom,
             isOpaque: isOpaque,
             customUserAgent: customUserAgent,
+            profile: profile,
             userScripts: userScripts,
             messageHandlers: messageHandlers,
             schemeHandlers: schemeHandlers,
@@ -1559,6 +1735,7 @@ public extension SkipWebUIDelegate {
     /// Create a `WebViewConfiguration` from the properties of this configuration.
     @MainActor public var webViewConfiguration: WebViewConfiguration {
         let configuration = WebViewConfiguration()
+        configuration.websiteDataStore = webKitWebsiteDataStore
 
         //let preferences = WebpagePreferences()
         //preferences.allowsContentJavaScript //
@@ -1575,6 +1752,51 @@ public extension SkipWebUIDelegate {
         #endif
 
         return configuration
+    }
+
+    @MainActor private var webKitWebsiteDataStore: WKWebsiteDataStore {
+        switch profile {
+        case .default:
+            return WKWebsiteDataStore.default()
+        case .named(let identifier):
+            guard let dataStoreIdentifier = webKitDataStoreIdentifier(for: identifier) else {
+                return WKWebsiteDataStore.default()
+            }
+            return WKWebsiteDataStore(forIdentifier: dataStoreIdentifier)
+        }
+    }
+
+    @MainActor private func webKitDataStoreIdentifier(for identifier: String) -> UUID? {
+        guard let normalizedIdentifier = WebProfile.named(identifier).normalizedNamedIdentifier else {
+            return nil
+        }
+        if let uuid = UUID(uuidString: normalizedIdentifier) {
+            return uuid
+        }
+
+        let digest = Insecure.SHA1.hash(data: Data(normalizedIdentifier.utf8))
+        let bytes = Array(digest.prefix(16))
+        guard bytes.count == 16 else {
+            return nil
+        }
+
+        let versionedBytes: [UInt8] = bytes.enumerated().map { index, byte in
+            switch index {
+            case 6:
+                return (byte & 0x0F) | 0x50
+            case 8:
+                return (byte & 0x3F) | 0x80
+            default:
+                return byte
+            }
+        }
+
+        return UUID(uuid: (
+            versionedBytes[0], versionedBytes[1], versionedBytes[2], versionedBytes[3],
+            versionedBytes[4], versionedBytes[5], versionedBytes[6], versionedBytes[7],
+            versionedBytes[8], versionedBytes[9], versionedBytes[10], versionedBytes[11],
+            versionedBytes[12], versionedBytes[13], versionedBytes[14], versionedBytes[15]
+        ))
     }
     #endif
 }
