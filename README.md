@@ -2,7 +2,7 @@
 
 SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev) apps:
 
-- **[WebView](#webview-customizable-embedded-web-browser)** — A fully customizable embedded browser for app-integrated web content. Supports JavaScript execution, navigation control, scroll delegates, snapshots, and popups. Backed by `WKWebView` on iOS and `android.webkit.WebView` on Android.
+- **[WebView](#webview-customizable-embedded-web-browser)** — A fully customizable embedded browser for app-integrated web content. Supports JavaScript execution, navigation control, scroll delegates, snapshots, popups, and content blockers. Backed by `WKWebView` on iOS and `android.webkit.WebView` on Android.
 
 - **[WebBrowser](#webbrowser-lightweight-in-app-browser)** — A lightweight View modifier that opens a URL in the platform's native in-app browser (`SFSafariViewController` on iOS, Chrome Custom Tabs on Android). Ideal for external links where you want a polished browsing experience with minimal code.
 
@@ -77,6 +77,20 @@ let config = WebEngineConfiguration(
 `WebViewNavigator` can keep a warm `WebEngine` and reuse it across view recreation.
 When the same navigator is rebound to an engine that already has content/history, `initialURL`/`initialHTML` are not reloaded.
 This lets apps preserve page state when navigating away and back with the same navigator instance.
+
+Content blockers are also configured on `WebEngineConfiguration`:
+
+```swift
+let config = WebEngineConfiguration(
+    contentBlockers: WebContentBlockerConfiguration(
+        iOSRuleListPaths: [
+            Bundle.main.path(forResource: "content-blockers", ofType: "json")!
+        ],
+        androidRequestBlocker: MyAndroidRequestBlocker(),
+        androidCosmeticBlocker: MyAndroidCosmeticBlocker()
+    )
+)
+```
 
 Navigation APIs:
 
@@ -255,6 +269,7 @@ SkipWeb validates this contract at popup creation time:
 For iOS parity, return a child created with `platformContext.makeChildWebEngine(...)`.
 By default this mirrors the parent `WebEngineConfiguration` and inspectability on the popup child. Pass an explicit configuration only when you intentionally want the child to diverge.
 This default mirroring is configuration-level. Platform delegate assignments on the returned child (`WKUIDelegate`, `WKNavigationDelegate`) are not automatically copied from the parent, so assign them explicitly if your app depends on that behavior.
+Mirrored popup configuration also carries over `contentBlockers`, so children created with `makeChildWebEngine(...)` inherit the parent's blocker setup.
 On Android, once a child is returned from the delegate, SkipWeb mirrors key parent web settings and inherits the parent `WebProfile` onto the child; if profile inheritance fails, popup creation is denied.
 
 ### Scroll Delegate
@@ -549,6 +564,59 @@ Platform behavior:
 - `removeData(ofTypes:modifiedSince:)` maps to iOS `WKWebsiteDataStore.removeData`.
 - On Android, `removeData` requires `modifiedSince == .distantPast` when `ofTypes` is non-empty; otherwise it throws `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`.
 - Android data removal is bucket-level (cookies/cache/storage), not timestamp-granular, and may clear a broader bucket than an individual requested data type.
+
+## Content Blockers
+
+`SkipWeb` exposes portable content-blocking hooks through `WebEngineConfiguration.contentBlockers`.
+
+Supporting types:
+
+- `WebContentBlockerConfiguration`
+- `AndroidRequestBlocker`
+- `AndroidBlockableRequest`
+- `AndroidCosmeticBlocker`
+- `AndroidCosmeticPayload`
+- `WebContentBlockerError`
+
+Example:
+
+```swift
+struct DomainBlocker: AndroidRequestBlocker {
+    func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
+        if request.url.host?.contains("ads") == true {
+            return .block
+        }
+        return .allow
+    }
+}
+
+struct CosmeticBlocker: AndroidCosmeticBlocker {
+    func cosmetics(for page: AndroidPageContext) -> AndroidCosmeticPayload? {
+        AndroidCosmeticPayload(css: [
+            ".ad-banner { display: none !important; }"
+        ])
+    }
+}
+
+let config = WebEngineConfiguration(
+    contentBlockers: WebContentBlockerConfiguration(
+        iOSRuleListPaths: ["/path/to/content-blockers.json"],
+        androidRequestBlocker: DomainBlocker(),
+        androidCosmeticBlocker: CosmeticBlocker()
+    )
+)
+```
+
+Platform behavior:
+
+- On iOS, `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList`s and attached to the web view's `WKUserContentController`.
+- SkipWeb persists compiled iOS rule lists in a cache keyed by source path and file contents, recompiles when a rule file changes, and prunes stale compiled entries when rule files are removed from the configuration.
+- iOS blocker setup errors are exposed through `WebEngineConfiguration.contentBlockerSetupErrors` while building the configuration and through `WebEngine.contentBlockerSetupErrors` after engine creation.
+- When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.
+- Popup children created with `platformContext.makeChildWebEngine(...)` inherit the mirrored content-blocker configuration.
+- On Android, `androidRequestBlocker` receives an `AndroidBlockableRequest` for intercepted resource loads and can return `.allow` or `.block`.
+- `AndroidBlockableRequest.isRedirect` is best-effort on Android and may be `nil` when the device's WebView runtime does not support redirect detection.
+- On Android, `androidCosmeticBlocker` can inject CSS at page start using `AndroidCosmeticPayload`.
 
 ## Contribution
 

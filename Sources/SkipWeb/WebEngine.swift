@@ -10,6 +10,7 @@ import CryptoKit
 #else
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import androidx.webkit.WebResourceRequestCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlin.coroutines.suspendCoroutine
@@ -146,6 +147,133 @@ public enum WebProfileError: Error, Equatable {
     case unsupportedOnAndroid
     case invalidProfileName
     case profileSetupFailed
+}
+
+public struct WebContentBlockerConfiguration {
+    public var iOSRuleListPaths: [String]
+    public var androidRequestBlocker: (any AndroidRequestBlocker)?
+    public var androidCosmeticBlocker: (any AndroidCosmeticBlocker)?
+
+    public init(
+        iOSRuleListPaths: [String] = [],
+        androidRequestBlocker: (any AndroidRequestBlocker)? = nil,
+        androidCosmeticBlocker: (any AndroidCosmeticBlocker)? = nil
+    ) {
+        self.iOSRuleListPaths = iOSRuleListPaths
+        self.androidRequestBlocker = androidRequestBlocker
+        self.androidCosmeticBlocker = androidCosmeticBlocker
+    }
+}
+
+public enum AndroidRequestBlockDecision: Sendable {
+    case allow
+    case block
+}
+
+public enum AndroidResourceTypeHint: String, CaseIterable, Hashable, Sendable {
+    case document
+    case subdocument
+    case stylesheet
+    case script
+    case image
+    case font
+    case media
+    case xhr
+    case fetch
+    case websocket
+    case other
+}
+
+public struct AndroidBlockableRequest: Equatable, Sendable {
+    public var url: URL
+    public var mainDocumentURL: URL?
+    public var method: String
+    public var headers: [String: String]
+    public var isForMainFrame: Bool
+    public var hasGesture: Bool
+    public var isRedirect: Bool?
+    public var resourceTypeHint: AndroidResourceTypeHint?
+
+    public init(
+        url: URL,
+        mainDocumentURL: URL? = nil,
+        method: String,
+        headers: [String: String] = [:],
+        isForMainFrame: Bool,
+        hasGesture: Bool,
+        isRedirect: Bool? = nil,
+        resourceTypeHint: AndroidResourceTypeHint? = nil
+    ) {
+        self.url = url
+        self.mainDocumentURL = mainDocumentURL
+        self.method = method
+        self.headers = headers
+        self.isForMainFrame = isForMainFrame
+        self.hasGesture = hasGesture
+        self.isRedirect = isRedirect
+        self.resourceTypeHint = resourceTypeHint
+    }
+}
+
+public protocol AndroidRequestBlocker {
+    func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
+}
+
+public struct AndroidPageContext: Equatable, Sendable {
+    public var url: URL
+    public var host: String?
+
+    public init(url: URL, host: String? = nil) {
+        self.url = url
+        self.host = host ?? url.host
+    }
+}
+
+public struct AndroidCosmeticPayload: Equatable, Sendable {
+    public var css: [String]
+
+    public init(css: [String] = []) {
+        self.css = css
+    }
+}
+
+public protocol AndroidCosmeticBlocker {
+    func cosmetics(for page: AndroidPageContext) -> AndroidCosmeticPayload?
+}
+
+public enum WebContentBlockerError: Error, Equatable, LocalizedError {
+    case storeUnavailable(String)
+    case fileReadFailed(path: String, description: String)
+    case fileEncodingFailed(path: String)
+    case cacheLookupFailed(identifier: String, description: String)
+    case compilationFailed(path: String, description: String)
+    case metadataReadFailed(String)
+    case metadataWriteFailed(String)
+    case staleRuleRemovalFailed(identifier: String, description: String)
+    case operationTimedOut(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .storeUnavailable(let description):
+            return "Content blocker store unavailable: \(description)"
+        case .fileReadFailed(let path, let description):
+            return "Failed to read content blocker file at \(path): \(description)"
+        case .fileEncodingFailed(let path):
+            return "Content blocker file is not valid UTF-8: \(path)"
+        case .cacheLookupFailed(let identifier, let description):
+            return "Failed to look up compiled content blocker \(identifier): \(description)"
+        case .compilationFailed(let path, let description):
+            return "Failed to compile content blocker file at \(path): \(description)"
+        case .metadataReadFailed(let description):
+            return "Failed to read content blocker metadata: \(description)"
+        case .metadataWriteFailed(let description):
+            return "Failed to write content blocker metadata: \(description)"
+        case .staleRuleRemovalFailed(let identifier, let description):
+            return "Failed to remove stale compiled content blocker \(identifier): \(description)"
+        case .operationTimedOut(let description):
+            return "Timed out while preparing content blockers: \(description)"
+        }
+    }
 }
 
 public enum WebSiteDataType: String, CaseIterable, Hashable, Sendable {
@@ -521,6 +649,7 @@ extension WebCookie {
 @MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
+    public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
     #if !SKIP
     public override var description: String {
         "WebEngine: \(webView)"
@@ -541,7 +670,13 @@ extension WebCookie {
         self.configuration = configuration
 
         #if !SKIP
-        self.webView = webView ?? WKWebView(frame: .zero, configuration: configuration.webViewConfiguration)
+        if let webView {
+            self.webView = webView
+            self.contentBlockerSetupErrors = configuration.installContentBlockers(into: webView.configuration.userContentController)
+        } else {
+            self.webView = WKWebView(frame: .zero, configuration: configuration.webViewConfiguration)
+            self.contentBlockerSetupErrors = configuration.contentBlockerSetupErrors
+        }
         if case .named = configuration.profile, configuration.profile.normalizedNamedIdentifier == nil {
             self.profileSetupError = .invalidProfileName
         }
@@ -1098,6 +1233,174 @@ extension WebCookie {
     }
     #endif
 
+    #if SKIP
+    fileprivate static func androidRequestHeaders(from request: android.webkit.WebResourceRequest) -> [String: String] {
+        var headers: [String: String] = [:]
+        for (key, value) in request.requestHeaders {
+            headers[String(describing: key)] = String(describing: value)
+        }
+        return headers
+    }
+
+    fileprivate static func androidMainDocumentURL(
+        for request: android.webkit.WebResourceRequest,
+        requestURL: URL,
+        headers: [String: String]
+    ) -> URL? {
+        if request.isForMainFrame {
+            return requestURL
+        }
+
+        // `shouldInterceptRequest` runs off the UI thread on Android, so avoid touching
+        // the backing WebView for its current URL here.
+        let lowercaseHeaders = Dictionary(uniqueKeysWithValues: headers.map { ($0.key.lowercased(), $0.value) })
+        if let referer = lowercaseHeaders["referer"], let refererURL = URL(string: referer) {
+            return refererURL
+        }
+        if let origin = lowercaseHeaders["origin"], let originURL = URL(string: origin) {
+            return originURL
+        }
+        return nil
+    }
+
+    fileprivate static func androidResourceTypeHint(
+        for request: android.webkit.WebResourceRequest,
+        requestURL: URL,
+        headers: [String: String]
+    ) -> AndroidResourceTypeHint {
+        if request.isForMainFrame {
+            return .document
+        }
+
+        let lowercaseHeaders = Dictionary(uniqueKeysWithValues: headers.map { ($0.key.lowercased(), $0.value.lowercased()) })
+        if let secFetchDest = lowercaseHeaders["sec-fetch-dest"] {
+            switch secFetchDest {
+            case "document":
+                return .document
+            case "iframe", "frame":
+                return .subdocument
+            case "style":
+                return .stylesheet
+            case "script":
+                return .script
+            case "image":
+                return .image
+            case "font":
+                return .font
+            case "audio", "video":
+                return .media
+            case "empty":
+                if let requestedWith = lowercaseHeaders["x-requested-with"], requestedWith == "xmlhttprequest" {
+                    return .xhr
+                }
+                return .fetch
+            default:
+                break
+            }
+        }
+
+        if let accept = lowercaseHeaders["accept"] {
+            if accept.contains("text/css") {
+                return .stylesheet
+            }
+            if accept.contains("javascript") || accept.contains("ecmascript") {
+                return .script
+            }
+            if accept.contains("image/") {
+                return .image
+            }
+            if accept.contains("font/") {
+                return .font
+            }
+            if accept.contains("video/") || accept.contains("audio/") {
+                return .media
+            }
+            if accept.contains("text/html") {
+                return .subdocument
+            }
+        }
+
+        switch requestURL.pathExtension.lowercased() {
+        case "css":
+            return .stylesheet
+        case "js", "mjs", "cjs":
+            return .script
+        case "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif":
+            return .image
+        case "woff", "woff2", "ttf", "otf":
+            return .font
+        case "mp4", "webm", "mov", "m4v", "mp3", "wav", "ogg", "m4a":
+            return .media
+        case "html", "htm":
+            return .subdocument
+        default:
+            break
+        }
+
+        return .other
+    }
+
+    fileprivate static func blockedAndroidResponse() -> android.webkit.WebResourceResponse {
+        let responseHeaders: kotlin.collections.Map<String, String> = kotlin.collections.HashMap()
+        return android.webkit.WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            204,
+            "No Content",
+            responseHeaders,
+            "".byteInputStream()
+        )
+    }
+
+    static func androidRedirectFlag(
+        isRedirectFeatureSupported: Bool = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_RESOURCE_REQUEST_IS_REDIRECT),
+        resolveRedirect: () -> Bool
+    ) -> Bool? {
+        guard isRedirectFeatureSupported else {
+            return nil
+        }
+        return resolveRedirect()
+    }
+
+    fileprivate static func androidRequestIsRedirect(_ request: android.webkit.WebResourceRequest) -> Bool? {
+        androidRedirectFlag {
+            WebResourceRequestCompat.isRedirect(request)
+        }
+    }
+
+    fileprivate static func androidContentBlockerStyleInjectionScript(cssPayload: AndroidCosmeticPayload) -> String? {
+        let css = cssPayload.css
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard !css.isEmpty else {
+            return nil
+        }
+        guard
+            let data = try? JSONSerialization.data(withJSONObject: [css], options: []),
+            let encoded = String(data: data, encoding: .utf8)
+        else {
+            return nil
+        }
+        let cssLiteral = String(encoded.dropFirst().dropLast())
+        return """
+        (function() {
+            var styleId = "__skipweb_content_blockers";
+            var css = \(cssLiteral);
+            var root = document.head || document.documentElement;
+            if (!root) { return; }
+            var style = document.getElementById(styleId);
+            if (!style) {
+                style = document.createElement('style');
+                style.id = styleId;
+                root.appendChild(style);
+            }
+            style.textContent = css;
+        })();
+        """
+    }
+    #endif
+
     /// Perform the given block and only return once the page has completed loading
     // SKIP @nobridge
     public func awaitPageLoaded(_ block: () -> ()) async throws {
@@ -1254,12 +1557,14 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application that WebView content left over from previous page navigations will no longer be drawn.
     override func onPageCommitVisible(view: PlatformWebView, url: String) {
         logger.log("onPageCommitVisible: \(url)")
+        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
         webViewClient.onPageCommitVisible(view, url)
     }
 
     /// Notify the host application that a page has finished loading.
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
+        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
         for userScript in config.userScripts {
             if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
                 let source = userScript.webKitUserScript.source
@@ -1297,6 +1602,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 }
             }
         }
+        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
         webViewClient.onPageStarted(view, url, favicon)
     }
 
@@ -1316,6 +1622,21 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
         logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
         webViewClient.onReceivedHttpAuthRequest(view, handler, host, realm)
+    }
+
+    private func injectAndroidContentBlockerCSSIfNeeded(into view: PlatformWebView, url: String) {
+        guard let blocker = config.contentBlockers?.androidCosmeticBlocker,
+              let pageURL = URL(string: url),
+              let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
+                  cssPayload: blocker.cosmetics(for: AndroidPageContext(url: pageURL)) ?? AndroidCosmeticPayload()
+              )
+        else {
+            return
+        }
+
+        view.evaluateJavascript(injectionScript) { _ in
+            logger.debug("Injected Android content blocker CSS")
+        }
     }
 
     /// Notify the host application that an HTTP error has been received from the server while loading a resource.
@@ -1366,6 +1687,33 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
         if let handler = config.schemeHandlers[scheme] {
             return handler.interceptRequest(view: view, request: request)
         }
+        if let blocker = config.contentBlockers?.androidRequestBlocker,
+           let requestURL = URL(string: request.url.toString()) {
+            let headers = WebEngine.androidRequestHeaders(from: request)
+            let decision = blocker.decision(
+                for: AndroidBlockableRequest(
+                    url: requestURL,
+                    mainDocumentURL: WebEngine.androidMainDocumentURL(
+                        for: request,
+                        requestURL: requestURL,
+                        headers: headers
+                    ),
+                    method: request.method,
+                    headers: headers,
+                    isForMainFrame: request.isForMainFrame,
+                    hasGesture: request.hasGesture(),
+                    isRedirect: WebEngine.androidRequestIsRedirect(request),
+                    resourceTypeHint: WebEngine.androidResourceTypeHint(
+                        for: request,
+                        requestURL: requestURL,
+                        headers: headers
+                    )
+                )
+            )
+            if case .block = decision {
+                return WebEngine.blockedAndroidResponse()
+            }
+        }
         return webViewClient.shouldInterceptRequest(view, request)
     }
 
@@ -1401,6 +1749,7 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
 
     #if SKIP
     override func onPageFinished(view: PlatformWebView, url: String) {
+        super.onPageFinished(view: view, url: url)
         logger.info("webView: \(view) onPageFinished: \(url!)")
         if self.callbackInvoked { return }
         callbackInvoked = true
@@ -1670,6 +2019,8 @@ public extension SkipWebUIDelegate {
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
     public var uiDelegate: (any SkipWebUIDelegate)?
+    public var contentBlockers: WebContentBlockerConfiguration?
+    public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
 
     #if SKIP
     /// The Android context to use for creating a web context
@@ -1690,7 +2041,8 @@ public extension SkipWebUIDelegate {
                 userScripts: [WebViewUserScript] = [],
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
                 schemeHandlers: [String: URLSchemeHandler] = [:],
-                uiDelegate: (any SkipWebUIDelegate)? = nil) {
+                uiDelegate: (any SkipWebUIDelegate)? = nil,
+                contentBlockers: WebContentBlockerConfiguration? = nil) {
         self.javaScriptEnabled = javaScriptEnabled
         self.javaScriptCanOpenWindowsAutomatically = javaScriptCanOpenWindowsAutomatically
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
@@ -1706,6 +2058,7 @@ public extension SkipWebUIDelegate {
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
         self.uiDelegate = uiDelegate
+        self.contentBlockers = contentBlockers
     }
 
     public func popupChildMirroredConfiguration() -> WebEngineConfiguration {
@@ -1724,7 +2077,8 @@ public extension SkipWebUIDelegate {
             userScripts: userScripts,
             messageHandlers: messageHandlers,
             schemeHandlers: schemeHandlers,
-            uiDelegate: uiDelegate
+            uiDelegate: uiDelegate,
+            contentBlockers: contentBlockers
         )
         #if SKIP
         copy.context = context
@@ -1752,7 +2106,26 @@ public extension SkipWebUIDelegate {
         }
         #endif
 
+        _ = installContentBlockers(into: configuration.userContentController)
+
         return configuration
+    }
+
+    @MainActor
+    @discardableResult
+    func installContentBlockers(into userContentController: WKUserContentController) -> [WebContentBlockerError] {
+        contentBlockerSetupErrors = []
+        guard let contentBlockers, !contentBlockers.iOSRuleListPaths.isEmpty else {
+            return []
+        }
+
+        let prepared = WebContentBlockerStore.prepareRuleLists(from: contentBlockers.iOSRuleListPaths)
+        contentBlockerSetupErrors = prepared.errors
+        for ruleList in prepared.ruleLists {
+            userContentController.add(ruleList)
+        }
+        WebContentBlockerStore.recordInstallation(count: prepared.ruleLists.count)
+        return prepared.errors
     }
 
     @MainActor private var webKitWebsiteDataStore: WKWebsiteDataStore {
@@ -1801,6 +2174,323 @@ public extension SkipWebUIDelegate {
     }
     #endif
 }
+
+#if !SKIP
+fileprivate struct PreparedContentBlockerRuleLists {
+    let ruleLists: [WKContentRuleList]
+    let errors: [WebContentBlockerError]
+}
+
+struct WebContentBlockerDiagnostics: Equatable {
+    var cacheHitIdentifiers: [String] = []
+    var compiledIdentifiers: [String] = []
+    var prunedIdentifiers: [String] = []
+    var installedRuleListCount: Int = 0
+    var errors: [WebContentBlockerError] = []
+}
+
+@MainActor enum WebContentBlockerDebug {
+    static var diagnostics: WebContentBlockerDiagnostics {
+        WebContentBlockerStore.diagnostics
+    }
+
+    static func resetDiagnostics() {
+        WebContentBlockerStore.diagnostics = WebContentBlockerDiagnostics()
+    }
+
+    static func setBaseDirectoryOverride(_ url: URL?) {
+        WebContentBlockerStore.baseDirectoryOverride = url
+    }
+
+    static func clearPersistentState() throws {
+        try WebContentBlockerStore.clearPersistentState()
+    }
+}
+
+@MainActor
+fileprivate enum WebContentBlockerStore {
+    fileprivate static var baseDirectoryOverride: URL?
+    fileprivate static var diagnostics = WebContentBlockerDiagnostics()
+
+    private struct Metadata: Codable {
+        var version: Int
+        var identifiersBySourcePath: [String: String]
+
+        init(version: Int = 1, identifiersBySourcePath: [String: String] = [:]) {
+            self.version = version
+            self.identifiersBySourcePath = identifiersBySourcePath
+        }
+    }
+
+    private static let metadataFileName = "metadata.json"
+    private static let storeDirectoryName = "RuleListStore"
+    private static let metadataVersion = 1
+
+    static func prepareRuleLists(from sourcePaths: [String]) -> PreparedContentBlockerRuleLists {
+        var ruleLists: [WKContentRuleList] = []
+        var errors: [WebContentBlockerError] = []
+
+        let normalizedSourcePaths = normalizedPaths(from: sourcePaths)
+        guard !normalizedSourcePaths.isEmpty else {
+            diagnostics.errors = []
+            return PreparedContentBlockerRuleLists(ruleLists: [], errors: [])
+        }
+
+        guard let store = makeStore(errors: &errors) else {
+            diagnostics.errors = errors
+            return PreparedContentBlockerRuleLists(ruleLists: [], errors: errors)
+        }
+
+        var metadata = loadMetadata(errors: &errors)
+        let previousIdentifiersBySourcePath = metadata.identifiersBySourcePath
+        var nextIdentifiersBySourcePath: [String: String] = [:]
+        var staleIdentifiers = Set(previousIdentifiersBySourcePath.values)
+
+        for sourcePath in normalizedSourcePaths {
+            let fileURL = URL(fileURLWithPath: sourcePath)
+            let fileData: Data
+            do {
+                fileData = try Data(contentsOf: fileURL)
+            } catch {
+                errors.append(.fileReadFailed(path: sourcePath, description: error.localizedDescription))
+                continue
+            }
+
+            guard let content = String(data: fileData, encoding: .utf8) else {
+                errors.append(.fileEncodingFailed(path: sourcePath))
+                continue
+            }
+
+            let identifier = ruleListIdentifier(for: sourcePath, contentData: fileData)
+            nextIdentifiersBySourcePath[sourcePath] = identifier
+            staleIdentifiers.remove(identifier)
+
+            if let cachedRuleList = lookupRuleList(identifier: identifier, in: store, errors: &errors) {
+                ruleLists.append(cachedRuleList)
+                diagnostics.cacheHitIdentifiers.append(identifier)
+                continue
+            }
+
+            if let compiledRuleList = compileRuleList(identifier: identifier, content: content, sourcePath: sourcePath, in: store, errors: &errors) {
+                ruleLists.append(compiledRuleList)
+                diagnostics.compiledIdentifiers.append(identifier)
+            }
+        }
+
+        let activeIdentifiers = Set(nextIdentifiersBySourcePath.values)
+        for staleIdentifier in staleIdentifiers.subtracting(activeIdentifiers) {
+            removeRuleList(identifier: staleIdentifier, from: store, errors: &errors)
+        }
+
+        metadata.identifiersBySourcePath = nextIdentifiersBySourcePath
+        saveMetadata(metadata, errors: &errors)
+        diagnostics.errors = errors
+
+        return PreparedContentBlockerRuleLists(ruleLists: ruleLists, errors: errors)
+    }
+
+    static func recordInstallation(count: Int) {
+        diagnostics.installedRuleListCount += count
+    }
+
+    static func clearPersistentState() throws {
+        guard let baseDirectory = resolvedBaseDirectoryURL() else {
+            return
+        }
+        if FileManager.default.fileExists(atPath: baseDirectory.path) {
+            try FileManager.default.removeItem(at: baseDirectory)
+        }
+    }
+
+    private static func normalizedPaths(from sourcePaths: [String]) -> [String] {
+        var seen = Set<String>()
+        var normalized: [String] = []
+        for sourcePath in sourcePaths {
+            let path = URL(fileURLWithPath: sourcePath).standardizedFileURL.path
+            if seen.insert(path).inserted {
+                normalized.append(path)
+            }
+        }
+        return normalized
+    }
+
+    private static func ruleListIdentifier(for sourcePath: String, contentData: Data) -> String {
+        "skipweb.content-blocker.\(hexString(Insecure.SHA1.hash(data: Data(sourcePath.utf8)))).\(hexString(SHA256.hash(data: contentData)))"
+    }
+
+    private static func makeStore(errors: inout [WebContentBlockerError]) -> WKContentRuleListStore? {
+        let fileManager = FileManager.default
+        guard let baseDirectory = resolvedBaseDirectoryURL() else {
+            errors.append(.storeUnavailable("Missing application support directory"))
+            return nil
+        }
+
+        let storeDirectory = baseDirectory.appendingPathComponent(storeDirectoryName, isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: storeDirectory, withIntermediateDirectories: true)
+        } catch {
+            errors.append(.storeUnavailable(error.localizedDescription))
+            return nil
+        }
+
+        guard let store = WKContentRuleListStore(url: storeDirectory) else {
+            errors.append(.storeUnavailable("WKContentRuleListStore(url:) returned nil"))
+            return nil
+        }
+        return store
+    }
+
+    private static func resolvedBaseDirectoryURL() -> URL? {
+        if let baseDirectoryOverride {
+            return baseDirectoryOverride
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("SkipWeb", isDirectory: true)
+            .appendingPathComponent("ContentBlockers", isDirectory: true)
+    }
+
+    private static func metadataURL() -> URL? {
+        resolvedBaseDirectoryURL()?.appendingPathComponent(metadataFileName)
+    }
+
+    private static func loadMetadata(errors: inout [WebContentBlockerError]) -> Metadata {
+        guard let metadataURL = metadataURL() else {
+            return Metadata(version: metadataVersion)
+        }
+
+        do {
+            if !FileManager.default.fileExists(atPath: metadataURL.path) {
+                return Metadata(version: metadataVersion)
+            }
+            let data = try Data(contentsOf: metadataURL)
+            return try JSONDecoder().decode(Metadata.self, from: data)
+        } catch {
+            errors.append(.metadataReadFailed(error.localizedDescription))
+            return Metadata(version: metadataVersion)
+        }
+    }
+
+    private static func saveMetadata(_ metadata: Metadata, errors: inout [WebContentBlockerError]) {
+        guard let metadataURL = metadataURL() else {
+            errors.append(.metadataWriteFailed("Missing metadata path"))
+            return
+        }
+
+        do {
+            let baseDirectory = metadataURL.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(metadata)
+            try data.write(to: metadataURL, options: .atomic)
+        } catch {
+            errors.append(.metadataWriteFailed(error.localizedDescription))
+        }
+    }
+
+    private static func lookupRuleList(identifier: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) -> WKContentRuleList? {
+        switch awaitCallback(description: "lookup \(identifier)") { completion in
+            store.lookUpContentRuleList(forIdentifier: identifier) { ruleList, error in
+                completion(ruleList, error)
+            }
+        } {
+        case .success(let ruleList):
+            return ruleList
+        case .failure(let error as WebContentBlockerError):
+            errors.append(error)
+        case .failure(let error):
+            let nsError = error as NSError
+            if nsError.domain == WKErrorDomain,
+               nsError.code == WKError.Code.contentRuleListStoreLookUpFailed.rawValue {
+                return nil
+            }
+            errors.append(.cacheLookupFailed(identifier: identifier, description: error.localizedDescription))
+        }
+        return nil
+    }
+
+    private static func compileRuleList(identifier: String, content: String, sourcePath: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) -> WKContentRuleList? {
+        switch awaitCallback(description: "compile \(sourcePath)") { completion in
+            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: content) { ruleList, error in
+                completion(ruleList, error)
+            }
+        } {
+        case .success(let ruleList):
+            return ruleList
+        case .failure(let error as WebContentBlockerError):
+            errors.append(error)
+        case .failure(let error):
+            errors.append(.compilationFailed(path: sourcePath, description: error.localizedDescription))
+        }
+        return nil
+    }
+
+    private static func removeRuleList(identifier: String, from store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) {
+        switch awaitVoidCallback(description: "remove \(identifier)") { completion in
+            store.removeContentRuleList(forIdentifier: identifier) { error in
+                completion(error)
+            }
+        } {
+        case .success:
+            diagnostics.prunedIdentifiers.append(identifier)
+        case .failure(let error as WebContentBlockerError):
+            errors.append(error)
+        case .failure(let error):
+            let nsError = error as NSError
+            // Failing to delete a stale compiled rule list should not prevent the current rule set from loading.
+            if nsError.domain == WKErrorDomain,
+               nsError.code == WKError.Code.contentRuleListStoreRemoveFailed.rawValue {
+                return
+            }
+            errors.append(.staleRuleRemovalFailed(identifier: identifier, description: error.localizedDescription))
+        }
+    }
+
+    private static func awaitCallback<T>(
+        description: String,
+        operation: (@escaping (T?, Error?) -> Void) -> Void
+    ) -> Result<T?, Error> {
+        var result: Result<T?, Error>?
+        operation { value, error in
+            if let error {
+                result = .failure(error)
+            } else {
+                result = .success(value)
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(10.0)
+        while result == nil && deadline.timeIntervalSinceNow > 0 {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+
+        return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
+    }
+
+    private static func awaitVoidCallback(
+        description: String,
+        operation: (@escaping (Error?) -> Void) -> Void
+    ) -> Result<Void, Error> {
+        var result: Result<Void, Error>?
+        operation { error in
+            if let error {
+                result = .failure(error)
+            } else {
+                result = .success(())
+            }
+        }
+
+        let deadline = Date().addingTimeInterval(10.0)
+        while result == nil && deadline.timeIntervalSinceNow > 0 {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+
+        return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
+    }
+
+    private static func hexString<D: Digest>(_ digest: D) -> String {
+        digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+#endif
 
 public class WebHistoryItem {
     #if !SKIP

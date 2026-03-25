@@ -591,7 +591,7 @@ extension WebView : ViewRepresentable {
                 config.context = ctx
                 // Re-use the navigator-owned engine so Android WebView survives
                 // screen navigation with the same navigator instance.
-                let webEngine = navigator.webEngine ?? WebEngine(config)
+                let webEngine = navigator.webEngine ?? WebEngine(configuration: config)
 
                 return setupWebView(webEngine, coordinator: coordinator).webView
             }, modifier: ctx.modifier, update: { webView in
@@ -637,6 +637,9 @@ extension WebView : ViewRepresentable {
         context.coordinator.navigator.webEngine = webEngine
 
         let webView = webEngine.webView
+        if let error = webEngine.contentBlockerSetupErrors.first {
+            context.coordinator.state.error = error
+        }
 
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator
