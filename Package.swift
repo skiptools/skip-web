@@ -9,7 +9,7 @@ let package = Package(
         .library(name: "SkipWeb", targets: ["SkipWeb"]),
     ],
     dependencies: [
-        .package(url: "https://source.skip.tools/skip.git", from: "1.7.4"),
+        .package(url: "https://source.skip.tools/skip.git", revision: "63225faec18c1d34db0caeb4f4b787e4894e845d"),
         .package(url: "https://source.skip.tools/skip-ui.git", from: "1.50.0")
     ],
     targets: [
@@ -19,9 +19,15 @@ let package = Package(
 )
 
 if Context.environment["SKIP_BRIDGE"] ?? "0" != "0" {
-    package.dependencies += [.package(url: "https://source.skip.tools/skip-fuse-ui.git", from: "1.0.0")]
+    package.dependencies += [
+        .package(url: "https://source.skip.tools/skip-bridge.git", "0.0.0"..<"2.0.0"),
+        .package(url: "https://source.skip.tools/skip-fuse-ui.git", from: "1.0.0")
+    ]
     package.targets.forEach({ target in
-        target.dependencies += [.product(name: "SkipFuseUI", package: "skip-fuse-ui")]
+        target.dependencies += [
+            .product(name: "SkipBridge", package: "skip-bridge"),
+            .product(name: "SkipFuseUI", package: "skip-fuse-ui")
+        ]
     })
     // all library types must be dynamic to support bridging
     package.products = package.products.map({ product in

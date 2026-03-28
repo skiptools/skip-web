@@ -574,8 +574,12 @@ Supporting types:
 - `WebContentBlockerConfiguration`
 - `AndroidRequestBlocker`
 - `AndroidBlockableRequest`
+- `AndroidRequestBlockDecision`
 - `AndroidCosmeticBlocker`
-- `AndroidCosmeticPayload`
+- `AndroidPageContext`
+- `AndroidCosmeticRule`
+- `AndroidCosmeticFrameScope`
+- `AndroidCosmeticInjectionTiming`
 - `WebContentBlockerError`
 
 Example:
@@ -591,10 +595,29 @@ struct DomainBlocker: AndroidRequestBlocker {
 }
 
 struct CosmeticBlocker: AndroidCosmeticBlocker {
-    func cosmetics(for page: AndroidPageContext) -> AndroidCosmeticPayload? {
-        AndroidCosmeticPayload(css: [
-            ".ad-banner { display: none !important; }"
-        ])
+    func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+        [
+            AndroidCosmeticRule(
+                hiddenSelectors: [
+                    ".ad-banner"
+                ]
+            ),
+            AndroidCosmeticRule(
+                hiddenSelectors: [
+                    ".ad-slot",
+                    ".tracking-frame"
+                ],
+                urlFilterPattern: ".*\\/ad-frame\\.html",
+                allowedOriginRules: ["https://*.doubleclick.net"],
+                frameScope: .subframesOnly
+            ),
+            AndroidCosmeticRule(
+                css: [
+                    "body.modal-open { overflow: auto !important; }"
+                ],
+                preferredTiming: .pageLifecycle
+            )
+        ]
     }
 }
 
@@ -616,7 +639,13 @@ Platform behavior:
 - Popup children created with `platformContext.makeChildWebEngine(...)` inherit the mirrored content-blocker configuration.
 - On Android, `androidRequestBlocker` receives an `AndroidBlockableRequest` for intercepted resource loads and can return `.allow` or `.block`.
 - `AndroidBlockableRequest.isRedirect` is best-effort on Android and may be `nil` when the device's WebView runtime does not support redirect detection.
-- On Android, `androidCosmeticBlocker` can inject CSS at page start using `AndroidCosmeticPayload`.
+- On Android, `androidCosmeticBlocker` returns ordered `AndroidCosmeticRule` values. Each rule can scope CSS to matching frame document URLs with `urlFilterPattern`, scope frame origins with `allowedOriginRules`, control frame scope with `frameScope`, and prefer `.documentStart` or `.pageLifecycle` injection timing.
+- `AndroidCosmeticRule(hiddenSelectors: ...)` is the convenience path for iOS-style cosmetic hiding and expands each selector to `display: none !important;`.
+- `AndroidCosmeticFrameScope` supports `.mainFrameOnly` (the default), `.subframesOnly`, and `.allFrames`. Use `.subframesOnly` when you want CSS to apply only inside iframe/frame documents instead of the top-level page.
+- Subframe-targeted Android cosmetic rules require document-start script injection. If Android cannot install document-start scripts, SkipWeb only falls back main-frame `.documentStart` rules to page-lifecycle injection; `.subframesOnly` and `.allFrames` rules are skipped in that situation.
+- `.pageLifecycle` injection is main-frame-only on Android. If you need to target subframes, keep `preferredTiming` at `.documentStart`.
+- Same-document navigations on Android, such as `history.pushState`, `history.replaceState`, and hash-only URL changes, do not currently refresh URL-scoped cosmetic rules. Treat `urlFilterPattern` matching as navigation-time behavior rather than a live SPA routing hook.
+- Keep using `css:` when you need more than hiding, such as layout repair or `pointer-events` fixes after removing an overlay.
 
 ## Contribution
 

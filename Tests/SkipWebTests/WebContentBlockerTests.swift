@@ -17,14 +17,14 @@ final class WebContentBlockerTests: XCTestCase {
     }
 
     final class StaticCosmeticBlocker: AndroidCosmeticBlocker {
-        let payload: AndroidCosmeticPayload
+        let rules: [AndroidCosmeticRule]
 
-        init(payload: AndroidCosmeticPayload) {
-            self.payload = payload
+        init(rules: [AndroidCosmeticRule]) {
+            self.rules = rules
         }
 
-        func cosmetics(for page: AndroidPageContext) -> AndroidCosmeticPayload? {
-            payload
+        func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+            rules
         }
     }
 
@@ -70,7 +70,9 @@ final class WebContentBlockerTests: XCTestCase {
         let contentBlockers = WebContentBlockerConfiguration(
             iOSRuleListPaths: ["/tmp/rules.json"],
             androidRequestBlocker: AllowAllRequestBlocker(),
-            androidCosmeticBlocker: StaticCosmeticBlocker(payload: AndroidCosmeticPayload(css: [".ad{display:none!important;}"]))
+            androidCosmeticBlocker: StaticCosmeticBlocker(
+                rules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
+            )
         )
         let config = WebEngineConfiguration(contentBlockers: contentBlockers)
         let mirrored = config.popupChildMirroredConfiguration()
@@ -87,6 +89,39 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(context.host, "example.com")
     }
 
+    // Verifies Android cosmetic rules default to wildcard origins, main-frame scope, and document-start timing.
+    func testAndroidCosmeticRuleDefaults() {
+        let rule = AndroidCosmeticRule(css: [".ad { display: none !important; }"])
+
+        XCTAssertNil(rule.urlFilterPattern)
+        XCTAssertEqual(rule.allowedOriginRules, ["*"])
+        XCTAssertEqual(rule.frameScope, .mainFrameOnly)
+        XCTAssertEqual(rule.preferredTiming, .documentStart)
+    }
+
+    // Verifies selector-based convenience rules compile to display:none for iOS-style hiding.
+    func testAndroidCosmeticRuleHiddenSelectorsConvenienceInitializer() {
+        let rule = AndroidCosmeticRule(
+            hiddenSelectors: [
+                ".ad-banner",
+                " #sponsored "
+            ],
+            urlFilterPattern: ".*\\/ad-frame\\.html",
+            allowedOriginRules: ["https://*.doubleclick.net"],
+            frameScope: .subframesOnly,
+            preferredTiming: .documentStart
+        )
+
+        XCTAssertEqual(rule.css, [
+            ".ad-banner { display: none !important; }",
+            "#sponsored { display: none !important; }"
+        ])
+        XCTAssertEqual(rule.urlFilterPattern, ".*\\/ad-frame\\.html")
+        XCTAssertEqual(rule.allowedOriginRules, ["https://*.doubleclick.net"])
+        XCTAssertEqual(rule.frameScope, .subframesOnly)
+        XCTAssertEqual(rule.preferredTiming, .documentStart)
+    }
+
     #if SKIP
     // Verifies redirect lookup is skipped when the Android WebView runtime does not support it.
     func testAndroidRedirectDetectionSkipsLookupWhenFeatureUnsupported() {
@@ -99,6 +134,243 @@ final class WebContentBlockerTests: XCTestCase {
 
         XCTAssertNil(redirect)
         XCTAssertFalse(resolvedRedirect)
+    }
+
+    // Verifies back/forward navigation resolves the target history index before the Android load begins.
+    func testAndroidHistoryNavigationIndexUsesOffsetFromCurrentEntry() {
+        XCTAssertEqual(WebEngine.androidHistoryNavigationIndex(currentIndex: 2, size: 5, offset: -1), 1)
+        XCTAssertEqual(WebEngine.androidHistoryNavigationIndex(currentIndex: 2, size: 5, offset: 1), 3)
+    }
+
+    // Verifies history navigation skips cosmetic pre-registration when there is no target entry.
+    func testAndroidHistoryNavigationIndexRejectsOutOfBoundsTargets() {
+        XCTAssertNil(WebEngine.androidHistoryNavigationIndex(currentIndex: 0, size: 1, offset: -1))
+        XCTAssertNil(WebEngine.androidHistoryNavigationIndex(currentIndex: 0, size: 1, offset: 1))
+    }
+
+    // Verifies document-start cosmetic rules preserve the caller-provided ordering.
+    func testAndroidCosmeticPlanPreservesDocumentStartRuleOrder() {
+        let rules = [
+            AndroidCosmeticRule(
+                css: [".primary { display: none !important; }"],
+                allowedOriginRules: ["https://*.doubleclick.net"],
+                frameScope: .subframesOnly,
+                preferredTiming: .documentStart
+            ),
+            AndroidCosmeticRule(
+                css: [".secondary { opacity: 0 !important; }"],
+                allowedOriginRules: ["*"],
+                frameScope: .allFrames,
+                preferredTiming: .documentStart
+            )
+        ]
+
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: rules,
+            pageURL: URL(string: "https://www.example.com")!,
+            isDocumentStartSupported: true
+        )
+
+        XCTAssertEqual(plan.documentStartRules, rules)
+        XCTAssertTrue(plan.lifecycleCSS.isEmpty)
+    }
+
+    // Verifies unsupported document-start injection falls back only for main-frame rules.
+    func testAndroidCosmeticPlanFallsBackOnlyForMainFrameRulesWhenUnsupported() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".main { display: none !important; }"],
+                    preferredTiming: .documentStart
+                ),
+                AndroidCosmeticRule(
+                    css: [".subframe { display: none !important; }"],
+                    frameScope: .subframesOnly,
+                    preferredTiming: .documentStart
+                )
+            ],
+            pageURL: URL(string: "https://www.example.com")!,
+            isDocumentStartSupported: false
+        )
+
+        XCTAssertTrue(plan.documentStartRules.isEmpty)
+        XCTAssertEqual(plan.lifecycleCSS, [".main { display: none !important; }"])
+    }
+
+    // Verifies page-lifecycle injection keeps only rules that are valid for main-frame fallback.
+    func testAndroidCosmeticPlanKeepsPageLifecycleRulesForMainFrameOnly() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".late { display: none !important; }"],
+                    preferredTiming: .pageLifecycle
+                ),
+                AndroidCosmeticRule(
+                    css: [".ignored { display: none !important; }"],
+                    frameScope: .allFrames,
+                    preferredTiming: .pageLifecycle
+                )
+            ],
+            pageURL: URL(string: "https://www.example.com")!,
+            isDocumentStartSupported: true
+        )
+
+        XCTAssertTrue(plan.documentStartRules.isEmpty)
+        XCTAssertEqual(plan.lifecycleCSS, [".late { display: none !important; }"])
+    }
+
+    // Verifies page-lifecycle rules honor allowed origin scoping before injecting CSS into the main frame.
+    func testAndroidCosmeticPlanFiltersLifecycleRulesByAllowedOriginRules() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".match { display: none !important; }"],
+                    allowedOriginRules: ["https://*.example.com"],
+                    preferredTiming: .pageLifecycle
+                ),
+                AndroidCosmeticRule(
+                    css: [".skip { display: none !important; }"],
+                    allowedOriginRules: ["https://ads.example.net"],
+                    preferredTiming: .pageLifecycle
+                )
+            ],
+            pageURL: URL(string: "https://news.example.com")!,
+            isDocumentStartSupported: true
+        )
+
+        XCTAssertEqual(plan.lifecycleCSS, [".match { display: none !important; }"])
+    }
+
+    // Verifies document-start fallback keeps origin scoping when it degrades to lifecycle injection.
+    func testAndroidCosmeticPlanFiltersFallbackRulesByAllowedOriginRules() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".match { display: none !important; }"],
+                    allowedOriginRules: ["https://example.com"],
+                    preferredTiming: .documentStart
+                ),
+                AndroidCosmeticRule(
+                    css: [".skip { display: none !important; }"],
+                    allowedOriginRules: ["https://other.example.com"],
+                    preferredTiming: .documentStart
+                )
+            ],
+            pageURL: URL(string: "https://example.com")!,
+            isDocumentStartSupported: false
+        )
+
+        XCTAssertEqual(plan.lifecycleCSS, [".match { display: none !important; }"])
+    }
+
+    // Verifies lifecycle fallback also requires the main document URL to match urlFilterPattern.
+    func testAndroidCosmeticPlanFiltersFallbackRulesByURLFilterPattern() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".match { display: none !important; }"],
+                    urlFilterPattern: ".*\\/index\\.html",
+                    preferredTiming: .documentStart
+                ),
+                AndroidCosmeticRule(
+                    css: [".skip { display: none !important; }"],
+                    urlFilterPattern: ".*\\/subframe\\.html",
+                    preferredTiming: .documentStart
+                )
+            ],
+            pageURL: URL(string: "https://example.com/index.html")!,
+            isDocumentStartSupported: false
+        )
+
+        XCTAssertEqual(plan.lifecycleCSS, [".match { display: none !important; }"])
+    }
+
+    // Verifies redirected pages degrade document-start rules to main-frame lifecycle injection.
+    func testAndroidRedirectFallbackPlanDegradesDocumentStartRulesEvenWhenSupported() {
+        let plan = WebEngine.androidRedirectFallbackCosmeticPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    css: [".main { display: none !important; }"],
+                    preferredTiming: .documentStart
+                ),
+                AndroidCosmeticRule(
+                    css: [".subframe { display: none !important; }"],
+                    frameScope: .subframesOnly,
+                    preferredTiming: .documentStart
+                )
+            ],
+            pageURL: URL(string: "https://www.example.com")!
+        )
+
+        XCTAssertTrue(plan.documentStartRules.isEmpty)
+        XCTAssertEqual(plan.lifecycleCSS, [".main { display: none !important; }"])
+    }
+
+    // Verifies main-frame-only scripts bail out when executed inside a subframe.
+    func testAndroidContentBlockerStyleInjectionScriptAddsMainFrameGuard() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerStyleInjectionScript(
+                cssRules: [".main { display: none !important; }"],
+                styleID: "main-style",
+                frameScope: AndroidCosmeticFrameScope.mainFrameOnly
+            )
+        )
+
+        XCTAssertTrue(script.contains("window.top !== window.self"))
+        XCTAssertTrue(script.contains("main-style"))
+    }
+
+    // Verifies subframe-only scripts bail out when executed in the top-level frame.
+    func testAndroidContentBlockerStyleInjectionScriptAddsSubframeGuard() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerStyleInjectionScript(
+                cssRules: [".subframe { display: none !important; }"],
+                styleID: "subframe-style",
+                frameScope: AndroidCosmeticFrameScope.subframesOnly
+            )
+        )
+
+        XCTAssertTrue(script.contains("window.top === window.self"))
+        XCTAssertTrue(script.contains("subframe-style"))
+    }
+
+    // Verifies URL-scoped scripts bail out when the frame URL does not match the provided rule pattern.
+    func testAndroidContentBlockerStyleInjectionScriptAddsURLGuard() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerStyleInjectionScript(
+                cssRules: [".subframe { display: none !important; }"],
+                styleID: "url-style",
+                frameScope: AndroidCosmeticFrameScope.allFrames,
+                urlFilterPattern: ".*\\/subframe\\.html"
+            )
+        )
+
+        XCTAssertTrue(script.contains("new RegExp"))
+        XCTAssertTrue(script.contains("window.location.href"))
+        XCTAssertTrue(script.contains("subframe\\\\.html"))
+    }
+
+    // Verifies all-frame scripts omit frame guards so they can run in any frame context.
+    func testAndroidContentBlockerStyleInjectionScriptLeavesAllFramesUngarded() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerStyleInjectionScript(
+                cssRules: [".shared { display: none !important; }"],
+                styleID: "shared-style",
+                frameScope: AndroidCosmeticFrameScope.allFrames
+            )
+        )
+
+        XCTAssertFalse(script.contains("window.top !== window.self"))
+        XCTAssertFalse(script.contains("window.top === window.self"))
+        XCTAssertTrue(script.contains("shared-style"))
+    }
+
+    // Verifies stale injected CSS can be removed when a redirected final page no longer matches any rules.
+    func testAndroidContentBlockerStyleRemovalScriptTargetsInjectedStyle() {
+        let script = WebEngine.androidContentBlockerStyleRemovalScript(styleID: "shared-style")
+
+        XCTAssertTrue(script.contains("document.getElementById(\"shared-style\")"))
+        XCTAssertTrue(script.contains("style.remove()"))
     }
     #endif
 

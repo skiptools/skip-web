@@ -11,6 +11,7 @@ import CryptoKit
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import androidx.webkit.WebResourceRequestCompat
+import androidx.webkit.ScriptHandler
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import kotlin.coroutines.suspendCoroutine
@@ -229,16 +230,70 @@ public struct AndroidPageContext: Equatable, Sendable {
     }
 }
 
-public struct AndroidCosmeticPayload: Equatable, Sendable {
-    public var css: [String]
+public enum AndroidCosmeticFrameScope: String, CaseIterable, Hashable, Sendable {
+    case mainFrameOnly
+    case subframesOnly
+    case allFrames
+}
 
-    public init(css: [String] = []) {
+public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Sendable {
+    case documentStart
+    case pageLifecycle
+}
+
+public struct AndroidCosmeticRule: Equatable, Sendable {
+    public var css: [String]
+    public var urlFilterPattern: String?
+    public var allowedOriginRules: [String]
+    public var frameScope: AndroidCosmeticFrameScope
+    public var preferredTiming: AndroidCosmeticInjectionTiming
+
+    public init(
+        css: [String] = [],
+        urlFilterPattern: String? = nil,
+        allowedOriginRules: [String] = ["*"],
+        frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+    ) {
         self.css = css
+        self.urlFilterPattern = urlFilterPattern
+        self.allowedOriginRules = allowedOriginRules
+        self.frameScope = frameScope
+        self.preferredTiming = preferredTiming
+    }
+
+    /// Convenience initializer for selector-based hiding, matching iOS `css-display-none`.
+    public init(
+        hiddenSelectors: [String],
+        urlFilterPattern: String? = nil,
+        allowedOriginRules: [String] = ["*"],
+        frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+    ) {
+        self.init(
+            css: Self.hideCSS(for: hiddenSelectors),
+            urlFilterPattern: urlFilterPattern,
+            allowedOriginRules: allowedOriginRules,
+            frameScope: frameScope,
+            preferredTiming: preferredTiming
+        )
+    }
+
+    fileprivate static func hideCSS(for selectors: [String]) -> [String] {
+        selectors
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .map { "\($0) { display: none !important; }" }
     }
 }
 
 public protocol AndroidCosmeticBlocker {
-    func cosmetics(for page: AndroidPageContext) -> AndroidCosmeticPayload?
+    func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule]
+}
+
+struct AndroidCosmeticInjectionPlan {
+    var documentStartRules: [AndroidCosmeticRule] = []
+    var lifecycleCSS: [String] = []
 }
 
 public enum WebContentBlockerError: Error, Equatable, LocalizedError {
@@ -698,6 +753,9 @@ extension WebCookie {
         if profileSetupError != nil {
             return
         }
+        #if SKIP
+        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: url)
+        #endif
         webView.reload()
     }
 
@@ -723,6 +781,9 @@ extension WebCookie {
         if profileSetupError != nil {
             return
         }
+        #if SKIP
+        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
+        #endif
         webView.goBack()
     }
 
@@ -730,6 +791,9 @@ extension WebCookie {
         if profileSetupError != nil {
             return
         }
+        #if SKIP
+        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
+        #endif
         webView.goForward()
     }
 
@@ -745,6 +809,37 @@ extension WebCookie {
         webView.url
         #endif
     }
+
+    #if SKIP
+    private func prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: URL?) {
+        guard let targetURL else {
+            return
+        }
+        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: targetURL, in: webView)
+    }
+
+    private func pendingHistoryNavigationURL(offset: Int) -> URL? {
+        let historyList = webView.copyBackForwardList()
+        guard let targetIndex = Self.androidHistoryNavigationIndex(
+            currentIndex: historyList.currentIndex,
+            size: historyList.size,
+            offset: offset
+        ) else {
+            return nil
+        }
+
+        let targetItem = historyList.getItemAtIndex(targetIndex)
+        return URL(string: targetItem.getUrl()) ?? URL(string: targetItem.getOriginalUrl())
+    }
+
+    static func androidHistoryNavigationIndex(currentIndex: Int, size: Int, offset: Int) -> Int? {
+        let targetIndex = currentIndex + offset
+        guard targetIndex >= 0, targetIndex < size else {
+            return nil
+        }
+        return targetIndex
+    }
+    #endif
 
     /// Evaluates the given JavaScript string and returns the resulting JSON string, which may be a top-level fragment
     public func evaluate(js: String) async throws -> String? {
@@ -783,6 +878,10 @@ extension WebCookie {
 
     public static func isAndroidMultiProfileSupported() -> Bool {
         WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)
+    }
+
+    public static func isAndroidDocumentStartScriptSupported() -> Bool {
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
     }
 
     private static func configureAndroidProfile(_ profile: WebProfile, for webView: PlatformWebView) -> Result<AndroidProfileResources, WebProfileError> {
@@ -1122,6 +1221,10 @@ extension WebCookie {
         }
         logger.info("loadHTML webView: \(self.description)")
         let encoding: String = "UTF-8"
+        #if SKIP
+        let cosmeticPageURL = baseURL ?? URL(string: "about:blank")!
+        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: cosmeticPageURL, in: webView)
+        #endif
 
         #if SKIP
         // see https://developer.android.com/reference/android/webkit/WebView#loadDataWithBaseURL(java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String,%20java.lang.String)
@@ -1143,6 +1246,9 @@ extension WebCookie {
         try throwProfileSetupErrorIfNeeded()
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
+        #if SKIP
+        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: url, in: webView)
+        #endif
         try await awaitPageLoaded {
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
@@ -1368,11 +1474,237 @@ extension WebCookie {
         }
     }
 
-    fileprivate static func androidContentBlockerStyleInjectionScript(cssPayload: AndroidCosmeticPayload) -> String? {
-        let css = cssPayload.css
+    fileprivate static func normalizedAndroidCosmeticCSS(_ cssRules: [String]) -> [String] {
+        cssRules
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-            .joined(separator: "\n")
+    }
+
+    fileprivate static func normalizedAndroidAllowedOriginRules(_ allowedOriginRules: [String]) -> [String] {
+        let normalized = allowedOriginRules
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return normalized.isEmpty ? ["*"] : normalized
+    }
+
+    fileprivate static func androidDefaultPort(for scheme: String) -> Int? {
+        switch scheme.lowercased() {
+        case "http":
+            return 80
+        case "https":
+            return 443
+        default:
+            return nil
+        }
+    }
+
+    fileprivate static func androidParsedOriginRule(_ rule: String) -> (scheme: String, host: String?, port: Int?)? {
+        let normalizedRule = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let separatorRange = normalizedRule.range(of: "://") else {
+            return nil
+        }
+
+        let scheme = String(normalizedRule[..<separatorRange.lowerBound]).lowercased()
+        guard !scheme.isEmpty else {
+            return nil
+        }
+        var authority = String(normalizedRule[separatorRange.upperBound...])
+        if let pathStart = authority.firstIndex(where: { $0 == "/" || $0 == "?" || $0 == "#" }) {
+            authority = String(authority[..<pathStart])
+        }
+
+        guard !authority.isEmpty else {
+            return (scheme, nil, nil)
+        }
+
+        if authority.hasPrefix("[") {
+            guard let bracketEnd = authority.firstIndex(of: "]") else {
+                return nil
+            }
+            let host = String(authority[authority.index(after: authority.startIndex)..<bracketEnd]).lowercased()
+            let remainder = authority[authority.index(after: bracketEnd)...]
+            guard !remainder.isEmpty else {
+                return (scheme, host, nil)
+            }
+            guard remainder.first == ":" else {
+                return nil
+            }
+            return (scheme, host, Int(String(remainder.dropFirst())))
+        }
+
+        if let colonIndex = authority.lastIndex(of: ":"),
+           androidDigitsOnly(String(authority[authority.index(after: colonIndex)...])) {
+            let host = String(authority[..<colonIndex]).lowercased()
+            return (scheme, host, Int(String(authority[authority.index(after: colonIndex)...])))
+        }
+
+        return (scheme, authority.lowercased(), nil)
+    }
+
+    fileprivate static func androidDigitsOnly(_ value: String) -> Bool {
+        guard !value.isEmpty else {
+            return false
+        }
+        for character in value {
+            guard character >= "0" && character <= "9" else {
+                return false
+            }
+        }
+        return true
+    }
+
+    fileprivate static func androidOriginRule(_ rule: String, matches pageURL: URL) -> Bool {
+        let normalizedRule = rule.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedRule.isEmpty else {
+            return false
+        }
+        if normalizedRule == "*" {
+            return true
+        }
+
+        guard
+            let parsedRule = androidParsedOriginRule(normalizedRule),
+            let pageScheme = pageURL.scheme?.lowercased(),
+            parsedRule.scheme == pageScheme
+        else {
+            return false
+        }
+
+        let defaultPort = androidDefaultPort(for: parsedRule.scheme)
+        if parsedRule.scheme != "http" && parsedRule.scheme != "https" {
+            return parsedRule.host == nil && parsedRule.port == nil
+        }
+
+        guard
+            let ruleHost = parsedRule.host,
+            let pageHost = pageURL.host?.lowercased()
+        else {
+            return false
+        }
+
+        let pagePort = pageURL.port ?? defaultPort
+        let rulePort = parsedRule.port ?? defaultPort
+        guard pagePort == rulePort else {
+            return false
+        }
+
+        if ruleHost.hasPrefix("*.") {
+            let suffix = String(ruleHost.dropFirst(2))
+            return pageHost.hasSuffix(".\(suffix)")
+        }
+
+        return pageHost == ruleHost
+    }
+
+    fileprivate static func androidAllowedOriginRulesMatchPage(_ allowedOriginRules: [String], pageURL: URL) -> Bool {
+        let normalizedRules = normalizedAndroidAllowedOriginRules(allowedOriginRules)
+        return normalizedRules.contains { androidOriginRule($0, matches: pageURL) }
+    }
+
+    fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL) -> Bool {
+        guard let urlFilterPattern, !urlFilterPattern.isEmpty else {
+            return true
+        }
+
+        let pageURLString = pageURL.absoluteString
+        #if SKIP
+        // SKIP INSERT: try { return kotlin.text.Regex(urlFilterPattern).containsMatchIn(pageURLString) } catch (t: Throwable) { return false }
+        return false
+        #else
+        let range = NSRange(location: 0, length: pageURLString.utf16.count)
+        guard let expression = try? NSRegularExpression(pattern: urlFilterPattern) else {
+            return false
+        }
+        return expression.firstMatch(in: pageURLString, range: range) != nil
+        #endif
+    }
+
+    static func androidCosmeticInjectionPlan(
+        rules: [AndroidCosmeticRule],
+        pageURL: URL,
+        isDocumentStartSupported: Bool,
+        log: ((String) -> Void)? = nil
+    ) -> AndroidCosmeticInjectionPlan {
+        var plan = AndroidCosmeticInjectionPlan()
+
+        for rule in rules {
+            let normalizedCSS = normalizedAndroidCosmeticCSS(rule.css)
+            guard !normalizedCSS.isEmpty else {
+                continue
+            }
+
+            switch rule.preferredTiming {
+            case .documentStart:
+                if isDocumentStartSupported {
+                    var normalizedRule = rule
+                    normalizedRule.css = normalizedCSS
+                    normalizedRule.allowedOriginRules = normalizedAndroidAllowedOriginRules(rule.allowedOriginRules)
+                    plan.documentStartRules.append(normalizedRule)
+                } else if rule.frameScope == .mainFrameOnly,
+                          androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
+                          androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                    plan.lifecycleCSS.append(contentsOf: normalizedCSS)
+                } else if rule.frameScope == .mainFrameOnly {
+                    if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
+                        log?("Skipping Android cosmetic rule because page origin does not match allowedOriginRules")
+                    } else {
+                        log?("Skipping Android cosmetic rule because page URL does not match urlFilterPattern")
+                    }
+                } else {
+                    log?("Skipping Android cosmetic rule with frameScope=\(rule.frameScope.rawValue) because document-start frame injection is unavailable")
+                }
+            case .pageLifecycle:
+                if rule.frameScope == .mainFrameOnly,
+                   androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                    plan.lifecycleCSS.append(contentsOf: normalizedCSS)
+                } else if rule.frameScope == .mainFrameOnly {
+                    if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
+                        log?("Skipping Android cosmetic rule because page origin does not match allowedOriginRules")
+                    } else {
+                        log?("Skipping Android cosmetic rule because page URL does not match urlFilterPattern")
+                    }
+                } else {
+                    log?("Skipping Android cosmetic rule with frameScope=\(rule.frameScope.rawValue) because page-lifecycle injection only supports the main frame")
+                }
+            }
+        }
+
+        return plan
+    }
+
+    static func androidRedirectFallbackCosmeticPlan(
+        rules: [AndroidCosmeticRule],
+        pageURL: URL,
+        log: ((String) -> Void)? = nil
+    ) -> AndroidCosmeticInjectionPlan {
+        androidCosmeticInjectionPlan(
+            rules: rules,
+            pageURL: pageURL,
+            isDocumentStartSupported: false,
+            log: log
+        )
+    }
+
+    static func androidContentBlockerStyleRemovalScript(styleID: String) -> String {
+        let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        (function() {
+            var style = document.getElementById("\(styleIDLiteral)");
+            if (style) {
+                style.remove();
+            }
+        })();
+        """
+    }
+
+    static func androidContentBlockerStyleInjectionScript(
+        cssRules: [String],
+        styleID: String,
+        frameScope: AndroidCosmeticFrameScope,
+        urlFilterPattern: String? = nil
+    ) -> String? {
+        let css = normalizedAndroidCosmeticCSS(cssRules).joined(separator: "\n")
         guard !css.isEmpty else {
             return nil
         }
@@ -1383,9 +1715,40 @@ extension WebCookie {
             return nil
         }
         let cssLiteral = String(encoded.dropFirst().dropLast())
+        let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
+        let urlFilterGuard: String
+        if let urlFilterPattern, !urlFilterPattern.isEmpty {
+            guard
+                let patternData = try? JSONSerialization.data(withJSONObject: [urlFilterPattern], options: []),
+                let patternEncoded = String(data: patternData, encoding: .utf8)
+            else {
+                return nil
+            }
+            let patternLiteral = String(patternEncoded.dropFirst().dropLast())
+            urlFilterGuard = """
+            try {
+                if (!(new RegExp(\(patternLiteral))).test(window.location.href)) { return; }
+            } catch (error) {
+                return;
+            }
+            """
+        } else {
+            urlFilterGuard = ""
+        }
+        let frameGuard: String
+        switch frameScope {
+        case .mainFrameOnly:
+            frameGuard = "if (window.top !== window.self) { return; }"
+        case .subframesOnly:
+            frameGuard = "if (window.top === window.self) { return; }"
+        case .allFrames:
+            frameGuard = ""
+        }
         return """
         (function() {
-            var styleId = "__skipweb_content_blockers";
+            \(frameGuard)
+            \(urlFilterGuard)
+            var styleId = "\(styleIDLiteral)";
             var css = \(cssLiteral);
             var root = document.head || document.documentElement;
             if (!root) { return; }
@@ -1529,6 +1892,9 @@ extension WebEngine {
 public class WebEngineDelegate : android.webkit.WebViewClient {
     let config: WebEngineConfiguration
     let webViewClient: android.webkit.WebViewClient
+    private var androidCosmeticScriptHandlers: [ScriptHandler] = []
+    private var androidLifecycleCosmeticCSS: [String] = []
+    private var androidPreparedCosmeticPageURL: String?
     
     override init(config: WebEngineConfiguration, webViewClient: android.webkit.WebViewClient = android.webkit.WebViewClient()) {
         super.init()
@@ -1557,14 +1923,16 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application that WebView content left over from previous page navigations will no longer be drawn.
     override func onPageCommitVisible(view: PlatformWebView, url: String) {
         logger.log("onPageCommitVisible: \(url)")
-        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
+        recoverAndroidCosmeticsIfNeeded(for: url)
+        injectAndroidContentBlockerCSSIfNeeded(into: view)
         webViewClient.onPageCommitVisible(view, url)
     }
 
     /// Notify the host application that a page has finished loading.
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
-        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
+        recoverAndroidCosmeticsIfNeeded(for: url)
+        injectAndroidContentBlockerCSSIfNeeded(into: view)
         for userScript in config.userScripts {
             if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
                 let source = userScript.webKitUserScript.source
@@ -1579,6 +1947,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Notify the host application that a page has started loading.
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
+        recoverAndroidCosmeticsIfNeeded(for: url)
         if (!config.messageHandlers.isEmpty) {
             // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
             // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
@@ -1602,7 +1971,7 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
                 }
             }
         }
-        injectAndroidContentBlockerCSSIfNeeded(into: view, url: url)
+        injectAndroidContentBlockerCSSIfNeeded(into: view)
         webViewClient.onPageStarted(view, url, favicon)
     }
 
@@ -1624,13 +1993,116 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
         webViewClient.onReceivedHttpAuthRequest(view, handler, host, realm)
     }
 
-    private func injectAndroidContentBlockerCSSIfNeeded(into view: PlatformWebView, url: String) {
-        guard let blocker = config.contentBlockers?.androidCosmeticBlocker,
-              let pageURL = URL(string: url),
-              let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
-                  cssPayload: blocker.cosmetics(for: AndroidPageContext(url: pageURL)) ?? AndroidCosmeticPayload()
-              )
-        else {
+    private func removeAllAndroidCosmeticScriptHandlers() {
+        for handler in androidCosmeticScriptHandlers {
+            handler.remove()
+        }
+        androidCosmeticScriptHandlers.removeAll()
+    }
+
+    private func androidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
+        guard let blocker = config.contentBlockers?.androidCosmeticBlocker else {
+            return AndroidCosmeticInjectionPlan()
+        }
+        return WebEngine.androidCosmeticInjectionPlan(
+            rules: blocker.cosmetics(for: AndroidPageContext(url: pageURL)),
+            pageURL: pageURL,
+            isDocumentStartSupported: WebEngine.isAndroidDocumentStartScriptSupported()
+        ) { message in
+            logger.warning("\(message) for \(pageURL.absoluteString)")
+        }
+    }
+
+    private func fallbackAndroidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
+        guard let blocker = config.contentBlockers?.androidCosmeticBlocker else {
+            return AndroidCosmeticInjectionPlan()
+        }
+        return WebEngine.androidRedirectFallbackCosmeticPlan(
+            rules: blocker.cosmetics(for: AndroidPageContext(url: pageURL)),
+            pageURL: pageURL
+        ) { message in
+            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        }
+    }
+
+    private func registerAndroidDocumentStartCosmeticRule(
+        _ rule: AndroidCosmeticRule,
+        index: Int,
+        for pageURL: URL,
+        in view: PlatformWebView
+    ) -> ScriptHandler? {
+        guard let script = WebEngine.androidContentBlockerStyleInjectionScript(
+            cssRules: rule.css,
+            styleID: "__skipweb_content_blockers_\(index)",
+            frameScope: rule.frameScope,
+            urlFilterPattern: rule.urlFilterPattern
+        ) else {
+            return nil
+        }
+        let allowedOriginRules: kotlin.collections.MutableSet<String> = kotlin.collections.HashSet()
+        for allowedOriginRule in rule.allowedOriginRules {
+            allowedOriginRules.add(allowedOriginRule)
+        }
+
+        // SKIP INSERT: try {
+        // SKIP INSERT:     return androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view, script_0, allowedOriginRules)
+        // SKIP INSERT: } catch (t: Throwable) {
+        // SKIP INSERT:     logger.warning("Skipping Android cosmetic rule registration for ${pageURL.absoluteString}: ${t.message ?: t}")
+        // SKIP INSERT:     return null
+        // SKIP INSERT: }
+        return WebViewCompat.addDocumentStartJavaScript(view, script, allowedOriginRules)
+    }
+
+    fileprivate func prepareAndroidCosmeticRules(for pageURL: URL, in view: PlatformWebView) {
+        removeAllAndroidCosmeticScriptHandlers()
+        let plan = androidCosmeticPlan(for: pageURL)
+        androidLifecycleCosmeticCSS = plan.lifecycleCSS
+
+        if WebEngine.isAndroidDocumentStartScriptSupported() {
+            for (index, rule) in plan.documentStartRules.enumerated() {
+                if let handler = registerAndroidDocumentStartCosmeticRule(rule, index: index, for: pageURL, in: view) {
+                    androidCosmeticScriptHandlers.append(handler)
+                }
+            }
+        }
+
+        androidPreparedCosmeticPageURL = pageURL.absoluteString
+    }
+
+    private func recoverAndroidCosmeticsIfNeeded(for url: String) {
+        guard androidPreparedCosmeticPageURL != url else {
+            return
+        }
+        guard let pageURL = URL(string: url) else {
+            removeAllAndroidCosmeticScriptHandlers()
+            androidLifecycleCosmeticCSS = []
+            androidPreparedCosmeticPageURL = nil
+            return
+        }
+
+        if androidPreparedCosmeticPageURL != nil {
+            logger.info("Falling back to late Android cosmetic injection for \(pageURL.absoluteString)")
+        }
+        removeAllAndroidCosmeticScriptHandlers()
+        let fallbackPlan = fallbackAndroidCosmeticPlan(for: pageURL)
+        androidLifecycleCosmeticCSS = fallbackPlan.lifecycleCSS
+        androidPreparedCosmeticPageURL = pageURL.absoluteString
+    }
+
+    private func clearAndroidContentBlockerCSS(in view: PlatformWebView) {
+        let removalScript = WebEngine.androidContentBlockerStyleRemovalScript(styleID: "__skipweb_content_blockers")
+        view.evaluateJavascript(removalScript) { _ in
+            logger.debug("Cleared Android content blocker CSS")
+        }
+    }
+
+    private func injectAndroidContentBlockerCSSIfNeeded(into view: PlatformWebView) {
+        guard let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
+            cssRules: androidLifecycleCosmeticCSS,
+            styleID: "__skipweb_content_blockers",
+            frameScope: .mainFrameOnly
+        ) else {
+            clearAndroidContentBlockerCSS(in: view)
             return
         }
 
@@ -1726,6 +2198,9 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     /// Give the host application a chance to take control when a URL is about to be loaded in the current WebView.
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
         logger.log("shouldOverrideUrlLoading: \(request.url)")
+        if request.isForMainFrame, let url = URL(string: request.url.toString()) {
+            prepareAndroidCosmeticRules(for: url, in: view)
+        }
         return webViewClient.shouldOverrideUrlLoading(view, request)
     }
 }
