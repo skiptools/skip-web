@@ -637,7 +637,8 @@ Platform behavior:
 
 - On iOS, `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList`s and attached to the web view's `WKUserContentController`.
 - SkipWeb persists compiled iOS rule lists in a cache keyed by source path and file contents, recompiles when a rule file changes, and prunes stale compiled entries when rule files are removed from the configuration.
-- iOS blocker setup errors are exposed through `WebEngineConfiguration.contentBlockerSetupErrors` while building the configuration and through `WebEngine.contentBlockerSetupErrors` after engine creation.
+- On iOS, create configured `WKWebViewConfiguration` instances with `await WebEngineConfiguration.makeWebViewConfiguration()`, which compiles and installs any configured rule lists before returning.
+- iOS blocker setup errors are exposed through `WebEngineConfiguration.contentBlockerSetupErrors` after `makeWebViewConfiguration()` completes and through `await WebEngine.awaitContentBlockerSetup()` / `WebEngine.contentBlockerSetupErrors` after engine creation.
 - When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.
 - Popup children created with `platformContext.makeChildWebEngine(...)` inherit the mirrored content-blocker configuration.
 - On Android, SkipWeb now installs an engine-owned `WebViewClient` so content blocking stays active for `WebView`, popup children, and direct/headless `WebEngine` usage.

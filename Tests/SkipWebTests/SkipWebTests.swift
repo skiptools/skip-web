@@ -296,7 +296,7 @@ final class SkipWebTests: XCTestCase {
         }
         #if !SKIP
         let config = WebEngineConfiguration()
-        let platformWebView = PlatformWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: config.webViewConfiguration)
+        let platformWebView = PlatformWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: await config.makeWebViewConfiguration())
         let engine = WebEngine(configuration: config, webView: platformWebView)
         engine.refreshMessageHandlers()
         engine.updateUserScripts()
@@ -329,7 +329,7 @@ final class SkipWebTests: XCTestCase {
         }
         #if !SKIP
         let config = WebEngineConfiguration()
-        let platformWebView = PlatformWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: config.webViewConfiguration)
+        let platformWebView = PlatformWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 240), configuration: await config.makeWebViewConfiguration())
         let engine = WebEngine(configuration: config, webView: platformWebView)
         engine.refreshMessageHandlers()
         engine.updateUserScripts()
@@ -496,7 +496,7 @@ final class SkipWebTests: XCTestCase {
         config.context = ctx
         let platformWebView = PlatformWebView(ctx)
         #else
-        let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
+        let platformWebView = PlatformWebView(frame: CGRectZero, configuration: await config.makeWebViewConfiguration())
         #endif
 
         let engine = WebEngine(configuration: config, webView: platformWebView)
@@ -691,7 +691,7 @@ final class SkipWebTests: XCTestCase {
         if isRobolectric {
             throw XCTSkip("WebEngine-backed data removal tests require instrumented Android context")
         }
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         let types: Set<WebSiteDataType> = [.cookies]
         do {
             try await engine.removeData(ofTypes: types, modifiedSince: Date())
@@ -709,7 +709,7 @@ final class SkipWebTests: XCTestCase {
         if isRobolectric {
             throw XCTSkip("WebEngine-backed data removal tests require instrumented Android context")
         }
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         try await engine.removeData(ofTypes: [], modifiedSince: .distantPast)
     }
 
@@ -719,7 +719,7 @@ final class SkipWebTests: XCTestCase {
             throw XCTSkip("cookie store is not reliable in Robolectric")
         }
 
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         await engine.clearCookies()
 
         let requestURL = try XCTUnwrap(URL(string: "https://cookies.example.com/path"))
@@ -739,7 +739,7 @@ final class SkipWebTests: XCTestCase {
             throw XCTSkip("cookie store is not reliable in Robolectric")
         }
 
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         await engine.clearCookies()
 
         let cookieName = "secure_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
@@ -763,7 +763,7 @@ final class SkipWebTests: XCTestCase {
             throw XCTSkip("cookie store is not reliable in Robolectric")
         }
 
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         await engine.clearCookies()
 
         let requestURL = try XCTUnwrap(URL(string: "https://cleanup.example.com/"))
@@ -785,7 +785,7 @@ final class SkipWebTests: XCTestCase {
             throw XCTSkip("cookie store is not reliable in Robolectric")
         }
 
-        let engine = makeCookieTestEngine()
+        let engine = await makeCookieTestEngine()
         await engine.clearCookies()
 
         let responseURL = try XCTUnwrap(URL(string: "https://headers.example.com/media/master.m3u8"))

@@ -24,7 +24,7 @@ final class WebProfileSegregationTests: XCTestCase {
             throw XCTSkip("WebEngine-backed navigator tests require instrumented Android context")
         }
         let navigator = WebViewNavigator()
-        navigator.webEngine = makeCookieTestEngine(profile: .named(" "))
+        navigator.webEngine = await makeCookieTestEngine(profile: .named(" "))
         let requestURL = try XCTUnwrap(URL(string: "https://invalid-profile.example.com/path"))
 
         do {
@@ -44,8 +44,8 @@ final class WebProfileSegregationTests: XCTestCase {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let profileA: WebProfile = .named("ios_profile_a_\(suffix)")
         let profileB: WebProfile = .named("ios_profile_b_\(suffix)")
-        let engineA = makeCookieTestEngine(profile: profileA)
-        let engineB = makeCookieTestEngine(profile: profileB)
+        let engineA = await makeCookieTestEngine(profile: profileA)
+        let engineB = await makeCookieTestEngine(profile: profileB)
         await engineA.clearCookies()
         await engineB.clearCookies()
 
@@ -80,8 +80,8 @@ final class WebProfileSegregationTests: XCTestCase {
     func testIOSNamedProfileSharesCookiesAcrossEnginesWithSameIdentifier() async throws {
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         let sharedProfile: WebProfile = .named("ios_profile_shared_\(suffix)")
-        let engineA = makeCookieTestEngine(profile: sharedProfile)
-        let engineB = makeCookieTestEngine(profile: sharedProfile)
+        let engineA = await makeCookieTestEngine(profile: sharedProfile)
+        let engineB = await makeCookieTestEngine(profile: sharedProfile)
         await engineA.clearCookies()
         await engineB.clearCookies()
 
@@ -130,7 +130,7 @@ final class WebProfileSegregationTests: XCTestCase {
         if isRobolectric {
             throw XCTSkip("Android profile inheritance tests require instrumented Android context")
         }
-        let child = makeCookieTestEngine(profile: .default)
+        let child = await makeCookieTestEngine(profile: .default)
         let profileError = child.inheritAndroidProfile(from: WebProfile.named(" "))
         XCTAssertEqual(profileError, WebProfileError.invalidProfileName)
 
@@ -151,7 +151,7 @@ final class WebProfileSegregationTests: XCTestCase {
         if isRobolectric {
             throw XCTSkip("WebView feature probes are unavailable in Robolectric")
         }
-        let child = makeCookieTestEngine(profile: .default)
+        let child = await makeCookieTestEngine(profile: .default)
         let profileError = child.inheritAndroidProfile(from: WebProfile.named("android-profile-inherited"))
         if WebEngine.isAndroidMultiProfileSupported() {
             XCTAssertNil(profileError)
@@ -169,7 +169,7 @@ final class WebProfileSegregationTests: XCTestCase {
         if WebEngine.isAndroidMultiProfileSupported() {
             throw XCTSkip("device WebView runtime supports multi-profile")
         }
-        let engine = makeCookieTestEngine(profile: .named("android-profile"))
+        let engine = await makeCookieTestEngine(profile: .named("android-profile"))
         let requestURL = try XCTUnwrap(URL(string: "https://android-profile.example.com/path"))
         do {
             try await engine.setCookie(WebCookie(name: "session", value: "1"), requestURL: requestURL)
@@ -192,8 +192,8 @@ final class WebProfileSegregationTests: XCTestCase {
         }
 
         let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "")
-        let engineA = makeCookieTestEngine(profile: .named("android_profile_a_\(suffix)"))
-        let engineB = makeCookieTestEngine(profile: .named("android_profile_b_\(suffix)"))
+        let engineA = await makeCookieTestEngine(profile: .named("android_profile_a_\(suffix)"))
+        let engineB = await makeCookieTestEngine(profile: .named("android_profile_b_\(suffix)"))
         await engineA.clearCookies()
         await engineB.clearCookies()
 

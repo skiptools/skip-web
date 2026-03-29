@@ -637,8 +637,10 @@ extension WebView : ViewRepresentable {
         context.coordinator.navigator.webEngine = webEngine
 
         let webView = webEngine.webView
-        if let error = webEngine.contentBlockerSetupErrors.first {
-            context.coordinator.state.error = error
+        Task { @MainActor in
+            if let error = await webEngine.awaitContentBlockerSetup().first {
+                context.coordinator.state.error = error
+            }
         }
 
         webView.allowsLinkPreview = true

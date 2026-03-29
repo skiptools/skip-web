@@ -9,7 +9,7 @@ import WebKit
 
 #if SKIP || os(iOS)
 @MainActor
-func makeCookieTestEngine(profile: WebProfile = WebProfile.default) -> WebEngine {
+func makeCookieTestEngine(profile: WebProfile = WebProfile.default) async -> WebEngine {
     let config = WebEngineConfiguration(profile: profile)
     #if SKIP
     let instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
@@ -33,7 +33,7 @@ func makeCookieTestEngine(profile: WebProfile = WebProfile.default) -> WebEngine
         return createdEngine
     }
     #else
-    let platformWebView = PlatformWebView(frame: CGRectZero, configuration: config.webViewConfiguration)
+    let platformWebView = PlatformWebView(frame: CGRectZero, configuration: await config.makeWebViewConfiguration())
     return WebEngine(configuration: config, webView: platformWebView)
     #endif
 }

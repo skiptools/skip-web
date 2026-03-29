@@ -489,7 +489,7 @@ final class WebContentBlockerTests: XCTestCase {
     #if !SKIP
     // Verifies iOS rule lists compile once and are reused from the persistent cache on subsequent loads.
     @MainActor
-    func testIOSContentBlockerRuleListsCompileAndReusePersistentCache() throws {
+    func testIOSContentBlockerRuleListsCompileAndReusePersistentCache() async throws {
         let baseDirectory = contentBlockerTestDirectory()
         let ruleFile = baseDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
@@ -505,7 +505,7 @@ final class WebContentBlockerTests: XCTestCase {
         let firstConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
         )
-        _ = firstConfig.webViewConfiguration
+        _ = await firstConfig.makeWebViewConfiguration()
         XCTAssertTrue(firstConfig.contentBlockerSetupErrors.isEmpty)
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.compiledIdentifiers.count, 1)
         let firstIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
@@ -515,14 +515,14 @@ final class WebContentBlockerTests: XCTestCase {
         let secondConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
         )
-        _ = secondConfig.webViewConfiguration
+        _ = await secondConfig.makeWebViewConfiguration()
         XCTAssertTrue(secondConfig.contentBlockerSetupErrors.isEmpty)
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [firstIdentifier])
     }
 
     // Verifies caller-supplied WKWebView instances receive configured blocker rule lists.
     @MainActor
-    func testIOSContentBlockersInstallIntoSuppliedWKWebView() throws {
+    func testIOSContentBlockersInstallIntoSuppliedWKWebView() async throws {
         let baseDirectory = contentBlockerTestDirectory()
         let ruleFile = baseDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
@@ -541,6 +541,7 @@ final class WebContentBlockerTests: XCTestCase {
         let existingWebView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
 
         let engine = WebEngine(configuration: config, webView: existingWebView)
+        _ = await engine.awaitContentBlockerSetup()
 
         XCTAssertTrue(engine.contentBlockerSetupErrors.isEmpty)
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.installedRuleListCount, 1)
@@ -548,7 +549,7 @@ final class WebContentBlockerTests: XCTestCase {
 
     // Verifies changing an iOS rule file invalidates the previous compiled identifier and prunes it.
     @MainActor
-    func testIOSContentBlockerRuleListChangesInvalidateCachedIdentifier() throws {
+    func testIOSContentBlockerRuleListChangesInvalidateCachedIdentifier() async throws {
         let baseDirectory = contentBlockerTestDirectory()
         let ruleFile = baseDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules(filter: ".*ads-v1.*"))
@@ -564,7 +565,7 @@ final class WebContentBlockerTests: XCTestCase {
         let firstConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
         )
-        _ = firstConfig.webViewConfiguration
+        _ = await firstConfig.makeWebViewConfiguration()
         let firstIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
 
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules(filter: ".*ads-v2.*"))
@@ -573,7 +574,7 @@ final class WebContentBlockerTests: XCTestCase {
         let secondConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
         )
-        _ = secondConfig.webViewConfiguration
+        _ = await secondConfig.makeWebViewConfiguration()
         XCTAssertTrue(secondConfig.contentBlockerSetupErrors.isEmpty)
         let secondIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
         XCTAssertNotEqual(firstIdentifier, secondIdentifier)
@@ -582,7 +583,7 @@ final class WebContentBlockerTests: XCTestCase {
 
     // Verifies removing a rule file from configuration prunes its stale cached identifier.
     @MainActor
-    func testIOSContentBlockerRemovingRuleFilePrunesStaleIdentifier() throws {
+    func testIOSContentBlockerRemovingRuleFilePrunesStaleIdentifier() async throws {
         let baseDirectory = contentBlockerTestDirectory()
         let firstRuleFile = baseDirectory.appendingPathComponent("rules-1.json")
         let secondRuleFile = baseDirectory.appendingPathComponent("rules-2.json")
@@ -600,7 +601,7 @@ final class WebContentBlockerTests: XCTestCase {
         let initialConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [firstRuleFile.path, secondRuleFile.path])
         )
-        _ = initialConfig.webViewConfiguration
+        _ = await initialConfig.makeWebViewConfiguration()
         let compiledIdentifiers = WebContentBlockerDebug.diagnostics.compiledIdentifiers
         XCTAssertEqual(compiledIdentifiers.count, 2)
         let removedIdentifier = compiledIdentifiers[1]
@@ -610,7 +611,7 @@ final class WebContentBlockerTests: XCTestCase {
         let prunedConfig = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [firstRuleFile.path])
         )
-        _ = prunedConfig.webViewConfiguration
+        _ = await prunedConfig.makeWebViewConfiguration()
 
         XCTAssertTrue(prunedConfig.contentBlockerSetupErrors.isEmpty)
         XCTAssertTrue(WebContentBlockerDebug.diagnostics.prunedIdentifiers.contains(removedIdentifier))
@@ -618,7 +619,7 @@ final class WebContentBlockerTests: XCTestCase {
 
     // Verifies invalid iOS rule files surface setup errors without aborting configuration creation.
     @MainActor
-    func testIOSContentBlockerSetupErrorsAreRecordedWithoutFailingConfiguration() throws {
+    func testIOSContentBlockerSetupErrorsAreRecordedWithoutFailingConfiguration() async throws {
         let baseDirectory = contentBlockerTestDirectory()
         let invalidRuleFile = baseDirectory.appendingPathComponent("invalid-rules.json")
         try writeContentBlockerRuleFile(at: invalidRuleFile, contents: "[{\"trigger\":{},\"action\":{\"type\":\"block\"}}]")
@@ -634,7 +635,7 @@ final class WebContentBlockerTests: XCTestCase {
         let config = WebEngineConfiguration(
             contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [invalidRuleFile.path])
         )
-        _ = config.webViewConfiguration
+        _ = await config.makeWebViewConfiguration()
 
         XCTAssertEqual(config.contentBlockerSetupErrors.count, 1)
         guard case .compilationFailed(let path, _) = try XCTUnwrap(config.contentBlockerSetupErrors.first) else {

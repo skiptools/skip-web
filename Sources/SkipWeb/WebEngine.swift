@@ -803,6 +803,7 @@ extension WebCookie {
     }
     private var observers: [NSKeyValueObservation] = []
     private var profileSetupError: WebProfileError?
+    private var iosContentBlockerSetupTask: Task<[WebContentBlockerError], Never>?
     #else
     private var profileSetupError: WebProfileError?
     private var androidProfileCookieManager: android.webkit.CookieManager?
@@ -824,10 +825,8 @@ extension WebCookie {
         #if !SKIP
         if let webView {
             self.webView = webView
-            self.contentBlockerSetupErrors = configuration.installContentBlockers(into: webView.configuration.userContentController)
         } else {
-            self.webView = WKWebView(frame: .zero, configuration: configuration.webViewConfiguration)
-            self.contentBlockerSetupErrors = configuration.contentBlockerSetupErrors
+            self.webView = WKWebView(frame: .zero, configuration: configuration.makeBaseWebViewConfiguration())
         }
         if case .named = configuration.profile, configuration.profile.normalizedNamedIdentifier == nil {
             self.profileSetupError = .invalidProfileName
@@ -850,16 +849,28 @@ extension WebCookie {
         }
         self.webView.webViewClient = androidInternalWebViewClient
         #endif
+
+        super.init()
+
+        #if !SKIP
+        scheduleIOSContentBlockerSetupIfNeeded()
+        #endif
     }
 
     public func reload() {
         if profileSetupError != nil {
             return
         }
+        #if !SKIP
+        runAfterIOSContentBlockerSetupIfNeeded { [webView] in
+            webView.reload()
+        }
+        #else
         #if SKIP
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: url)
         #endif
         webView.reload()
+        #endif
     }
 
     public func stopLoading() {
@@ -884,20 +895,32 @@ extension WebCookie {
         if profileSetupError != nil {
             return
         }
+        #if !SKIP
+        runAfterIOSContentBlockerSetupIfNeeded { [webView] in
+            webView.goBack()
+        }
+        #else
         #if SKIP
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
         #endif
         webView.goBack()
+        #endif
     }
 
     public func goForward() {
         if profileSetupError != nil {
             return
         }
+        #if !SKIP
+        runAfterIOSContentBlockerSetupIfNeeded { [webView] in
+            webView.goForward()
+        }
+        #else
         #if SKIP
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
         #endif
         webView.goForward()
+        #endif
     }
 
     /// Preferred URL accessor for parity with `WKWebView.url`.
@@ -995,6 +1018,17 @@ extension WebCookie {
         }
     }
 
+    public func awaitContentBlockerSetup() async -> [WebContentBlockerError] {
+        #if !SKIP
+        if let iosContentBlockerSetupTask {
+            let errors = await iosContentBlockerSetupTask.value
+            contentBlockerSetupErrors = errors
+            return errors
+        }
+        #endif
+        return contentBlockerSetupErrors
+    }
+
     #if SKIP
     struct AndroidProfileResources {
         let cookieManager: android.webkit.CookieManager?
@@ -1076,6 +1110,33 @@ extension WebCookie {
 
     private func androidWebStorage() -> android.webkit.WebStorage {
         androidProfileWebStorage ?? android.webkit.WebStorage.getInstance()
+    }
+    #else
+    private func scheduleIOSContentBlockerSetupIfNeeded() {
+        guard iosContentBlockerSetupTask == nil else {
+            return
+        }
+        guard configuration.contentBlockers?.iOSRuleListPaths.isEmpty == false else {
+            return
+        }
+
+        let userContentController = webView.configuration.userContentController
+        iosContentBlockerSetupTask = Task { @MainActor [configuration, weak self] in
+            let errors = await configuration.installContentBlockers(into: userContentController)
+            self?.contentBlockerSetupErrors = errors
+            return errors
+        }
+    }
+
+    private func runAfterIOSContentBlockerSetupIfNeeded(_ operation: @escaping @MainActor () -> Void) {
+        if let iosContentBlockerSetupTask {
+            Task { @MainActor in
+                _ = await iosContentBlockerSetupTask.value
+                operation()
+            }
+        } else {
+            operation()
+        }
     }
     #endif
 
@@ -1359,10 +1420,13 @@ extension WebCookie {
         let historyUrl: String? = nil // the URL to use as the history entry. If null defaults to 'about:blank'. If non-null, this must be a valid URL.
         webView.loadDataWithBaseURL(baseUrl, htmlContent, mimeType, encoding, historyUrl)
         #else
-        refreshMessageHandlers()
-        //try await awaitPageLoaded {
-        webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
-        //}
+        runAfterIOSContentBlockerSetupIfNeeded { [weak self] in
+            guard let self else {
+                return
+            }
+            self.refreshMessageHandlers()
+            self.webView.load(Data(html.utf8), mimeType: mimeType, characterEncodingName: encoding, baseURL: baseURL ?? URL(string: "about:blank")!)
+        }
         #endif
     }
 
@@ -1373,6 +1437,8 @@ extension WebCookie {
         logger.info("load URL=\(urlString) webView: \(self.description)")
         #if SKIP
         androidContentBlockerController.prepare(for: url, in: webView)
+        #else
+        _ = await awaitContentBlockerSetup()
         #endif
         try await awaitPageLoaded {
             #if SKIP
@@ -2831,8 +2897,15 @@ public extension SkipWebUIDelegate {
     }
 
     #if !SKIP
-    /// Create a `WebViewConfiguration` from the properties of this configuration.
-    @MainActor public var webViewConfiguration: WebViewConfiguration {
+    /// Create a `WebViewConfiguration` from the properties of this configuration and
+    /// asynchronously install any configured iOS content blockers.
+    @MainActor public func makeWebViewConfiguration() async -> WebViewConfiguration {
+        let configuration = makeBaseWebViewConfiguration()
+        _ = await installContentBlockers(into: configuration.userContentController)
+        return configuration
+    }
+
+    @MainActor func makeBaseWebViewConfiguration() -> WebViewConfiguration {
         let configuration = WebViewConfiguration()
         configuration.websiteDataStore = webKitWebsiteDataStore
 
@@ -2849,21 +2922,18 @@ public extension SkipWebUIDelegate {
             configuration.setURLSchemeHandler(schemeHandlerObject, forURLScheme: schemeName)
         }
         #endif
-
-        _ = installContentBlockers(into: configuration.userContentController)
-
         return configuration
     }
 
     @MainActor
     @discardableResult
-    func installContentBlockers(into userContentController: WKUserContentController) -> [WebContentBlockerError] {
+    public func installContentBlockers(into userContentController: WKUserContentController) async -> [WebContentBlockerError] {
         contentBlockerSetupErrors = []
         guard let contentBlockers, !contentBlockers.iOSRuleListPaths.isEmpty else {
             return []
         }
 
-        let prepared = WebContentBlockerStore.prepareRuleLists(from: contentBlockers.iOSRuleListPaths)
+        let prepared = await WebContentBlockerStore.prepareRuleLists(from: contentBlockers.iOSRuleListPaths)
         contentBlockerSetupErrors = prepared.errors
         for ruleList in prepared.ruleLists {
             userContentController.add(ruleList)
@@ -2970,7 +3040,7 @@ fileprivate enum WebContentBlockerStore {
     private static let storeDirectoryName = "RuleListStore"
     private static let metadataVersion = 1
 
-    static func prepareRuleLists(from sourcePaths: [String]) -> PreparedContentBlockerRuleLists {
+    static func prepareRuleLists(from sourcePaths: [String]) async -> PreparedContentBlockerRuleLists {
         var ruleLists: [WKContentRuleList] = []
         var errors: [WebContentBlockerError] = []
 
@@ -3009,13 +3079,13 @@ fileprivate enum WebContentBlockerStore {
             nextIdentifiersBySourcePath[sourcePath] = identifier
             staleIdentifiers.remove(identifier)
 
-            if let cachedRuleList = lookupRuleList(identifier: identifier, in: store, errors: &errors) {
+            if let cachedRuleList = await lookupRuleList(identifier: identifier, in: store, errors: &errors) {
                 ruleLists.append(cachedRuleList)
                 diagnostics.cacheHitIdentifiers.append(identifier)
                 continue
             }
 
-            if let compiledRuleList = compileRuleList(identifier: identifier, content: content, sourcePath: sourcePath, in: store, errors: &errors) {
+            if let compiledRuleList = await compileRuleList(identifier: identifier, content: content, sourcePath: sourcePath, in: store, errors: &errors) {
                 ruleLists.append(compiledRuleList)
                 diagnostics.compiledIdentifiers.append(identifier)
             }
@@ -3023,7 +3093,7 @@ fileprivate enum WebContentBlockerStore {
 
         let activeIdentifiers = Set(nextIdentifiersBySourcePath.values)
         for staleIdentifier in staleIdentifiers.subtracting(activeIdentifiers) {
-            removeRuleList(identifier: staleIdentifier, from: store, errors: &errors)
+            await removeRuleList(identifier: staleIdentifier, from: store, errors: &errors)
         }
 
         metadata.identifiersBySourcePath = nextIdentifiersBySourcePath
@@ -3130,17 +3200,20 @@ fileprivate enum WebContentBlockerStore {
         }
     }
 
-    private static func lookupRuleList(identifier: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) -> WKContentRuleList? {
-        switch awaitCallback(description: "lookup \(identifier)") { completion in
-            store.lookUpContentRuleList(forIdentifier: identifier) { ruleList, error in
-                completion(ruleList, error)
+    private static func lookupRuleList(identifier: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) async -> WKContentRuleList? {
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                store.lookUpContentRuleList(forIdentifier: identifier) { ruleList, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ruleList)
+                    }
+                }
             }
-        } {
-        case .success(let ruleList):
-            return ruleList
-        case .failure(let error as WebContentBlockerError):
+        } catch let error as WebContentBlockerError {
             errors.append(error)
-        case .failure(let error):
+        } catch {
             let nsError = error as NSError
             if nsError.domain == WKErrorDomain,
                nsError.code == WKError.Code.contentRuleListStoreLookUpFailed.rawValue {
@@ -3151,33 +3224,40 @@ fileprivate enum WebContentBlockerStore {
         return nil
     }
 
-    private static func compileRuleList(identifier: String, content: String, sourcePath: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) -> WKContentRuleList? {
-        switch awaitCallback(description: "compile \(sourcePath)") { completion in
-            store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: content) { ruleList, error in
-                completion(ruleList, error)
+    private static func compileRuleList(identifier: String, content: String, sourcePath: String, in store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) async -> WKContentRuleList? {
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                store.compileContentRuleList(forIdentifier: identifier, encodedContentRuleList: content) { ruleList, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ruleList)
+                    }
+                }
             }
-        } {
-        case .success(let ruleList):
-            return ruleList
-        case .failure(let error as WebContentBlockerError):
+        } catch let error as WebContentBlockerError {
             errors.append(error)
-        case .failure(let error):
+        } catch {
             errors.append(.compilationFailed(path: sourcePath, description: error.localizedDescription))
         }
         return nil
     }
 
-    private static func removeRuleList(identifier: String, from store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) {
-        switch awaitVoidCallback(description: "remove \(identifier)") { completion in
-            store.removeContentRuleList(forIdentifier: identifier) { error in
-                completion(error)
+    private static func removeRuleList(identifier: String, from store: WKContentRuleListStore, errors: inout [WebContentBlockerError]) async {
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                store.removeContentRuleList(forIdentifier: identifier) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume(returning: ())
+                    }
+                }
             }
-        } {
-        case .success:
             diagnostics.prunedIdentifiers.append(identifier)
-        case .failure(let error as WebContentBlockerError):
+        } catch let error as WebContentBlockerError {
             errors.append(error)
-        case .failure(let error):
+        } catch {
             let nsError = error as NSError
             // Failing to delete a stale compiled rule list should not prevent the current rule set from loading.
             if nsError.domain == WKErrorDomain,
@@ -3186,95 +3266,6 @@ fileprivate enum WebContentBlockerStore {
             }
             errors.append(.staleRuleRemovalFailed(identifier: identifier, description: error.localizedDescription))
         }
-    }
-
-    private static func awaitCallback<T>(
-        description: String,
-        operation: (@escaping (T?, Error?) -> Void) -> Void
-    ) -> Result<T?, Error> {
-        let lock = NSLock()
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<T?, Error>?
-        operation { value, error in
-            let callbackResult: Result<T?, Error>
-            if let error {
-                callbackResult = .failure(error)
-            } else {
-                callbackResult = .success(value)
-            }
-            lock.lock()
-            result = callbackResult
-            lock.unlock()
-            semaphore.signal()
-        }
-
-        let deadline = Date().addingTimeInterval(contentBlockerCallbackTimeout)
-        while deadline.timeIntervalSinceNow > 0 {
-            if semaphore.wait(timeout: .now()) == .success {
-                lock.lock()
-                defer { lock.unlock() }
-                return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
-            }
-
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.01))
-        }
-
-        lock.lock()
-        defer { lock.unlock() }
-        return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
-    }
-
-    private static func awaitVoidCallback(
-        description: String,
-        operation: (@escaping (Error?) -> Void) -> Void
-    ) -> Result<Void, Error> {
-        let lock = NSLock()
-        let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<Void, Error>?
-        operation { error in
-            let callbackResult: Result<Void, Error>
-            if let error {
-                callbackResult = .failure(error)
-            } else {
-                callbackResult = .success(())
-            }
-            lock.lock()
-            result = callbackResult
-            lock.unlock()
-            semaphore.signal()
-        }
-
-        let deadline = Date().addingTimeInterval(contentBlockerCallbackTimeout)
-        while deadline.timeIntervalSinceNow > 0 {
-            if semaphore.wait(timeout: .now()) == .success {
-                lock.lock()
-                defer { lock.unlock() }
-                return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
-            }
-
-            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
-            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.01))
-        }
-
-        lock.lock()
-        defer { lock.unlock() }
-        return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
-    }
-
-    private static var contentBlockerCallbackTimeout: TimeInterval {
-        let environment = ProcessInfo.processInfo.environment
-        if let rawValue = environment["SKIPWEB_CONTENT_BLOCKER_TIMEOUT"],
-           let timeout = TimeInterval(rawValue),
-           timeout > 0 {
-            return timeout
-        }
-
-        if environment["GITHUB_ACTIONS"] == "true" || environment["CI"] == "true" {
-            return 60.0
-        }
-
-        return 10.0
     }
 
     private static func hexString<D: Digest>(_ digest: D) -> String {
