@@ -12,9 +12,6 @@
     },
     "Open in New Tab" : {
       "comment" : "context menu action name for opening a url in a new tab"
-    },
-    "Share…" : {
-      "comment" : "context menu action name for sharing a URL"
     }
   },
   "version" : "1.0"

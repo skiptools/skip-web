@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LGPL-3.0-only WITH LGPL-3.0-linking-exception
+// SPDX-License-Identifier: MPL-2.0
 #if !SKIP_BRIDGE
 import SwiftUI
 import OSLog
