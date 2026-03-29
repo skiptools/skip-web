@@ -382,7 +382,7 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
         childEngine.webView.setBackgroundColor(0x000000)
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
-        childEngine.engineDelegate = WebEngineDelegate(childEngine.configuration, WebViewClient(
+        childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: self.webView.state,
             onNavigationCommitted: self.webView.onNavigationCommitted,
             onNavigationFinished: self.webView.onNavigationFinished,
@@ -472,7 +472,7 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
-        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(
+        webEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: state,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,

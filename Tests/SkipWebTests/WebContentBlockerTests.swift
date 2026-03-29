@@ -12,7 +12,7 @@ final class WebContentBlockerTests: XCTestCase {
 
     final class AllowAllRequestBlocker: AndroidRequestBlocker {
         func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
-            .allow
+            AndroidRequestBlockDecision.allow
         }
     }
 
@@ -26,6 +26,27 @@ final class WebContentBlockerTests: XCTestCase {
         func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
             rules
         }
+    }
+
+    final class StaticContentBlockingProvider: AndroidContentBlockingProvider {
+        let decision: AndroidRequestBlockDecision
+        let rules: [AndroidCosmeticRule]
+
+        init(decision: AndroidRequestBlockDecision = AndroidRequestBlockDecision.allow, rules: [AndroidCosmeticRule] = []) {
+            self.decision = decision
+            self.rules = rules
+        }
+
+        func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
+            decision
+        }
+
+        func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+            rules
+        }
+    }
+
+    final class TestNavigationDelegate: SkipWebNavigationDelegate {
     }
 
     #if !SKIP
@@ -61,25 +82,77 @@ final class WebContentBlockerTests: XCTestCase {
     func testContentBlockerConfigurationDefaults() {
         let config = WebContentBlockerConfiguration()
         XCTAssertTrue(config.iOSRuleListPaths.isEmpty)
-        XCTAssertNil(config.androidRequestBlocker)
-        XCTAssertNil(config.androidCosmeticBlocker)
+        switch config.androidMode {
+        case .disabled:
+            break
+        case .custom:
+            XCTFail("Expected Android content blocking to default to disabled mode")
+        }
+        XCTAssertNil(config.effectiveAndroidProvider)
     }
 
     // Verifies popup child configurations retain the parent's blocker settings.
-    func testPopupChildMirroredConfigurationPreservesContentBlockers() {
+    func testPopupChildMirroredConfigurationPreservesAndroidBlockingMode() {
+        let provider = StaticContentBlockingProvider(
+            decision: AndroidRequestBlockDecision.block,
+            rules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
+        )
         let contentBlockers = WebContentBlockerConfiguration(
             iOSRuleListPaths: ["/tmp/rules.json"],
-            androidRequestBlocker: AllowAllRequestBlocker(),
-            androidCosmeticBlocker: StaticCosmeticBlocker(
-                rules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
-            )
+            androidMode: .custom(provider)
         )
         let config = WebEngineConfiguration(contentBlockers: contentBlockers)
         let mirrored = config.popupChildMirroredConfiguration()
 
         XCTAssertEqual(mirrored.contentBlockers?.iOSRuleListPaths, ["/tmp/rules.json"])
-        XCTAssertNotNil(mirrored.contentBlockers?.androidRequestBlocker)
-        XCTAssertNotNil(mirrored.contentBlockers?.androidCosmeticBlocker)
+        guard case .custom(let mirroredProvider)? = mirrored.contentBlockers?.androidMode else {
+            return XCTFail("Expected mirrored popup configuration to preserve custom Android blocking mode")
+        }
+        let mirroredDecision = mirroredProvider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: URL(string: "https://example.com")!,
+                method: "GET",
+                isForMainFrame: true,
+                hasGesture: false
+            )
+        )
+        XCTAssertEqual(mirroredDecision, AndroidRequestBlockDecision.block)
+        XCTAssertEqual(mirroredProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)).count, 1)
+    }
+
+    // Verifies legacy Android blocker hooks still bridge through the compatibility provider.
+    func testLegacyAndroidHooksBridgeToCompatibilityProvider() {
+        let contentBlockers = WebContentBlockerConfiguration(
+            androidRequestBlocker: AllowAllRequestBlocker(),
+            androidCosmeticBlocker: StaticCosmeticBlocker(
+                rules: [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
+            )
+        )
+
+        guard let provider = contentBlockers.effectiveAndroidProvider else {
+            return XCTFail("Expected legacy Android hooks to produce a compatibility provider")
+        }
+        let decision = provider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: URL(string: "https://example.com")!,
+                method: "GET",
+                isForMainFrame: true,
+                hasGesture: false
+            )
+        )
+        XCTAssertEqual(decision, AndroidRequestBlockDecision.allow)
+        XCTAssertEqual(
+            provider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)),
+            [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
+        )
+    }
+
+    // Verifies popup child configurations preserve the new app-facing navigation delegate.
+    func testPopupChildMirroredConfigurationPreservesNavigationDelegate() {
+        let config = WebEngineConfiguration(navigationDelegate: TestNavigationDelegate())
+        let mirrored = config.popupChildMirroredConfiguration()
+
+        XCTAssertNotNil(mirrored.navigationDelegate)
     }
 
     // Verifies Android page context derives its host from the supplied URL by default.
@@ -123,6 +196,45 @@ final class WebContentBlockerTests: XCTestCase {
     }
 
     #if SKIP
+    // Verifies assigning the deprecated engineDelegate no longer replaces the engine-owned WebViewClient.
+    func testAndroidLegacyEngineDelegateDoesNotReplaceInternalWebViewClient() {
+        let engine = WebEngine(
+            configuration: WebEngineConfiguration(
+                contentBlockers: WebContentBlockerConfiguration(
+                    androidMode: .custom(StaticContentBlockingProvider())
+                )
+            )
+        )
+        let installedClient = engine.webView.webViewClient
+        let legacyDelegate = WebEngineDelegate(config: engine.configuration)
+
+        engine.engineDelegate = legacyDelegate
+
+        XCTAssertTrue(engine.webView.webViewClient === installedClient)
+        XCTAssertTrue(engine.engineDelegate === legacyDelegate)
+    }
+
+    // Verifies a caller-supplied Android WebViewClient is forwarded through the internal engine-owned client.
+    func testAndroidSuppliedWebViewClientIsPreservedUnderInternalClient() throws {
+        let context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        let platformWebView = PlatformWebView(context)
+        let suppliedClient = android.webkit.WebViewClient()
+        platformWebView.webViewClient = suppliedClient
+
+        let engine = WebEngine(
+            configuration: WebEngineConfiguration(
+                contentBlockers: WebContentBlockerConfiguration(
+                    androidMode: .custom(StaticContentBlockingProvider())
+                )
+            ),
+            webView: platformWebView
+        )
+        let installedClient = try XCTUnwrap(engine.webView.webViewClient as? AndroidEngineWebViewClient)
+
+        XCTAssertFalse(installedClient === suppliedClient)
+        XCTAssertTrue(installedClient.embeddedNavigationClient === suppliedClient)
+    }
+
     // Verifies redirect lookup is skipped when the Android WebView runtime does not support it.
     func testAndroidRedirectDetectionSkipsLookupWhenFeatureUnsupported() {
         var resolvedRedirect = false

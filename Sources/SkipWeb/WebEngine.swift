@@ -152,21 +152,46 @@ public enum WebProfileError: Error, Equatable {
 
 public struct WebContentBlockerConfiguration {
     public var iOSRuleListPaths: [String]
+    public var androidMode: AndroidContentBlockingMode
+    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
     public var androidRequestBlocker: (any AndroidRequestBlocker)?
+    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
     public var androidCosmeticBlocker: (any AndroidCosmeticBlocker)?
 
     public init(
         iOSRuleListPaths: [String] = [],
+        androidMode: AndroidContentBlockingMode = .disabled,
         androidRequestBlocker: (any AndroidRequestBlocker)? = nil,
         androidCosmeticBlocker: (any AndroidCosmeticBlocker)? = nil
     ) {
         self.iOSRuleListPaths = iOSRuleListPaths
+        self.androidMode = androidMode
         self.androidRequestBlocker = androidRequestBlocker
         self.androidCosmeticBlocker = androidCosmeticBlocker
     }
 }
 
-public enum AndroidRequestBlockDecision: Sendable {
+public protocol AndroidContentBlockingProvider {
+    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
+    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
+}
+
+public extension AndroidContentBlockingProvider {
+    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
+        .allow
+    }
+
+    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+        []
+    }
+}
+
+public enum AndroidContentBlockingMode {
+    case disabled
+    case custom(any AndroidContentBlockingProvider)
+}
+
+public enum AndroidRequestBlockDecision: Equatable, Sendable {
     case allow
     case block
 }
@@ -291,9 +316,76 @@ public protocol AndroidCosmeticBlocker {
     func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule]
 }
 
+public protocol SkipWebNavigationDelegate {
+    func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool
+    func webEngineDidCommitNavigation(_ engine: WebEngine)
+    func webEngineDidFinishNavigation(_ engine: WebEngine)
+    func webEngine(_ engine: WebEngine, didFailNavigation error: Error)
+}
+
+public extension SkipWebNavigationDelegate {
+    func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool {
+        false
+    }
+
+    func webEngineDidCommitNavigation(_ engine: WebEngine) {
+    }
+
+    func webEngineDidFinishNavigation(_ engine: WebEngine) {
+    }
+
+    func webEngine(_ engine: WebEngine, didFailNavigation error: Error) {
+    }
+}
+
 struct AndroidCosmeticInjectionPlan {
     var documentStartRules: [AndroidCosmeticRule] = []
     var lifecycleCSS: [String] = []
+}
+
+fileprivate struct LegacyAndroidContentBlockingProvider: AndroidContentBlockingProvider {
+    let requestBlocker: (any AndroidRequestBlocker)?
+    let cosmeticBlocker: (any AndroidCosmeticBlocker)?
+
+    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
+        requestBlocker?.decision(for: request) ?? .allow
+    }
+
+    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+        cosmeticBlocker?.cosmetics(for: page) ?? []
+    }
+}
+
+extension WebContentBlockerConfiguration {
+    var hasLegacyAndroidHooks: Bool {
+        androidRequestBlocker != nil || androidCosmeticBlocker != nil
+    }
+
+    var effectiveAndroidMode: AndroidContentBlockingMode {
+        switch androidMode {
+        case .disabled:
+            if hasLegacyAndroidHooks {
+                return .custom(
+                    LegacyAndroidContentBlockingProvider(
+                        requestBlocker: androidRequestBlocker,
+                        cosmeticBlocker: androidCosmeticBlocker
+                    )
+                )
+            }
+            return .disabled
+        case .custom:
+            return androidMode
+        }
+    }
+
+    var effectiveAndroidProvider: (any AndroidContentBlockingProvider)? {
+        switch effectiveAndroidMode {
+        case .disabled:
+            return nil
+        case .custom(let provider):
+            return provider
+        }
+    }
 }
 
 public enum WebContentBlockerError: Error, Equatable, LocalizedError {
@@ -715,6 +807,11 @@ extension WebCookie {
     private var profileSetupError: WebProfileError?
     private var androidProfileCookieManager: android.webkit.CookieManager?
     private var androidProfileWebStorage: android.webkit.WebStorage?
+    fileprivate lazy var androidContentBlockerController = AndroidContentBlockerController(config: configuration)
+    private lazy var androidInternalWebViewClient = AndroidEngineWebViewClient(engine: self)
+    private var androidEmbeddedNavigationClient: android.webkit.WebViewClient?
+    private var androidLegacyNavigationDelegate: WebEngineDelegate?
+    private var androidPendingPageLoadCallbacks: [UUID: (Result<Void, Error>) -> Void] = [:]
     #endif
 
     /// Create a WebEngine with the specified configuration.
@@ -736,6 +833,7 @@ extension WebCookie {
             self.profileSetupError = .invalidProfileName
         }
         #else
+        let suppliedAndroidWebViewClient = webView?.webViewClient
         // fall back to using the global android context if the activity context is not set in the configuration
         self.webView = webView ?? PlatformWebView(configuration.context ?? ProcessInfo.processInfo.androidContext)
         switch Self.configureAndroidProfile(configuration.profile, for: self.webView) {
@@ -746,6 +844,11 @@ extension WebCookie {
         case .failure(let error):
             self.profileSetupError = error
         }
+        if let suppliedAndroidWebViewClient,
+           !(suppliedAndroidWebViewClient is AndroidEngineWebViewClient) {
+            setAndroidEmbeddedNavigationClient(suppliedAndroidWebViewClient)
+        }
+        self.webView.webViewClient = androidInternalWebViewClient
         #endif
     }
 
@@ -754,7 +857,7 @@ extension WebCookie {
             return
         }
         #if SKIP
-        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: url)
+        prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: url)
         #endif
         webView.reload()
     }
@@ -782,7 +885,7 @@ extension WebCookie {
             return
         }
         #if SKIP
-        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
+        prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
         #endif
         webView.goBack()
     }
@@ -792,7 +895,7 @@ extension WebCookie {
             return
         }
         #if SKIP
-        prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
+        prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
         #endif
         webView.goForward()
     }
@@ -811,11 +914,11 @@ extension WebCookie {
     }
 
     #if SKIP
-    private func prepareAndroidCosmeticRulesForPendingMainFrameNavigation(targetURL: URL?) {
+    private func prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: URL?) {
         guard let targetURL else {
             return
         }
-        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: targetURL, in: webView)
+        androidContentBlockerController.prepare(for: targetURL, in: webView)
     }
 
     private func pendingHistoryNavigationURL(offset: Int) -> URL? {
@@ -838,6 +941,28 @@ extension WebCookie {
             return nil
         }
         return targetIndex
+    }
+
+    func setAndroidEmbeddedNavigationClient(_ client: android.webkit.WebViewClient?) {
+        androidEmbeddedNavigationClient = client
+        androidInternalWebViewClient.embeddedNavigationClient = client
+    }
+
+    func setAndroidLegacyNavigationDelegate(_ delegate: WebEngineDelegate?) {
+        androidLegacyNavigationDelegate = delegate
+        androidInternalWebViewClient.legacyNavigationDelegate = delegate
+    }
+
+    func completeAndroidPageLoad(_ result: Result<Void, Error>) {
+        let callbacks = androidPendingPageLoadCallbacks.values
+        androidPendingPageLoadCallbacks.removeAll()
+        for callback in callbacks {
+            callback(result)
+        }
+    }
+
+    var androidNavigationDelegate: (any SkipWebNavigationDelegate)? {
+        configuration.navigationDelegate
     }
     #endif
 
@@ -1223,7 +1348,7 @@ extension WebCookie {
         let encoding: String = "UTF-8"
         #if SKIP
         let cosmeticPageURL = baseURL ?? URL(string: "about:blank")!
-        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: cosmeticPageURL, in: webView)
+        androidContentBlockerController.prepare(for: cosmeticPageURL, in: webView)
         #endif
 
         #if SKIP
@@ -1247,7 +1372,7 @@ extension WebCookie {
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
         #if SKIP
-        (engineDelegate as? WebEngineDelegate)?.prepareAndroidCosmeticRules(for: url, in: webView)
+        androidContentBlockerController.prepare(for: url, in: webView)
         #endif
         try await awaitPageLoaded {
             #if SKIP
@@ -1768,6 +1893,20 @@ extension WebCookie {
     // SKIP @nobridge
     public func awaitPageLoaded(_ block: () -> ()) async throws {
         try throwProfileSetupErrorIfNeeded()
+        #if SKIP
+        let token = UUID()
+        defer {
+            androidPendingPageLoadCallbacks.removeValue(forKey: token)
+        }
+
+        let _: Void? = try await withCheckedThrowingContinuation { continuation in
+            androidPendingPageLoadCallbacks[token] = { result in
+                continuation.resume(with: result)
+            }
+            logger.log("WebEngine: awaitPageLoaded block()")
+            block()
+        }
+        #else
         let pdelegate = self.engineDelegate
         defer { self.engineDelegate = pdelegate }
 
@@ -1783,6 +1922,7 @@ extension WebCookie {
             logger.log("WebEngine: awaitPageLoaded block()")
             block()
         }
+        #endif
     }
     
     #if !SKIP
@@ -1866,10 +2006,11 @@ extension WebEngine: ScriptMessageHandler {
 extension WebEngine {
     /// The engine delegate that handles client navigation events like the page being loaded or an error occuring
     // SKIP @nobridge
+    @available(*, deprecated, message: "Use WebEngineConfiguration.navigationDelegate for app navigation hooks. Android installs an internal WebViewClient for blocker enforcement.")
     public var engineDelegate: WebEngineDelegate? {
         get {
             #if SKIP
-            webView.webViewClient as? WebEngineDelegate
+            androidLegacyNavigationDelegate
             #else
             webView.navigationDelegate as? WebEngineDelegate
             #endif
@@ -1877,7 +2018,7 @@ extension WebEngine {
 
         set {
             #if SKIP
-            webView.webViewClient = newValue ?? webView.webViewClient
+            setAndroidLegacyNavigationDelegate(newValue)
             #else
             webView.navigationDelegate = newValue
             #endif
@@ -1888,109 +2029,100 @@ extension WebEngine {
 
 
 #if SKIP
-// SKIP @nobridge
-public class WebEngineDelegate : android.webkit.WebViewClient {
+final class AndroidContentBlockerController {
     let config: WebEngineConfiguration
-    let webViewClient: android.webkit.WebViewClient
     private var androidCosmeticScriptHandlers: [ScriptHandler] = []
     private var androidLifecycleCosmeticCSS: [String] = []
     private var androidPreparedCosmeticPageURL: String?
-    
-    override init(config: WebEngineConfiguration, webViewClient: android.webkit.WebViewClient = android.webkit.WebViewClient()) {
-        super.init()
+
+    init(config: WebEngineConfiguration) {
         self.config = config
-        self.webViewClient = webViewClient
     }
 
-    /// Notify the host application to update its visited links database.
-    override func doUpdateVisitedHistory(view: PlatformWebView, url: String, isReload: Bool) {
-        logger.log("application")
-        webViewClient.doUpdateVisitedHistory(view, url, isReload)
+    private var provider: (any AndroidContentBlockingProvider)? {
+        config.contentBlockers?.effectiveAndroidProvider
     }
 
-    /// As the host application if the browser should resend data as the requested page was a result of a POST.
-    override func onFormResubmission(view: PlatformWebView, dontResend: android.os.Message, resend: android.os.Message) {
-        logger.log("onFormResubmission")
-        webViewClient.onFormResubmission(view, dontResend, resend)
-    }
+    func prepare(for pageURL: URL, in view: PlatformWebView) {
+        removeAllAndroidCosmeticScriptHandlers()
+        let plan = androidCosmeticPlan(for: pageURL)
+        androidLifecycleCosmeticCSS = plan.lifecycleCSS
 
-    /// Notify the host application that the WebView will load the resource specified by the given url.
-    override func onLoadResource(view: PlatformWebView, url: String) {
-        logger.log("onLoadResource: \(url)")
-        webViewClient.onLoadResource(view, url)
-    }
-
-    /// Notify the host application that WebView content left over from previous page navigations will no longer be drawn.
-    override func onPageCommitVisible(view: PlatformWebView, url: String) {
-        logger.log("onPageCommitVisible: \(url)")
-        recoverAndroidCosmeticsIfNeeded(for: url)
-        injectAndroidContentBlockerCSSIfNeeded(into: view)
-        webViewClient.onPageCommitVisible(view, url)
-    }
-
-    /// Notify the host application that a page has finished loading.
-    override func onPageFinished(view: PlatformWebView, url: String) {
-        logger.log("onPageFinished: \(url)")
-        recoverAndroidCosmeticsIfNeeded(for: url)
-        injectAndroidContentBlockerCSSIfNeeded(into: view)
-        for userScript in config.userScripts {
-            if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
-                let source = userScript.webKitUserScript.source
-                view.evaluateJavascript(source) { _ in
-                    logger.debug("Executed user script \(source)")
+        if WebEngine.isAndroidDocumentStartScriptSupported() {
+            for (index, rule) in plan.documentStartRules.enumerated() {
+                if let handler = registerAndroidDocumentStartCosmeticRule(rule, index: index, for: pageURL, in: view) {
+                    androidCosmeticScriptHandlers.append(handler)
                 }
             }
         }
-        webViewClient.onPageFinished(view, url)
+
+        androidPreparedCosmeticPageURL = pageURL.absoluteString
     }
 
-    /// Notify the host application that a page has started loading.
-    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
-        logger.log("onPageStarted: \(url)")
-        recoverAndroidCosmeticsIfNeeded(for: url)
-        if (!config.messageHandlers.isEmpty) {
-            // add support for webkit.messageHandlers.messageHandlerName.postMessage(body)
-            // JS Proxies are pretty weird. https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
-            // We're using an empty target; when JS accesses any property,
-            // we'll return a JS object with a `postMessage` member function, which will call
-            // skipWebAndroidMessageHandler.postMessage, passing the messageHandlerName and body as strings.
-            view.evaluateJavascript("""
-            if (!window.webkit) window.webkit = {};
-            webkit.messageHandlers = new Proxy({}, {
-                get: (target, messageHandlerName, receiver) => ({
-                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), JSON.stringify(body))
-                })
-            });
-        """) { _ in logger.debug("Added webkit.messageHandlers") }
+    func recoverIfNeeded(for url: String) {
+        guard androidPreparedCosmeticPageURL != url else {
+            return
         }
-        for userScript in config.userScripts {
-            if userScript.webKitUserScript.injectionTime == .atDocumentStart {
-                let source = userScript.webKitUserScript.source
-                view.evaluateJavascript(source) { _ in
-                    logger.debug("Executed user script \(source)")
-                }
-            }
+        guard let pageURL = URL(string: url) else {
+            removeAllAndroidCosmeticScriptHandlers()
+            androidLifecycleCosmeticCSS = []
+            androidPreparedCosmeticPageURL = nil
+            return
         }
-        injectAndroidContentBlockerCSSIfNeeded(into: view)
-        webViewClient.onPageStarted(view, url, favicon)
+
+        if androidPreparedCosmeticPageURL != nil {
+            logger.info("Falling back to late Android cosmetic injection for \(pageURL.absoluteString)")
+        }
+        removeAllAndroidCosmeticScriptHandlers()
+        let fallbackPlan = fallbackAndroidCosmeticPlan(for: pageURL)
+        androidLifecycleCosmeticCSS = fallbackPlan.lifecycleCSS
+        androidPreparedCosmeticPageURL = pageURL.absoluteString
     }
 
-    /// Notify the host application to handle a SSL client certificate request.
-    override func onReceivedClientCertRequest(view: PlatformWebView, request: android.webkit.ClientCertRequest) {
-        logger.log("onReceivedClientCertRequest: \(request)")
-        webViewClient.onReceivedClientCertRequest(view, request)
+    func injectIfNeeded(into view: PlatformWebView) {
+        guard let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
+            cssRules: androidLifecycleCosmeticCSS,
+            styleID: "__skipweb_content_blockers",
+            frameScope: .mainFrameOnly
+        ) else {
+            clearCSS(in: view)
+            return
+        }
+
+        view.evaluateJavascript(injectionScript) { _ in
+            logger.debug("Injected Android content blocker CSS")
+        }
     }
 
-    /// Report web resource loading error to the host application.
-    override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
-        logger.log("onReceivedError: \(error)")
-        webViewClient.onReceivedError(view, request, error)
-    }
-
-    /// Notifies the host application that the WebView received an HTTP authentication request.
-    override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
-        logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
-        webViewClient.onReceivedHttpAuthRequest(view, handler, host, realm)
+    func intercept(_ request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
+        guard let provider, let requestURL = URL(string: request.url.toString()) else {
+            return nil
+        }
+        let headers = WebEngine.androidRequestHeaders(from: request)
+        let decision = provider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: requestURL,
+                mainDocumentURL: WebEngine.androidMainDocumentURL(
+                    for: request,
+                    requestURL: requestURL,
+                    headers: headers
+                ),
+                method: request.method,
+                headers: headers,
+                isForMainFrame: request.isForMainFrame,
+                hasGesture: request.hasGesture(),
+                isRedirect: WebEngine.androidRequestIsRedirect(request),
+                resourceTypeHint: WebEngine.androidResourceTypeHint(
+                    for: request,
+                    requestURL: requestURL,
+                    headers: headers
+                )
+            )
+        )
+        if case .block = decision {
+            return WebEngine.blockedAndroidResponse()
+        }
+        return nil
     }
 
     private func removeAllAndroidCosmeticScriptHandlers() {
@@ -2001,11 +2133,11 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 
     private func androidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
-        guard let blocker = config.contentBlockers?.androidCosmeticBlocker else {
+        guard let provider else {
             return AndroidCosmeticInjectionPlan()
         }
         return WebEngine.androidCosmeticInjectionPlan(
-            rules: blocker.cosmetics(for: AndroidPageContext(url: pageURL)),
+            rules: provider.cosmeticRules(for: AndroidPageContext(url: pageURL)),
             pageURL: pageURL,
             isDocumentStartSupported: WebEngine.isAndroidDocumentStartScriptSupported()
         ) { message in
@@ -2014,11 +2146,11 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
     }
 
     private func fallbackAndroidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
-        guard let blocker = config.contentBlockers?.androidCosmeticBlocker else {
+        guard let provider else {
             return AndroidCosmeticInjectionPlan()
         }
         return WebEngine.androidRedirectFallbackCosmeticPlan(
-            rules: blocker.cosmetics(for: AndroidPageContext(url: pageURL)),
+            rules: provider.cosmeticRules(for: AndroidPageContext(url: pageURL)),
             pageURL: pageURL
         ) { message in
             logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
@@ -2053,155 +2185,288 @@ public class WebEngineDelegate : android.webkit.WebViewClient {
         return WebViewCompat.addDocumentStartJavaScript(view, script, allowedOriginRules)
     }
 
-    fileprivate func prepareAndroidCosmeticRules(for pageURL: URL, in view: PlatformWebView) {
-        removeAllAndroidCosmeticScriptHandlers()
-        let plan = androidCosmeticPlan(for: pageURL)
-        androidLifecycleCosmeticCSS = plan.lifecycleCSS
-
-        if WebEngine.isAndroidDocumentStartScriptSupported() {
-            for (index, rule) in plan.documentStartRules.enumerated() {
-                if let handler = registerAndroidDocumentStartCosmeticRule(rule, index: index, for: pageURL, in: view) {
-                    androidCosmeticScriptHandlers.append(handler)
-                }
-            }
-        }
-
-        androidPreparedCosmeticPageURL = pageURL.absoluteString
-    }
-
-    private func recoverAndroidCosmeticsIfNeeded(for url: String) {
-        guard androidPreparedCosmeticPageURL != url else {
-            return
-        }
-        guard let pageURL = URL(string: url) else {
-            removeAllAndroidCosmeticScriptHandlers()
-            androidLifecycleCosmeticCSS = []
-            androidPreparedCosmeticPageURL = nil
-            return
-        }
-
-        if androidPreparedCosmeticPageURL != nil {
-            logger.info("Falling back to late Android cosmetic injection for \(pageURL.absoluteString)")
-        }
-        removeAllAndroidCosmeticScriptHandlers()
-        let fallbackPlan = fallbackAndroidCosmeticPlan(for: pageURL)
-        androidLifecycleCosmeticCSS = fallbackPlan.lifecycleCSS
-        androidPreparedCosmeticPageURL = pageURL.absoluteString
-    }
-
-    private func clearAndroidContentBlockerCSS(in view: PlatformWebView) {
+    private func clearCSS(in view: PlatformWebView) {
         let removalScript = WebEngine.androidContentBlockerStyleRemovalScript(styleID: "__skipweb_content_blockers")
         view.evaluateJavascript(removalScript) { _ in
             logger.debug("Cleared Android content blocker CSS")
         }
     }
+}
 
-    private func injectAndroidContentBlockerCSSIfNeeded(into view: PlatformWebView) {
-        guard let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
-            cssRules: androidLifecycleCosmeticCSS,
-            styleID: "__skipweb_content_blockers",
-            frameScope: .mainFrameOnly
-        ) else {
-            clearAndroidContentBlockerCSS(in: view)
-            return
-        }
+final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
+    weak var engine: WebEngine?
+    var embeddedNavigationClient: android.webkit.WebViewClient?
+    var legacyNavigationDelegate: WebEngineDelegate?
 
-        view.evaluateJavascript(injectionScript) { _ in
-            logger.debug("Injected Android content blocker CSS")
-        }
+    init(engine: WebEngine) {
+        self.engine = engine
+        super.init()
     }
 
-    /// Notify the host application that an HTTP error has been received from the server while loading a resource.
+    private var config: WebEngineConfiguration? {
+        engine?.configuration
+    }
+
+    override func doUpdateVisitedHistory(view: PlatformWebView, url: String, isReload: Bool) {
+        logger.log("application")
+        embeddedNavigationClient?.doUpdateVisitedHistory(view, url, isReload)
+        legacyNavigationDelegate?.doUpdateVisitedHistory(view, url, isReload)
+    }
+
+    override func onFormResubmission(view: PlatformWebView, dontResend: android.os.Message, resend: android.os.Message) {
+        logger.log("onFormResubmission")
+        embeddedNavigationClient?.onFormResubmission(view, dontResend, resend)
+        legacyNavigationDelegate?.onFormResubmission(view, dontResend, resend)
+    }
+
+    override func onLoadResource(view: PlatformWebView, url: String) {
+        logger.log("onLoadResource: \(url)")
+        embeddedNavigationClient?.onLoadResource(view, url)
+        legacyNavigationDelegate?.onLoadResource(view, url)
+    }
+
+    override func onPageCommitVisible(view: PlatformWebView, url: String) {
+        logger.log("onPageCommitVisible: \(url)")
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        engine?.androidContentBlockerController.injectIfNeeded(into: view)
+        embeddedNavigationClient?.onPageCommitVisible(view, url)
+        legacyNavigationDelegate?.onPageCommitVisible(view, url)
+    }
+
+    override func onPageFinished(view: PlatformWebView, url: String) {
+        logger.log("onPageFinished: \(url)")
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        engine?.androidContentBlockerController.injectIfNeeded(into: view)
+        for userScript in config?.userScripts ?? [] {
+            if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
+        }
+        embeddedNavigationClient?.onPageFinished(view, url)
+        if let engine {
+            engine.androidNavigationDelegate?.webEngineDidFinishNavigation(engine)
+        }
+        legacyNavigationDelegate?.onPageFinished(view, url)
+        engine?.completeAndroidPageLoad(.success(()))
+    }
+
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        logger.log("onPageStarted: \(url)")
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        if !(config?.messageHandlers.isEmpty ?? true) {
+            view.evaluateJavascript("""
+            if (!window.webkit) window.webkit = {};
+            webkit.messageHandlers = new Proxy({}, {
+                get: (target, messageHandlerName, receiver) => ({
+                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), JSON.stringify(body))
+                })
+            });
+        """) { _ in logger.debug("Added webkit.messageHandlers") }
+        }
+        for userScript in config?.userScripts ?? [] {
+            if userScript.webKitUserScript.injectionTime == .atDocumentStart {
+                let source = userScript.webKitUserScript.source
+                view.evaluateJavascript(source) { _ in
+                    logger.debug("Executed user script \(source)")
+                }
+            }
+        }
+        engine?.androidContentBlockerController.injectIfNeeded(into: view)
+        embeddedNavigationClient?.onPageStarted(view, url, favicon)
+        if let engine {
+            engine.androidNavigationDelegate?.webEngineDidCommitNavigation(engine)
+        }
+        legacyNavigationDelegate?.onPageStarted(view, url, favicon)
+    }
+
+    override func onReceivedClientCertRequest(view: PlatformWebView, request: android.webkit.ClientCertRequest) {
+        logger.log("onReceivedClientCertRequest: \(request)")
+        embeddedNavigationClient?.onReceivedClientCertRequest(view, request)
+        legacyNavigationDelegate?.onReceivedClientCertRequest(view, request)
+    }
+
+    override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
+        logger.log("onReceivedError: \(error)")
+        embeddedNavigationClient?.onReceivedError(view, request, error)
+        let loadError = WebLoadError(msg: String(error.description), code: error.errorCode)
+        if let engine {
+            engine.androidNavigationDelegate?.webEngine(engine, didFailNavigation: loadError)
+        }
+        legacyNavigationDelegate?.onReceivedError(view, request, error)
+        engine?.completeAndroidPageLoad(.failure(loadError))
+    }
+
+    override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
+        logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
+        embeddedNavigationClient?.onReceivedHttpAuthRequest(view, handler, host, realm)
+        legacyNavigationDelegate?.onReceivedHttpAuthRequest(view, handler, host, realm)
+    }
+
     override func onReceivedHttpError(view: PlatformWebView, request: android.webkit.WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
         logger.log("onReceivedHttpError: \(request) \(errorResponse)")
-        webViewClient.onReceivedHttpError(view, request, errorResponse)
+        embeddedNavigationClient?.onReceivedHttpError(view, request, errorResponse)
+        legacyNavigationDelegate?.onReceivedHttpError(view, request, errorResponse)
     }
 
-    /// Notify the host application that a request to automatically log in the user has been processed.
-//    override func onReceivedLoginRequest(view: PlatformWebView, realm: String, account: String, args: String) {
-//        webViewClient.onReceivedLoginRequest(view, realm, account, args)
-//    }
-
-    /// Notifies the host application that an SSL error occurred while loading a resource.
     override func onReceivedSslError(view: PlatformWebView, handler: android.webkit.SslErrorHandler, error: android.net.http.SslError) {
         logger.log("onReceivedSslError: \(error)")
-        webViewClient.onReceivedSslError(view, handler, error)
+        embeddedNavigationClient?.onReceivedSslError(view, handler, error)
+        legacyNavigationDelegate?.onReceivedSslError(view, handler, error)
     }
 
-    /// Notify host application that the given WebView's render process has exited.
     override func onRenderProcessGone(view: PlatformWebView, detail: android.webkit.RenderProcessGoneDetail) -> Bool {
         logger.log("onRenderProcessGone: \(detail)")
-        return webViewClient.onRenderProcessGone(view, detail)
+        let embeddedHandled = embeddedNavigationClient?.onRenderProcessGone(view, detail) ?? false
+        let legacyHandled = legacyNavigationDelegate?.onRenderProcessGone(view, detail) ?? false
+        return embeddedHandled || legacyHandled
     }
 
-    /// Notify the host application that a loading URL has been flagged by Safe Browsing.
     override func onSafeBrowsingHit(view: PlatformWebView, request: android.webkit.WebResourceRequest, threatType: Int, callback: android.webkit.SafeBrowsingResponse) {
         logger.log("onSafeBrowsingHit: \(request)")
-        webViewClient.onSafeBrowsingHit(view, request, threatType, callback)
+        embeddedNavigationClient?.onSafeBrowsingHit(view, request, threatType, callback)
+        legacyNavigationDelegate?.onSafeBrowsingHit(view, request, threatType, callback)
     }
 
-    /// Notify the host application that the scale applied to the WebView has changed.
     override func onScaleChanged(view: PlatformWebView, oldScale: Float, newScale: Float) {
         logger.log("onScaleChanged: \(oldScale) \(newScale)")
-        webViewClient.onScaleChanged(view, oldScale, newScale)
+        embeddedNavigationClient?.onScaleChanged(view, oldScale, newScale)
+        legacyNavigationDelegate?.onScaleChanged(view, oldScale, newScale)
     }
 
-    /// Notify the host application that a key was not handled by the WebView.
     override func onUnhandledKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) {
         logger.log("onUnhandledKeyEvent: \(event)")
-        webViewClient.onUnhandledKeyEvent(view, event)
+        embeddedNavigationClient?.onUnhandledKeyEvent(view, event)
+        legacyNavigationDelegate?.onUnhandledKeyEvent(view, event)
     }
 
-    /// Notify the host application of a resource request and allow the application to return the data.
     public override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
         logger.log("shouldInterceptRequest: \(request.url)")
         let scheme: String = request.url?.scheme ?? ""
-        if let handler = config.schemeHandlers[scheme] {
+        if let handler = config?.schemeHandlers[scheme] {
             return handler.interceptRequest(view: view, request: request)
         }
-        if let blocker = config.contentBlockers?.androidRequestBlocker,
-           let requestURL = URL(string: request.url.toString()) {
-            let headers = WebEngine.androidRequestHeaders(from: request)
-            let decision = blocker.decision(
-                for: AndroidBlockableRequest(
-                    url: requestURL,
-                    mainDocumentURL: WebEngine.androidMainDocumentURL(
-                        for: request,
-                        requestURL: requestURL,
-                        headers: headers
-                    ),
-                    method: request.method,
-                    headers: headers,
-                    isForMainFrame: request.isForMainFrame,
-                    hasGesture: request.hasGesture(),
-                    isRedirect: WebEngine.androidRequestIsRedirect(request),
-                    resourceTypeHint: WebEngine.androidResourceTypeHint(
-                        for: request,
-                        requestURL: requestURL,
-                        headers: headers
-                    )
-                )
-            )
-            if case .block = decision {
-                return WebEngine.blockedAndroidResponse()
-            }
+        if let response = engine?.androidContentBlockerController.intercept(request) {
+            return response
         }
-        return webViewClient.shouldInterceptRequest(view, request)
+        if let response = legacyNavigationDelegate?.shouldInterceptRequest(view, request) {
+            return response
+        }
+        return embeddedNavigationClient?.shouldInterceptRequest(view, request)
     }
 
-    /// Give the host application a chance to handle the key event synchronously.
     override func shouldOverrideKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) -> Bool {
         logger.log("shouldOverrideKeyEvent: \(event)")
-        return webViewClient.shouldOverrideKeyEvent(view, event)
+        if embeddedNavigationClient?.shouldOverrideKeyEvent(view, event) == true {
+            return true
+        }
+        if legacyNavigationDelegate?.shouldOverrideKeyEvent(view, event) == true {
+            return true
+        }
+        return false
     }
 
-    /// Give the host application a chance to take control when a URL is about to be loaded in the current WebView.
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
         logger.log("shouldOverrideUrlLoading: \(request.url)")
-        if request.isForMainFrame, let url = URL(string: request.url.toString()) {
-            prepareAndroidCosmeticRules(for: url, in: view)
+        let mainFrameURL = request.isForMainFrame ? URL(string: request.url.toString()) : nil
+        if let engine, let url = mainFrameURL {
+            engine.androidContentBlockerController.prepare(for: url, in: view)
         }
-        return webViewClient.shouldOverrideUrlLoading(view, request)
+        if embeddedNavigationClient?.shouldOverrideUrlLoading(view, request) == true {
+            return true
+        }
+        if let engine, let url = mainFrameURL {
+            if engine.androidNavigationDelegate?.webEngine(engine, shouldOverrideURLLoading: url) == true {
+                return true
+            }
+        }
+        return legacyNavigationDelegate?.shouldOverrideUrlLoading(view, request) ?? false
+    }
+}
+
+// SKIP @nobridge
+public class WebEngineDelegate : android.webkit.WebViewClient {
+    let config: WebEngineConfiguration
+    let webViewClient: android.webkit.WebViewClient
+
+    override init(config: WebEngineConfiguration, webViewClient: android.webkit.WebViewClient = android.webkit.WebViewClient()) {
+        super.init()
+        self.config = config
+        self.webViewClient = webViewClient
+    }
+
+    override func doUpdateVisitedHistory(view: PlatformWebView, url: String, isReload: Bool) {
+        webViewClient.doUpdateVisitedHistory(view, url, isReload)
+    }
+
+    override func onFormResubmission(view: PlatformWebView, dontResend: android.os.Message, resend: android.os.Message) {
+        webViewClient.onFormResubmission(view, dontResend, resend)
+    }
+
+    override func onLoadResource(view: PlatformWebView, url: String) {
+        webViewClient.onLoadResource(view, url)
+    }
+
+    override func onPageCommitVisible(view: PlatformWebView, url: String) {
+        webViewClient.onPageCommitVisible(view, url)
+    }
+
+    override func onPageFinished(view: PlatformWebView, url: String) {
+        webViewClient.onPageFinished(view, url)
+    }
+
+    override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        webViewClient.onPageStarted(view, url, favicon)
+    }
+
+    override func onReceivedClientCertRequest(view: PlatformWebView, request: android.webkit.ClientCertRequest) {
+        webViewClient.onReceivedClientCertRequest(view, request)
+    }
+
+    override func onReceivedError(view: PlatformWebView, request: android.webkit.WebResourceRequest, error: android.webkit.WebResourceError) {
+        webViewClient.onReceivedError(view, request, error)
+    }
+
+    override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
+        webViewClient.onReceivedHttpAuthRequest(view, handler, host, realm)
+    }
+
+    override func onReceivedHttpError(view: PlatformWebView, request: android.webkit.WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
+        webViewClient.onReceivedHttpError(view, request, errorResponse)
+    }
+
+    override func onReceivedSslError(view: PlatformWebView, handler: android.webkit.SslErrorHandler, error: android.net.http.SslError) {
+        webViewClient.onReceivedSslError(view, handler, error)
+    }
+
+    override func onRenderProcessGone(view: PlatformWebView, detail: android.webkit.RenderProcessGoneDetail) -> Bool {
+        webViewClient.onRenderProcessGone(view, detail)
+    }
+
+    override func onSafeBrowsingHit(view: PlatformWebView, request: android.webkit.WebResourceRequest, threatType: Int, callback: android.webkit.SafeBrowsingResponse) {
+        webViewClient.onSafeBrowsingHit(view, request, threatType, callback)
+    }
+
+    override func onScaleChanged(view: PlatformWebView, oldScale: Float, newScale: Float) {
+        webViewClient.onScaleChanged(view, oldScale, newScale)
+    }
+
+    override func onUnhandledKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) {
+        webViewClient.onUnhandledKeyEvent(view, event)
+    }
+
+    public override func shouldInterceptRequest(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
+        webViewClient.shouldInterceptRequest(view, request)
+    }
+
+    override func shouldOverrideKeyEvent(view: PlatformWebView, event: android.view.KeyEvent) -> Bool {
+        webViewClient.shouldOverrideKeyEvent(view, event)
+    }
+
+    override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
+        webViewClient.shouldOverrideUrlLoading(view, request)
     }
 }
 #else
@@ -2494,6 +2759,7 @@ public extension SkipWebUIDelegate {
     public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
     public var schemeHandlers: [String: URLSchemeHandler]
     public var uiDelegate: (any SkipWebUIDelegate)?
+    public var navigationDelegate: (any SkipWebNavigationDelegate)?
     public var contentBlockers: WebContentBlockerConfiguration?
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
 
@@ -2517,6 +2783,7 @@ public extension SkipWebUIDelegate {
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
                 schemeHandlers: [String: URLSchemeHandler] = [:],
                 uiDelegate: (any SkipWebUIDelegate)? = nil,
+                navigationDelegate: (any SkipWebNavigationDelegate)? = nil,
                 contentBlockers: WebContentBlockerConfiguration? = nil) {
         self.javaScriptEnabled = javaScriptEnabled
         self.javaScriptCanOpenWindowsAutomatically = javaScriptCanOpenWindowsAutomatically
@@ -2533,6 +2800,7 @@ public extension SkipWebUIDelegate {
         self.messageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
         self.uiDelegate = uiDelegate
+        self.navigationDelegate = navigationDelegate
         self.contentBlockers = contentBlockers
     }
 
@@ -2553,6 +2821,7 @@ public extension SkipWebUIDelegate {
             messageHandlers: messageHandlers,
             schemeHandlers: schemeHandlers,
             uiDelegate: uiDelegate,
+            navigationDelegate: navigationDelegate,
             contentBlockers: contentBlockers
         )
         #if SKIP
@@ -2923,20 +3192,36 @@ fileprivate enum WebContentBlockerStore {
         description: String,
         operation: (@escaping (T?, Error?) -> Void) -> Void
     ) -> Result<T?, Error> {
+        let lock = NSLock()
+        let semaphore = DispatchSemaphore(value: 0)
         var result: Result<T?, Error>?
         operation { value, error in
+            let callbackResult: Result<T?, Error>
             if let error {
-                result = .failure(error)
+                callbackResult = .failure(error)
             } else {
-                result = .success(value)
+                callbackResult = .success(value)
             }
+            lock.lock()
+            result = callbackResult
+            lock.unlock()
+            semaphore.signal()
         }
 
-        let deadline = Date().addingTimeInterval(10.0)
-        while result == nil && deadline.timeIntervalSinceNow > 0 {
+        let deadline = Date().addingTimeInterval(contentBlockerCallbackTimeout)
+        while deadline.timeIntervalSinceNow > 0 {
+            if semaphore.wait(timeout: .now()) == .success {
+                lock.lock()
+                defer { lock.unlock() }
+                return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
+            }
+
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.01))
         }
 
+        lock.lock()
+        defer { lock.unlock() }
         return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
     }
 
@@ -2944,21 +3229,52 @@ fileprivate enum WebContentBlockerStore {
         description: String,
         operation: (@escaping (Error?) -> Void) -> Void
     ) -> Result<Void, Error> {
+        let lock = NSLock()
+        let semaphore = DispatchSemaphore(value: 0)
         var result: Result<Void, Error>?
         operation { error in
+            let callbackResult: Result<Void, Error>
             if let error {
-                result = .failure(error)
+                callbackResult = .failure(error)
             } else {
-                result = .success(())
+                callbackResult = .success(())
             }
+            lock.lock()
+            result = callbackResult
+            lock.unlock()
+            semaphore.signal()
         }
 
-        let deadline = Date().addingTimeInterval(10.0)
-        while result == nil && deadline.timeIntervalSinceNow > 0 {
+        let deadline = Date().addingTimeInterval(contentBlockerCallbackTimeout)
+        while deadline.timeIntervalSinceNow > 0 {
+            if semaphore.wait(timeout: .now()) == .success {
+                lock.lock()
+                defer { lock.unlock() }
+                return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
+            }
+
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+            RunLoop.current.run(mode: .common, before: Date().addingTimeInterval(0.01))
         }
 
+        lock.lock()
+        defer { lock.unlock() }
         return result ?? .failure(WebContentBlockerError.operationTimedOut(description))
+    }
+
+    private static var contentBlockerCallbackTimeout: TimeInterval {
+        let environment = ProcessInfo.processInfo.environment
+        if let rawValue = environment["SKIPWEB_CONTENT_BLOCKER_TIMEOUT"],
+           let timeout = TimeInterval(rawValue),
+           timeout > 0 {
+            return timeout
+        }
+
+        if environment["GITHUB_ACTIONS"] == "true" || environment["CI"] == "true" {
+            return 60.0
+        }
+
+        return 10.0
     }
 
     private static func hexString<D: Digest>(_ digest: D) -> String {
