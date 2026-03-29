@@ -57,6 +57,16 @@ final class WebContentBlockerTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
     }
 
+    @MainActor
+    func contentBlockerFixtureDirectory(from testDirectory: URL) -> URL {
+        testDirectory.appendingPathComponent("fixtures", isDirectory: true)
+    }
+
+    @MainActor
+    func contentBlockerStoreDirectory(from testDirectory: URL) -> URL {
+        testDirectory.appendingPathComponent("store", isDirectory: true)
+    }
+
     func writeContentBlockerRuleFile(at url: URL, contents: String) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try contents.write(to: url, atomically: true, encoding: .utf8)
@@ -490,11 +500,13 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies iOS rule lists compile once and are reused from the persistent cache on subsequent loads.
     @MainActor
     func testIOSContentBlockerRuleListsCompileAndReusePersistentCache() async throws {
-        let baseDirectory = contentBlockerTestDirectory()
-        let ruleFile = baseDirectory.appendingPathComponent("rules.json")
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
 
-        WebContentBlockerDebug.setBaseDirectoryOverride(baseDirectory)
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
         defer {
             try? WebContentBlockerDebug.clearPersistentState()
             WebContentBlockerDebug.setBaseDirectoryOverride(nil)
@@ -523,11 +535,13 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies caller-supplied WKWebView instances receive configured blocker rule lists.
     @MainActor
     func testIOSContentBlockersInstallIntoSuppliedWKWebView() async throws {
-        let baseDirectory = contentBlockerTestDirectory()
-        let ruleFile = baseDirectory.appendingPathComponent("rules.json")
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
 
-        WebContentBlockerDebug.setBaseDirectoryOverride(baseDirectory)
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
         defer {
             try? WebContentBlockerDebug.clearPersistentState()
             WebContentBlockerDebug.setBaseDirectoryOverride(nil)
@@ -550,11 +564,13 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies changing an iOS rule file invalidates the previous compiled identifier and prunes it.
     @MainActor
     func testIOSContentBlockerRuleListChangesInvalidateCachedIdentifier() async throws {
-        let baseDirectory = contentBlockerTestDirectory()
-        let ruleFile = baseDirectory.appendingPathComponent("rules.json")
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
         try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules(filter: ".*ads-v1.*"))
 
-        WebContentBlockerDebug.setBaseDirectoryOverride(baseDirectory)
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
         defer {
             try? WebContentBlockerDebug.clearPersistentState()
             WebContentBlockerDebug.setBaseDirectoryOverride(nil)
@@ -584,13 +600,15 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies removing a rule file from configuration prunes its stale cached identifier.
     @MainActor
     func testIOSContentBlockerRemovingRuleFilePrunesStaleIdentifier() async throws {
-        let baseDirectory = contentBlockerTestDirectory()
-        let firstRuleFile = baseDirectory.appendingPathComponent("rules-1.json")
-        let secondRuleFile = baseDirectory.appendingPathComponent("rules-2.json")
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let firstRuleFile = fixtureDirectory.appendingPathComponent("rules-1.json")
+        let secondRuleFile = fixtureDirectory.appendingPathComponent("rules-2.json")
         try writeContentBlockerRuleFile(at: firstRuleFile, contents: validContentBlockerRules(filter: ".*ads-one.*"))
         try writeContentBlockerRuleFile(at: secondRuleFile, contents: validContentBlockerRules(filter: ".*ads-two.*"))
 
-        WebContentBlockerDebug.setBaseDirectoryOverride(baseDirectory)
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
         defer {
             try? WebContentBlockerDebug.clearPersistentState()
             WebContentBlockerDebug.setBaseDirectoryOverride(nil)
@@ -604,6 +622,10 @@ final class WebContentBlockerTests: XCTestCase {
         _ = await initialConfig.makeWebViewConfiguration()
         let compiledIdentifiers = WebContentBlockerDebug.diagnostics.compiledIdentifiers
         XCTAssertEqual(compiledIdentifiers.count, 2)
+      
+        guard compiledIdentifiers.count >= 2 else {
+          return
+        }
         let removedIdentifier = compiledIdentifiers[1]
 
         WebContentBlockerDebug.resetDiagnostics()
@@ -620,11 +642,13 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies invalid iOS rule files surface setup errors without aborting configuration creation.
     @MainActor
     func testIOSContentBlockerSetupErrorsAreRecordedWithoutFailingConfiguration() async throws {
-        let baseDirectory = contentBlockerTestDirectory()
-        let invalidRuleFile = baseDirectory.appendingPathComponent("invalid-rules.json")
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let invalidRuleFile = fixtureDirectory.appendingPathComponent("invalid-rules.json")
         try writeContentBlockerRuleFile(at: invalidRuleFile, contents: "[{\"trigger\":{},\"action\":{\"type\":\"block\"}}]")
 
-        WebContentBlockerDebug.setBaseDirectoryOverride(baseDirectory)
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
         defer {
             try? WebContentBlockerDebug.clearPersistentState()
             WebContentBlockerDebug.setBaseDirectoryOverride(nil)
