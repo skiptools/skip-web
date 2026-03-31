@@ -152,6 +152,7 @@ public enum WebProfileError: Error, Equatable {
 
 public struct WebContentBlockerConfiguration {
     public var iOSRuleListPaths: [String]
+    public var whitelistedDomains: [String]
     public var androidMode: AndroidContentBlockingMode
     @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
     public var androidRequestBlocker: (any AndroidRequestBlocker)?
@@ -160,11 +161,13 @@ public struct WebContentBlockerConfiguration {
 
     public init(
         iOSRuleListPaths: [String] = [],
+        whitelistedDomains: [String] = [],
         androidMode: AndroidContentBlockingMode = .disabled,
         androidRequestBlocker: (any AndroidRequestBlocker)? = nil,
         androidCosmeticBlocker: (any AndroidCosmeticBlocker)? = nil
     ) {
         self.iOSRuleListPaths = iOSRuleListPaths
+        self.whitelistedDomains = whitelistedDomains
         self.androidMode = androidMode
         self.androidRequestBlocker = androidRequestBlocker
         self.androidCosmeticBlocker = androidCosmeticBlocker
@@ -356,25 +359,75 @@ fileprivate struct LegacyAndroidContentBlockingProvider: AndroidContentBlockingP
     }
 }
 
+fileprivate struct WhitelistedAndroidContentBlockingProvider: AndroidContentBlockingProvider {
+    let provider: any AndroidContentBlockingProvider
+    let whitelistedDomains: [String]
+
+    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
+        if isWhitelisted(request: request) {
+            return .allow
+        }
+        return provider.requestDecision(for: request)
+    }
+
+    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+        if WebContentBlockerConfiguration.matchesWhitelistedDomain(page.host, in: whitelistedDomains) {
+            return []
+        }
+        return provider.cosmeticRules(for: page)
+    }
+
+    private func isWhitelisted(request: AndroidBlockableRequest) -> Bool {
+        if WebContentBlockerConfiguration.matchesWhitelistedURL(request.mainDocumentURL, in: whitelistedDomains) {
+            return true
+        }
+        if request.isForMainFrame {
+            return WebContentBlockerConfiguration.matchesWhitelistedURL(request.url, in: whitelistedDomains)
+        }
+        return false
+    }
+}
+
 extension WebContentBlockerConfiguration {
+    var normalizedWhitelistedDomains: [String] {
+        Self.normalizedWhitelistedDomains(from: whitelistedDomains)
+    }
+
     var hasLegacyAndroidHooks: Bool {
         androidRequestBlocker != nil || androidCosmeticBlocker != nil
     }
 
     var effectiveAndroidMode: AndroidContentBlockingMode {
+        let baseMode: AndroidContentBlockingMode
         switch androidMode {
         case .disabled:
             if hasLegacyAndroidHooks {
-                return .custom(
+                baseMode = .custom(
                     LegacyAndroidContentBlockingProvider(
                         requestBlocker: androidRequestBlocker,
                         cosmeticBlocker: androidCosmeticBlocker
                     )
                 )
+            } else {
+                baseMode = .disabled
             }
-            return .disabled
         case .custom:
-            return androidMode
+            baseMode = androidMode
+        }
+
+        switch baseMode {
+        case .disabled:
+            return .disabled
+        case .custom(let provider):
+            guard !normalizedWhitelistedDomains.isEmpty else {
+                return .custom(provider)
+            }
+            return .custom(
+                WhitelistedAndroidContentBlockingProvider(
+                    provider: provider,
+                    whitelistedDomains: normalizedWhitelistedDomains
+                )
+            )
         }
     }
 
@@ -386,6 +439,78 @@ extension WebContentBlockerConfiguration {
             return provider
         }
     }
+
+    static func normalizedWhitelistedDomains(from domains: [String]) -> [String] {
+        Array(
+            Set(
+                domains.compactMap { domain in
+                    let trimmed = domain.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    return trimmed.isEmpty ? nil : trimmed
+                }
+            )
+        ).sorted()
+    }
+
+    static func matchesWhitelistedURL(_ url: URL?, in domains: [String]) -> Bool {
+        matchesWhitelistedDomain(url?.host, in: domains)
+    }
+
+    static func matchesWhitelistedDomain(_ host: String?, in domains: [String]) -> Bool {
+        guard let normalizedHost = host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !normalizedHost.isEmpty else {
+            return false
+        }
+
+        for domain in domains {
+            if domain.hasPrefix("*.") {
+                let suffix = String(domain.dropFirst(2))
+                guard !suffix.isEmpty else {
+                    continue
+                }
+                if normalizedHost.count > suffix.count && normalizedHost.hasSuffix(".\(suffix)") {
+                    return true
+                }
+            } else if normalizedHost == domain {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    #if !SKIP
+    func augmentedIOSRuleListContent(_ content: String) -> String {
+        Self.augmentedIOSRuleListContent(content, whitelistedDomains: normalizedWhitelistedDomains)
+    }
+
+    static func augmentedIOSRuleListContent(_ content: String, whitelistedDomains: [String]) -> String {
+        guard !whitelistedDomains.isEmpty,
+              let data = content.data(using: .utf8),
+              let jsonObject = try? JSONSerialization.jsonObject(with: data),
+              var rules = jsonObject as? [[String: Any]] else {
+            return content
+        }
+
+        rules.append([
+            "comment": "user-injected domain exemptions (whitelisted domains)",
+            "trigger": [
+                "url-filter": ".*",
+                "if-domain": whitelistedDomains
+            ],
+            "action": [
+                "type": "ignore-previous-rules"
+            ]
+        ])
+
+        guard JSONSerialization.isValidJSONObject(rules),
+              let augmentedData = try? JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys]),
+              let augmentedContent = String(data: augmentedData, encoding: .utf8) else {
+            return content
+        }
+
+        return augmentedContent
+    }
+    #endif
 }
 
 public enum WebContentBlockerError: Error, Equatable, LocalizedError {
@@ -2942,7 +3067,10 @@ public extension SkipWebUIDelegate {
             return []
         }
 
-        let prepared = await WebContentBlockerStore.prepareRuleLists(from: contentBlockers.iOSRuleListPaths)
+        let prepared = await WebContentBlockerStore.prepareRuleLists(
+            from: contentBlockers.iOSRuleListPaths,
+            whitelistedDomains: contentBlockers.normalizedWhitelistedDomains
+        )
         contentBlockerSetupErrors = prepared.errors
         for ruleList in prepared.ruleLists {
             userContentController.add(ruleList)
@@ -3012,10 +3140,10 @@ struct WebContentBlockerDiagnostics: Equatable {
     var errors: [WebContentBlockerError] = []
 }
 
-@MainActor enum WebContentBlockerDebug {
-    static var diagnostics: WebContentBlockerDiagnostics {
-        WebContentBlockerStore.diagnostics
-    }
+    @MainActor enum WebContentBlockerDebug {
+        static var diagnostics: WebContentBlockerDiagnostics {
+            WebContentBlockerStore.diagnostics
+        }
 
     static func resetDiagnostics() {
         WebContentBlockerStore.diagnostics = WebContentBlockerDiagnostics()
@@ -3027,6 +3155,13 @@ struct WebContentBlockerDiagnostics: Equatable {
 
     static func clearPersistentState() throws {
         try WebContentBlockerStore.clearPersistentState()
+    }
+
+    static func augmentedRuleListContent(_ content: String, whitelistedDomains: [String]) -> String {
+        WebContentBlockerConfiguration.augmentedIOSRuleListContent(
+            content,
+            whitelistedDomains: WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: whitelistedDomains)
+        )
     }
 }
 
@@ -3049,11 +3184,12 @@ fileprivate enum WebContentBlockerStore {
     private static let storeDirectoryName = "RuleListStore"
     private static let metadataVersion = 1
 
-    static func prepareRuleLists(from sourcePaths: [String]) async -> PreparedContentBlockerRuleLists {
+    static func prepareRuleLists(from sourcePaths: [String], whitelistedDomains: [String]) async -> PreparedContentBlockerRuleLists {
         var ruleLists: [WKContentRuleList] = []
         var errors: [WebContentBlockerError] = []
 
         let normalizedSourcePaths = normalizedPaths(from: sourcePaths)
+        let normalizedWhitelistedDomains = WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: whitelistedDomains)
         guard !normalizedSourcePaths.isEmpty else {
             diagnostics.errors = []
             return PreparedContentBlockerRuleLists(ruleLists: [], errors: [])
@@ -3084,7 +3220,12 @@ fileprivate enum WebContentBlockerStore {
                 continue
             }
 
-            let identifier = ruleListIdentifier(for: sourcePath, contentData: fileData)
+            let augmentedContent = WebContentBlockerConfiguration.augmentedIOSRuleListContent(
+                content,
+                whitelistedDomains: normalizedWhitelistedDomains
+            )
+            let augmentedContentData = Data(augmentedContent.utf8)
+            let identifier = ruleListIdentifier(for: sourcePath, contentData: augmentedContentData)
             nextIdentifiersBySourcePath[sourcePath] = identifier
             staleIdentifiers.remove(identifier)
 
@@ -3094,7 +3235,7 @@ fileprivate enum WebContentBlockerStore {
                 continue
             }
 
-            if let compiledRuleList = await compileRuleList(identifier: identifier, content: content, sourcePath: sourcePath, in: store, errors: &errors) {
+            if let compiledRuleList = await compileRuleList(identifier: identifier, content: augmentedContent, sourcePath: sourcePath, in: store, errors: &errors) {
                 ruleLists.append(compiledRuleList)
                 diagnostics.compiledIdentifiers.append(identifier)
             }

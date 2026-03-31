@@ -86,6 +86,10 @@ let config = WebEngineConfiguration(
         iOSRuleListPaths: [
             Bundle.main.path(forResource: "content-blockers", ofType: "json")!
         ],
+        whitelistedDomains: [
+            "example.com",
+            "*.example.org"
+        ],
         androidMode: .custom(MyAndroidContentBlockingProvider())
     )
 )
@@ -571,89 +575,15 @@ Platform behavior:
 
 `SkipWeb` exposes portable content-blocking hooks through `WebEngineConfiguration.contentBlockers`.
 
-Supporting types:
+For a fuller guide with a quick integration example, whitelist behavior, and up-to-date blocker API shapes, see [`SkipWebContentBlockers.md`](./SkipWebContentBlockers.md).
 
-- `WebContentBlockerConfiguration`
-- `AndroidContentBlockingMode`
-- `AndroidContentBlockingProvider`
-- `AndroidBlockableRequest`
-- `AndroidRequestBlockDecision`
-- `AndroidPageContext`
-- `AndroidCosmeticRule`
-- `AndroidCosmeticFrameScope`
-- `AndroidCosmeticInjectionTiming`
-- `AndroidRequestBlocker` (deprecated compatibility shim)
-- `AndroidCosmeticBlocker` (deprecated compatibility shim)
-- `WebContentBlockerError`
+Quick summary:
 
-Example:
-
-```swift
-struct CustomBlockingProvider: AndroidContentBlockingProvider {
-    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
-        if request.url.host?.contains("ads") == true {
-            return .block
-        }
-        return .allow
-    }
-
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
-        [
-            AndroidCosmeticRule(
-                hiddenSelectors: [
-                    ".ad-banner"
-                ]
-            ),
-            AndroidCosmeticRule(
-                hiddenSelectors: [
-                    ".ad-slot",
-                    ".tracking-frame"
-                ],
-                urlFilterPattern: ".*\\/ad-frame\\.html",
-                allowedOriginRules: ["https://*.doubleclick.net"],
-                frameScope: .subframesOnly
-            ),
-            AndroidCosmeticRule(
-                css: [
-                    "body.modal-open { overflow: auto !important; }"
-                ],
-                preferredTiming: .pageLifecycle
-            )
-        ]
-    }
-}
-
-let config = WebEngineConfiguration(
-    contentBlockers: WebContentBlockerConfiguration(
-        iOSRuleListPaths: ["/path/to/content-blockers.json"],
-        androidMode: .custom(CustomBlockingProvider())
-    )
-)
-
-try WebEngineConfiguration.clearContentBlockerCache()
-```
-
-`androidRequestBlocker` and `androidCosmeticBlocker` remain available as deprecated compatibility shims for one release, but new integrations should prefer `androidMode`.
-
-Platform behavior:
-
-- On iOS, `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList`s and attached to the web view's `WKUserContentController`.
-- SkipWeb persists compiled iOS rule lists in a cache keyed by source path and file contents, recompiles when a rule file changes, and prunes stale compiled entries when rule files are removed from the configuration.
-- Call `WebEngineConfiguration.clearContentBlockerCache()` to explicitly remove the persisted iOS rule-list cache and force recompilation on the next install. On Android this API is a no-op.
-- On iOS, create configured `WKWebViewConfiguration` instances with `await WebEngineConfiguration.makeWebViewConfiguration()`, which compiles and installs any configured rule lists before returning.
-- iOS blocker setup errors are exposed through `WebEngineConfiguration.contentBlockerSetupErrors` after `makeWebViewConfiguration()` completes and through `await WebEngine.awaitContentBlockerSetup()` / `WebEngine.contentBlockerSetupErrors` after engine creation.
-- When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.
-- Popup children created with `platformContext.makeChildWebEngine(...)` inherit the mirrored content-blocker configuration.
-- On Android, SkipWeb now installs an engine-owned `WebViewClient` so content blocking stays active for `WebView`, popup children, and direct/headless `WebEngine` usage.
-- On Android, `.custom(...)` receives an `AndroidBlockableRequest` for intercepted resource loads and can return `.allow` or `.block`.
-- `AndroidBlockableRequest.isRedirect` is best-effort on Android and may be `nil` when the device's WebView runtime does not support redirect detection.
-- On Android, `.custom(...)` also returns ordered `AndroidCosmeticRule` values. Each rule can scope CSS to matching frame document URLs with `urlFilterPattern`, scope frame origins with `allowedOriginRules`, control frame scope with `frameScope`, and prefer `.documentStart` or `.pageLifecycle` injection timing.
-- `AndroidCosmeticRule(hiddenSelectors: ...)` is the convenience path for iOS-style cosmetic hiding and expands each selector to `display: none !important;`.
-- `AndroidCosmeticFrameScope` supports `.mainFrameOnly` (the default), `.subframesOnly`, and `.allFrames`. Use `.subframesOnly` when you want CSS to apply only inside iframe/frame documents instead of the top-level page.
-- Subframe-targeted Android cosmetic rules require document-start script injection. If Android cannot install document-start scripts, SkipWeb only falls back main-frame `.documentStart` rules to page-lifecycle injection; `.subframesOnly` and `.allFrames` rules are skipped in that situation.
-- `.pageLifecycle` injection is main-frame-only on Android. If you need to target subframes, keep `preferredTiming` at `.documentStart`.
-- Same-document navigations on Android, such as `history.pushState`, `history.replaceState`, and hash-only URL changes, do not currently refresh URL-scoped cosmetic rules. Treat `urlFilterPattern` matching as navigation-time behavior rather than a live SPA routing hook.
-- Keep using `css:` when you need more than hiding, such as layout repair or `pointer-events` fixes after removing an overlay.
+- `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and attached to the web view's `WKUserContentController`.
+- `whitelistedDomains` accepts WebKit-style entries such as `example.com` and `*.example.com`, normalizes them, and disables blocking for matching page domains across both platforms.
+- `androidMode: .custom(...)` is the primary Android API; the legacy `androidRequestBlocker` and `androidCosmeticBlocker` shims remain available as deprecated compatibility paths for one release.
+- `WebEngineConfiguration.clearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list cache so the next install recompiles from source.
+- Popup children and caller-supplied `WKWebView` instances inherit the configured blocker setup.
 
 ## Contribution
 

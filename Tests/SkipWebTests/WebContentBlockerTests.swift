@@ -93,6 +93,7 @@ final class WebContentBlockerTests: XCTestCase {
     func testContentBlockerConfigurationDefaults() {
         let config = WebContentBlockerConfiguration()
         XCTAssertTrue(config.iOSRuleListPaths.isEmpty)
+        XCTAssertTrue(config.whitelistedDomains.isEmpty)
         switch config.androidMode {
         case .disabled:
             break
@@ -110,12 +111,14 @@ final class WebContentBlockerTests: XCTestCase {
         )
         let contentBlockers = WebContentBlockerConfiguration(
             iOSRuleListPaths: ["/tmp/rules.json"],
+            whitelistedDomains: ["example.com"],
             androidMode: .custom(provider)
         )
         let config = WebEngineConfiguration(contentBlockers: contentBlockers)
         let mirrored = config.popupChildMirroredConfiguration()
 
         XCTAssertEqual(mirrored.contentBlockers?.iOSRuleListPaths, ["/tmp/rules.json"])
+        XCTAssertEqual(mirrored.contentBlockers?.whitelistedDomains, ["example.com"])
         guard case .custom(let mirroredProvider)? = mirrored.contentBlockers?.androidMode else {
             return XCTFail("Expected mirrored popup configuration to preserve custom Android blocking mode")
         }
@@ -155,6 +158,110 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(
             provider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)),
             [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
+        )
+    }
+
+    // Verifies whitelist entries normalize for stable matching and cache behavior.
+    func testWhitelistedDomainsNormalizeForStableBehavior() {
+        let contentBlockers = WebContentBlockerConfiguration(
+            whitelistedDomains: [" Example.com ", "*.Example.com", "example.com", ""]
+        )
+
+        XCTAssertEqual(contentBlockers.normalizedWhitelistedDomains, ["*.example.com", "example.com"])
+    }
+
+    // Verifies exact and wildcard whitelist rules retain WebKit-style matching semantics.
+    func testWhitelistedDomainsMatchExactAndWildcardHosts() {
+        let domains = WebContentBlockerConfiguration.normalizedWhitelistedDomains(
+            from: ["example.com", "*.example.com"]
+        )
+
+        XCTAssertTrue(WebContentBlockerConfiguration.matchesWhitelistedDomain("example.com", in: domains))
+        XCTAssertTrue(WebContentBlockerConfiguration.matchesWhitelistedDomain("news.example.com", in: domains))
+        XCTAssertFalse(WebContentBlockerConfiguration.matchesWhitelistedDomain("deep.news.other.com", in: domains))
+        XCTAssertFalse(WebContentBlockerConfiguration.matchesWhitelistedDomain("otherexample.com", in: domains))
+    }
+
+    // Verifies Android request blocking is bypassed for whitelisted page domains.
+    func testAndroidWhitelistedDomainsBypassRequestBlocking() {
+        let provider = StaticContentBlockingProvider(decision: .block)
+        let contentBlockers = WebContentBlockerConfiguration(
+            whitelistedDomains: ["example.com", "*.example.net"],
+            androidMode: .custom(provider)
+        )
+
+        guard let effectiveProvider = contentBlockers.effectiveAndroidProvider else {
+            return XCTFail("Expected effective Android provider")
+        }
+
+        let mainDocumentDecision = effectiveProvider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: URL(string: "https://cdn.ads.net/script.js")!,
+                mainDocumentURL: URL(string: "https://example.com/article")!,
+                method: "GET",
+                isForMainFrame: false,
+                hasGesture: false
+            )
+        )
+        XCTAssertEqual(mainDocumentDecision, AndroidRequestBlockDecision.allow)
+
+        let mainFrameFallbackDecision = effectiveProvider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: URL(string: "https://sub.example.net/home")!,
+                method: "GET",
+                isForMainFrame: true,
+                hasGesture: false
+            )
+        )
+        XCTAssertEqual(mainFrameFallbackDecision, AndroidRequestBlockDecision.allow)
+    }
+
+    // Verifies Android cosmetic rules are suppressed for whitelisted page domains.
+    func testAndroidWhitelistedDomainsSuppressCosmeticRules() {
+        let provider = StaticContentBlockingProvider(
+            rules: [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
+        )
+        let contentBlockers = WebContentBlockerConfiguration(
+            whitelistedDomains: ["example.com"],
+            androidMode: .custom(provider)
+        )
+
+        guard let effectiveProvider = contentBlockers.effectiveAndroidProvider else {
+            return XCTFail("Expected effective Android provider")
+        }
+
+        XCTAssertEqual(
+            effectiveProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com/page")!)),
+            [AndroidCosmeticRule]()
+        )
+    }
+
+    // Verifies Android non-whitelisted domains still use the underlying provider unchanged.
+    func testAndroidNonWhitelistedDomainsStillUseUnderlyingProvider() {
+        let rule = AndroidCosmeticRule(css: [".ad { display: none !important; }"])
+        let provider = StaticContentBlockingProvider(decision: AndroidRequestBlockDecision.block, rules: [rule])
+        let contentBlockers = WebContentBlockerConfiguration(
+            whitelistedDomains: ["example.com"],
+            androidMode: .custom(provider)
+        )
+
+        guard let effectiveProvider = contentBlockers.effectiveAndroidProvider else {
+            return XCTFail("Expected effective Android provider")
+        }
+
+        let decision = effectiveProvider.requestDecision(
+            for: AndroidBlockableRequest(
+                url: URL(string: "https://cdn.ads.net/script.js")!,
+                mainDocumentURL: URL(string: "https://news.other.com/article")!,
+                method: "GET",
+                isForMainFrame: false,
+                hasGesture: false
+            )
+        )
+        XCTAssertEqual(decision, AndroidRequestBlockDecision.block)
+        XCTAssertEqual(
+            effectiveProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://news.other.com/article")!)),
+            [rule]
         )
     }
 
@@ -533,6 +640,25 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [firstIdentifier])
     }
 
+    // Verifies iOS whitelist rules are appended as ignore-previous-rules exemptions.
+    @MainActor
+    func testIOSWhitelistedDomainsAppendIgnorePreviousRules() throws {
+        let augmentedContent = WebContentBlockerDebug.augmentedRuleListContent(
+            validContentBlockerRules(),
+            whitelistedDomains: [" Example.com ", "*.Example.com"]
+        )
+        let data = try XCTUnwrap(augmentedContent.data(using: .utf8))
+        let jsonObject = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+        let appendedRule = try XCTUnwrap(jsonObject.last)
+        let trigger = try XCTUnwrap(appendedRule["trigger"] as? [String: Any])
+        let action = try XCTUnwrap(appendedRule["action"] as? [String: Any])
+
+        XCTAssertEqual(appendedRule["comment"] as? String, "user-injected domain exemptions (whitelisted domains)")
+        XCTAssertEqual(trigger["url-filter"] as? String, ".*")
+        XCTAssertEqual(trigger["if-domain"] as? [String], ["*.example.com", "example.com"])
+        XCTAssertEqual(action["type"] as? String, "ignore-previous-rules")
+    }
+
     // Verifies caller-supplied WKWebView instances receive configured blocker rule lists.
     @MainActor
     func testIOSContentBlockersInstallIntoSuppliedWKWebView() async throws {
@@ -596,6 +722,87 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertTrue(reloadedConfig.contentBlockerSetupErrors.isEmpty)
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [])
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.compiledIdentifiers, [compiledIdentifier])
+    }
+
+    // Verifies changing the whitelist invalidates the cached iOS compiled identifier.
+    @MainActor
+    func testIOSWhitelistedDomainsInvalidateCachedIdentifierWhenChanged() async throws {
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
+        try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
+
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
+        defer {
+            try? WebContentBlockerDebug.clearPersistentState()
+            WebContentBlockerDebug.setBaseDirectoryOverride(nil)
+        }
+        try? WebContentBlockerDebug.clearPersistentState()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let firstConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(
+                iOSRuleListPaths: [ruleFile.path],
+                whitelistedDomains: ["example.com"]
+            )
+        )
+        _ = await firstConfig.makeWebViewConfiguration()
+        let firstIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
+
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let secondConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(
+                iOSRuleListPaths: [ruleFile.path],
+                whitelistedDomains: ["other.example.com"]
+            )
+        )
+        _ = await secondConfig.makeWebViewConfiguration()
+        XCTAssertTrue(secondConfig.contentBlockerSetupErrors.isEmpty)
+        let secondIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
+
+        XCTAssertNotEqual(firstIdentifier, secondIdentifier)
+        XCTAssertTrue(WebContentBlockerDebug.diagnostics.prunedIdentifiers.contains(firstIdentifier))
+    }
+
+    // Verifies normalized iOS whitelist entries reuse the persistent cache across semantically identical inputs.
+    @MainActor
+    func testIOSWhitelistedDomainsNormalizeBeforeCacheLookup() async throws {
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
+        try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
+
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
+        defer {
+            try? WebContentBlockerDebug.clearPersistentState()
+            WebContentBlockerDebug.setBaseDirectoryOverride(nil)
+        }
+        try? WebContentBlockerDebug.clearPersistentState()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let firstConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(
+                iOSRuleListPaths: [ruleFile.path],
+                whitelistedDomains: [" Example.com ", "example.com", "*.Example.com"]
+            )
+        )
+        _ = await firstConfig.makeWebViewConfiguration()
+        let firstIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
+
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let secondConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(
+                iOSRuleListPaths: [ruleFile.path],
+                whitelistedDomains: ["*.example.com", "example.com"]
+            )
+        )
+        _ = await secondConfig.makeWebViewConfiguration()
+        XCTAssertTrue(secondConfig.contentBlockerSetupErrors.isEmpty)
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [firstIdentifier])
     }
 
     // Verifies changing an iOS rule file invalidates the previous compiled identifier and prunes it.
