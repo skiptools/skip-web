@@ -629,6 +629,8 @@ let config = WebEngineConfiguration(
         androidMode: .custom(CustomBlockingProvider())
     )
 )
+
+try WebEngineConfiguration.clearContentBlockerCache()
 ```
 
 `androidRequestBlocker` and `androidCosmeticBlocker` remain available as deprecated compatibility shims for one release, but new integrations should prefer `androidMode`.
@@ -637,6 +639,7 @@ Platform behavior:
 
 - On iOS, `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList`s and attached to the web view's `WKUserContentController`.
 - SkipWeb persists compiled iOS rule lists in a cache keyed by source path and file contents, recompiles when a rule file changes, and prunes stale compiled entries when rule files are removed from the configuration.
+- Call `WebEngineConfiguration.clearContentBlockerCache()` to explicitly remove the persisted iOS rule-list cache and force recompilation on the next install. On Android this API is a no-op.
 - On iOS, create configured `WKWebViewConfiguration` instances with `await WebEngineConfiguration.makeWebViewConfiguration()`, which compiles and installs any configured rule lists before returning.
 - iOS blocker setup errors are exposed through `WebEngineConfiguration.contentBlockerSetupErrors` after `makeWebViewConfiguration()` completes and through `await WebEngine.awaitContentBlockerSetup()` / `WebEngine.contentBlockerSetupErrors` after engine creation.
 - When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.

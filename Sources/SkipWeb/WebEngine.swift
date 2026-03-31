@@ -2896,6 +2896,15 @@ public extension SkipWebUIDelegate {
         return copy
     }
 
+    /// Clear any persisted compiled iOS content-blocker rule lists so the next install recompiles from source.
+    ///
+    /// The cache is shared across `WebEngineConfiguration` instances. On non-Apple platforms this is a no-op.
+    @MainActor public static func clearContentBlockerCache() throws {
+        #if !SKIP
+        try WebContentBlockerStore.clearPersistentState()
+        #endif
+    }
+
     #if !SKIP
     /// Create a `WebViewConfiguration` from the properties of this configuration and
     /// asynchronously install any configured iOS content blockers.

@@ -562,6 +562,42 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.installedRuleListCount, 1)
     }
 
+    // Verifies the public cache-clear API removes persisted rule lists so the next load recompiles from source.
+    @MainActor
+    func testIOSContentBlockerCacheCanBeClearedExplicitly() async throws {
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
+        try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
+
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
+        defer {
+            try? WebEngineConfiguration.clearContentBlockerCache()
+            WebContentBlockerDebug.setBaseDirectoryOverride(nil)
+        }
+        try? WebEngineConfiguration.clearContentBlockerCache()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let initialConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
+        )
+        _ = await initialConfig.makeWebViewConfiguration()
+        XCTAssertTrue(initialConfig.contentBlockerSetupErrors.isEmpty)
+        let compiledIdentifier = try XCTUnwrap(WebContentBlockerDebug.diagnostics.compiledIdentifiers.first)
+
+        try WebEngineConfiguration.clearContentBlockerCache()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let reloadedConfig = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
+        )
+        _ = await reloadedConfig.makeWebViewConfiguration()
+        XCTAssertTrue(reloadedConfig.contentBlockerSetupErrors.isEmpty)
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [])
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.compiledIdentifiers, [compiledIdentifier])
+    }
+
     // Verifies changing an iOS rule file invalidates the previous compiled identifier and prunes it.
     @MainActor
     func testIOSContentBlockerRuleListChangesInvalidateCachedIdentifier() async throws {
