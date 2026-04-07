@@ -175,17 +175,14 @@ public struct WebContentBlockerConfiguration {
 }
 
 public protocol AndroidContentBlockingProvider {
+    var persistentCosmeticRules: [AndroidCosmeticRule] { get }
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
+    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
 }
 
 public extension AndroidContentBlockingProvider {
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
         .allow
-    }
-
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
-        []
     }
 }
 
@@ -350,11 +347,15 @@ fileprivate struct LegacyAndroidContentBlockingProvider: AndroidContentBlockingP
     let requestBlocker: (any AndroidRequestBlocker)?
     let cosmeticBlocker: (any AndroidCosmeticBlocker)?
 
+    var persistentCosmeticRules: [AndroidCosmeticRule] {
+        []
+    }
+
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
         requestBlocker?.decision(for: request) ?? .allow
     }
 
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
         cosmeticBlocker?.cosmetics(for: page) ?? []
     }
 }
@@ -370,11 +371,12 @@ fileprivate struct WhitelistedAndroidContentBlockingProvider: AndroidContentBloc
         return provider.requestDecision(for: request)
     }
 
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
-        if WebContentBlockerConfiguration.matchesWhitelistedDomain(page.host, in: whitelistedDomains) {
-            return []
-        }
-        return provider.cosmeticRules(for: page)
+    var persistentCosmeticRules: [AndroidCosmeticRule] {
+        provider.persistentCosmeticRules
+    }
+
+    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+        provider.navigationCosmeticRules(for: page)
     }
 
     private func isWhitelisted(request: AndroidBlockableRequest) -> Bool {
@@ -1247,7 +1249,7 @@ extension WebCookie {
 
         let userContentController = webView.configuration.userContentController
         iosContentBlockerSetupTask = Task { @MainActor [configuration, weak self] in
-            let errors = await configuration.installContentBlockers(into: userContentController)
+            let errors = await configuration.installPreparedContentBlockers(into: userContentController)
             self?.contentBlockerSetupErrors = errors
             return errors
         }
@@ -1935,6 +1937,29 @@ extension WebCookie {
         #endif
     }
 
+    fileprivate static func appendAndroidDocumentStartRule(
+        _ rule: AndroidCosmeticRule,
+        to batchedRules: inout [AndroidCosmeticRule]
+    ) {
+        var matchingIndex: Int?
+        for index in batchedRules.indices {
+            let existingRule = batchedRules[index]
+            if existingRule.frameScope == rule.frameScope &&
+                existingRule.preferredTiming == rule.preferredTiming &&
+                existingRule.urlFilterPattern == rule.urlFilterPattern &&
+                existingRule.allowedOriginRules == rule.allowedOriginRules {
+                matchingIndex = index
+                break
+            }
+        }
+
+        if let matchingIndex {
+            batchedRules[matchingIndex].css.append(contentsOf: rule.css)
+        } else {
+            batchedRules.append(rule)
+        }
+    }
+
     static func androidCosmeticInjectionPlan(
         rules: [AndroidCosmeticRule],
         pageURL: URL,
@@ -1955,7 +1980,7 @@ extension WebCookie {
                     var normalizedRule = rule
                     normalizedRule.css = normalizedCSS
                     normalizedRule.allowedOriginRules = normalizedAndroidAllowedOriginRules(rule.allowedOriginRules)
-                    plan.documentStartRules.append(normalizedRule)
+                    appendAndroidDocumentStartRule(normalizedRule, to: &plan.documentStartRules)
                 } else if rule.frameScope == .mainFrameOnly,
                           androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
                           androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
@@ -2220,11 +2245,37 @@ extension WebEngine {
 
 
 #if SKIP
+fileprivate struct AndroidDocumentStartPlanRegistration {
+    let handlers: [ScriptHandler]
+    let styleIDs: [String]
+}
+
+fileprivate struct AndroidDocumentStartRuleRegistration {
+    let handler: ScriptHandler
+    let styleID: String
+}
+
 final class AndroidContentBlockerController {
     let config: WebEngineConfiguration
-    private var androidCosmeticScriptHandlers: [ScriptHandler] = []
-    private var androidLifecycleCosmeticCSS: [String] = []
+    // Think of persistent rules as a baseline installed once per WebView and reused
+    // until the provider says that baseline has changed.
+    private var persistentCosmeticScriptHandlers: [ScriptHandler] = []
+    private var persistentDocumentStartStyleIDs: [String] = []
+    private var persistentLifecycleCosmeticCSS: [String] = []
+    private var installedPersistentRules: [AndroidCosmeticRule] = []
+
+    // Navigation rules are the per-page delta. They may change on every main-frame
+    // navigation, so we track and refresh them separately from the persistent baseline.
+    private var navigationCosmeticScriptHandlers: [ScriptHandler] = []
+    private var navigationDocumentStartStyleIDs: [String] = []
+    private var navigationLifecycleCosmeticCSS: [String] = []
+    private var installedNavigationRules: [AndroidCosmeticRule] = []
     private var androidPreparedCosmeticPageURL: String?
+
+    private let persistentDocumentStartStyleIDPrefix = "__skipweb_content_blockers_persistent"
+    private let navigationDocumentStartStyleIDPrefix = "__skipweb_content_blockers_navigation"
+    private let persistentLifecycleStyleID = "__skipweb_content_blockers_persistent"
+    private let navigationLifecycleStyleID = "__skipweb_content_blockers_navigation"
 
     init(config: WebEngineConfiguration) {
         self.config = config
@@ -2235,54 +2286,203 @@ final class AndroidContentBlockerController {
     }
 
     func prepare(for pageURL: URL, in view: PlatformWebView) {
-        removeAllAndroidCosmeticScriptHandlers()
-        let plan = androidCosmeticPlan(for: pageURL)
-        androidLifecycleCosmeticCSS = plan.lifecycleCSS
+        let prepareStartedAt = currentMilliseconds()
+        let documentStartSupported = WebEngine.isAndroidDocumentStartScriptSupported()
+        let isWhitelisted = isWhitelisted(pageURL: pageURL)
+        let desiredPersistentRules = desiredPersistentRules(for: pageURL, isWhitelisted: isWhitelisted)
 
-        if WebEngine.isAndroidDocumentStartScriptSupported() {
-            for (index, rule) in plan.documentStartRules.enumerated() {
-                if let handler = registerAndroidDocumentStartCosmeticRule(rule, index: index, for: pageURL, in: view) {
-                    androidCosmeticScriptHandlers.append(handler)
-                }
-            }
+        let cosmeticQueryStartedAt = currentMilliseconds()
+        let desiredNavigationRules = desiredNavigationRules(for: pageURL, isWhitelisted: isWhitelisted)
+        let cosmeticQueryMilliseconds = currentMilliseconds() - cosmeticQueryStartedAt
+
+        let persistentPlanStartedAt = currentMilliseconds()
+        let persistentPlan = WebEngine.androidCosmeticInjectionPlan(
+            rules: desiredPersistentRules,
+            pageURL: pageURL,
+            isDocumentStartSupported: documentStartSupported
+        ) { message in
+            logger.warning("\(message) for \(pageURL.absoluteString)")
         }
+        let persistentPlanMilliseconds = currentMilliseconds() - persistentPlanStartedAt
+
+        let navigationPlanStartedAt = currentMilliseconds()
+        let navigationPlan = WebEngine.androidCosmeticInjectionPlan(
+            rules: desiredNavigationRules,
+            pageURL: pageURL,
+            isDocumentStartSupported: documentStartSupported
+        ) { message in
+            logger.warning("\(message) for \(pageURL.absoluteString)")
+        }
+        let navigationPlanMilliseconds = currentMilliseconds() - navigationPlanStartedAt
+
+        persistentLifecycleCosmeticCSS = persistentPlan.lifecycleCSS
+        navigationLifecycleCosmeticCSS = navigationPlan.lifecycleCSS
+
+        let persistentChanged = desiredPersistentRules != installedPersistentRules
+        let navigationChanged = desiredNavigationRules != installedNavigationRules
+
+        let persistentRegisterStartedAt = currentMilliseconds()
+        var removedPersistentHandlerCount = 0
+        var registeredPersistentHandlerCount = 0
+        if persistentChanged {
+            removedPersistentHandlerCount = persistentCosmeticScriptHandlers.count
+            removeDocumentStartRegistrations(
+                handlers: &persistentCosmeticScriptHandlers,
+                styleIDs: &persistentDocumentStartStyleIDs
+            )
+            if documentStartSupported {
+                let registration = registerDocumentStartPlan(
+                    persistentPlan,
+                    styleIDPrefix: persistentDocumentStartStyleIDPrefix,
+                    for: pageURL,
+                    in: view
+                )
+                persistentCosmeticScriptHandlers = registration.handlers
+                persistentDocumentStartStyleIDs = registration.styleIDs
+                registeredPersistentHandlerCount = registration.handlers.count
+            }
+            installedPersistentRules = desiredPersistentRules
+        }
+        let persistentRegisterMilliseconds = currentMilliseconds() - persistentRegisterStartedAt
+
+        let navigationRegisterStartedAt = currentMilliseconds()
+        var removedNavigationHandlerCount = 0
+        var registeredNavigationHandlerCount = 0
+        if navigationChanged {
+            removedNavigationHandlerCount = navigationCosmeticScriptHandlers.count
+            removeDocumentStartRegistrations(
+                handlers: &navigationCosmeticScriptHandlers,
+                styleIDs: &navigationDocumentStartStyleIDs
+            )
+            if documentStartSupported {
+                let registration = registerDocumentStartPlan(
+                    navigationPlan,
+                    styleIDPrefix: navigationDocumentStartStyleIDPrefix,
+                    for: pageURL,
+                    in: view
+                )
+                navigationCosmeticScriptHandlers = registration.handlers
+                navigationDocumentStartStyleIDs = registration.styleIDs
+                registeredNavigationHandlerCount = registration.handlers.count
+            }
+            installedNavigationRules = desiredNavigationRules
+        }
+        let navigationRegisterMilliseconds = currentMilliseconds() - navigationRegisterStartedAt
 
         androidPreparedCosmeticPageURL = pageURL.absoluteString
+        logger.info(
+            "Android blocker prepare url=\(pageURL.absoluteString) totalMs=\(formatMilliseconds(currentMilliseconds() - prepareStartedAt)) whitelisted=\(isWhitelisted) cosmeticQueryMs=\(formatMilliseconds(cosmeticQueryMilliseconds)) documentStartSupported=\(documentStartSupported) persistentChanged=\(persistentChanged) persistentRuleCount=\(desiredPersistentRules.count) persistentCSSCount=\(cssEntryCount(in: desiredPersistentRules)) persistentPlanMs=\(formatMilliseconds(persistentPlanMilliseconds)) persistentRegisterMs=\(formatMilliseconds(persistentRegisterMilliseconds)) removedPersistentHandlers=\(removedPersistentHandlerCount) registeredPersistentHandlers=\(registeredPersistentHandlerCount) navigationChanged=\(navigationChanged) navigationRuleCount=\(desiredNavigationRules.count) navigationCSSCount=\(cssEntryCount(in: desiredNavigationRules)) navigationPlanMs=\(formatMilliseconds(navigationPlanMilliseconds)) navigationRegisterMs=\(formatMilliseconds(navigationRegisterMilliseconds)) removedNavigationHandlers=\(removedNavigationHandlerCount) registeredNavigationHandlers=\(registeredNavigationHandlerCount)"
+        )
     }
 
-    func recoverIfNeeded(for url: String) {
+    func recoverIfNeeded(for url: String, in view: PlatformWebView) {
         guard androidPreparedCosmeticPageURL != url else {
             return
         }
         guard let pageURL = URL(string: url) else {
-            removeAllAndroidCosmeticScriptHandlers()
-            androidLifecycleCosmeticCSS = []
+            clearInsertedDocumentStartStyles(in: view)
+            persistentLifecycleCosmeticCSS = []
+            navigationLifecycleCosmeticCSS = []
             androidPreparedCosmeticPageURL = nil
             return
         }
 
+        let documentStartSupported = WebEngine.isAndroidDocumentStartScriptSupported()
+        let isWhitelisted = isWhitelisted(pageURL: pageURL)
+        let desiredPersistentRules = desiredPersistentRules(for: pageURL, isWhitelisted: isWhitelisted)
+        let desiredNavigationRules = desiredNavigationRules(for: pageURL, isWhitelisted: isWhitelisted)
+        let persistentChanged = desiredPersistentRules != installedPersistentRules
+        let navigationChanged = desiredNavigationRules != installedNavigationRules
+
         if androidPreparedCosmeticPageURL != nil {
             logger.info("Falling back to late Android cosmetic injection for \(pageURL.absoluteString)")
         }
-        removeAllAndroidCosmeticScriptHandlers()
-        let fallbackPlan = fallbackAndroidCosmeticPlan(for: pageURL)
-        androidLifecycleCosmeticCSS = fallbackPlan.lifecycleCSS
+
+        let persistentFuturePlan = WebEngine.androidCosmeticInjectionPlan(
+            rules: desiredPersistentRules,
+            pageURL: pageURL,
+            isDocumentStartSupported: documentStartSupported
+        ) { message in
+            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        }
+        let navigationFuturePlan = WebEngine.androidCosmeticInjectionPlan(
+            rules: desiredNavigationRules,
+            pageURL: pageURL,
+            isDocumentStartSupported: documentStartSupported
+        ) { message in
+            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        }
+        let persistentFallbackPlan = WebEngine.androidRedirectFallbackCosmeticPlan(
+            rules: desiredPersistentRules,
+            pageURL: pageURL
+        ) { message in
+            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        }
+        let navigationFallbackPlan = WebEngine.androidRedirectFallbackCosmeticPlan(
+            rules: desiredNavigationRules,
+            pageURL: pageURL
+        ) { message in
+            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        }
+
+        if persistentChanged {
+            let removedStyleIDs = persistentDocumentStartStyleIDs
+            removeDocumentStartRegistrations(
+                handlers: &persistentCosmeticScriptHandlers,
+                styleIDs: &persistentDocumentStartStyleIDs
+            )
+            clearInsertedStyles(styleIDs: removedStyleIDs, in: view)
+            if documentStartSupported {
+                let registration = registerDocumentStartPlan(
+                    persistentFuturePlan,
+                    styleIDPrefix: persistentDocumentStartStyleIDPrefix,
+                    for: pageURL,
+                    in: view
+                )
+                persistentCosmeticScriptHandlers = registration.handlers
+                persistentDocumentStartStyleIDs = registration.styleIDs
+            }
+            installedPersistentRules = desiredPersistentRules
+        }
+
+        if navigationChanged {
+            let removedStyleIDs = navigationDocumentStartStyleIDs
+            removeDocumentStartRegistrations(
+                handlers: &navigationCosmeticScriptHandlers,
+                styleIDs: &navigationDocumentStartStyleIDs
+            )
+            clearInsertedStyles(styleIDs: removedStyleIDs, in: view)
+            if documentStartSupported {
+                let registration = registerDocumentStartPlan(
+                    navigationFuturePlan,
+                    styleIDPrefix: navigationDocumentStartStyleIDPrefix,
+                    for: pageURL,
+                    in: view
+                )
+                navigationCosmeticScriptHandlers = registration.handlers
+                navigationDocumentStartStyleIDs = registration.styleIDs
+            }
+            installedNavigationRules = desiredNavigationRules
+        }
+
+        // Redirects are already loading the final document, so always recompute the
+        // late-injected CSS for that final URL even when the rule arrays are unchanged.
+        persistentLifecycleCosmeticCSS = persistentFallbackPlan.lifecycleCSS
+        navigationLifecycleCosmeticCSS = navigationFallbackPlan.lifecycleCSS
         androidPreparedCosmeticPageURL = pageURL.absoluteString
     }
 
     func injectIfNeeded(into view: PlatformWebView) {
-        guard let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
-            cssRules: androidLifecycleCosmeticCSS,
-            styleID: "__skipweb_content_blockers",
-            frameScope: .mainFrameOnly
-        ) else {
-            clearCSS(in: view)
-            return
-        }
-
-        view.evaluateJavascript(injectionScript) { _ in
-            logger.debug("Injected Android content blocker CSS")
-        }
+        injectLifecycleCSS(
+            persistentLifecycleCosmeticCSS,
+            styleID: persistentLifecycleStyleID,
+            in: view
+        )
+        injectLifecycleCSS(
+            navigationLifecycleCosmeticCSS,
+            styleID: navigationLifecycleStyleID,
+            in: view
+        )
     }
 
     func intercept(_ request: android.webkit.WebResourceRequest) -> android.webkit.WebResourceResponse? {
@@ -2316,47 +2516,88 @@ final class AndroidContentBlockerController {
         return nil
     }
 
-    private func removeAllAndroidCosmeticScriptHandlers() {
-        for handler in androidCosmeticScriptHandlers {
+    private func desiredPersistentRules(
+        for pageURL: URL,
+        isWhitelisted: Bool
+    ) -> [AndroidCosmeticRule] {
+        guard !isWhitelisted, let provider else {
+            return []
+        }
+        return provider.persistentCosmeticRules
+    }
+
+    private func desiredNavigationRules(
+        for pageURL: URL,
+        isWhitelisted: Bool
+    ) -> [AndroidCosmeticRule] {
+        guard !isWhitelisted, let provider else {
+            return []
+        }
+        return provider.navigationCosmeticRules(for: AndroidPageContext(url: pageURL))
+    }
+
+    private func isWhitelisted(pageURL: URL) -> Bool {
+        WebContentBlockerConfiguration.matchesWhitelistedURL(
+            pageURL,
+            in: config.contentBlockers?.normalizedWhitelistedDomains ?? []
+        )
+    }
+
+    private func removeDocumentStartRegistrations(
+        handlers: inout [ScriptHandler],
+        styleIDs: inout [String]
+    ) {
+        for handler in handlers {
             handler.remove()
         }
-        androidCosmeticScriptHandlers.removeAll()
+        handlers.removeAll()
+        styleIDs.removeAll()
     }
 
-    private func androidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
-        guard let provider else {
-            return AndroidCosmeticInjectionPlan()
-        }
-        return WebEngine.androidCosmeticInjectionPlan(
-            rules: provider.cosmeticRules(for: AndroidPageContext(url: pageURL)),
-            pageURL: pageURL,
-            isDocumentStartSupported: WebEngine.isAndroidDocumentStartScriptSupported()
-        ) { message in
-            logger.warning("\(message) for \(pageURL.absoluteString)")
-        }
-    }
+    private func registerDocumentStartPlan(
+        _ plan: AndroidCosmeticInjectionPlan,
+        styleIDPrefix: String,
+        for pageURL: URL,
+        in view: PlatformWebView
+    ) -> AndroidDocumentStartPlanRegistration {
+        var handlers: [ScriptHandler] = []
+        var styleIDs: [String] = []
 
-    private func fallbackAndroidCosmeticPlan(for pageURL: URL) -> AndroidCosmeticInjectionPlan {
-        guard let provider else {
-            return AndroidCosmeticInjectionPlan()
+        for (index, rule) in plan.documentStartRules.enumerated() {
+            let registerStartedAt = currentMilliseconds()
+            if let registration = registerAndroidDocumentStartCosmeticRule(
+                rule,
+                index: index,
+                styleIDPrefix: styleIDPrefix,
+                for: pageURL,
+                in: view
+            ) {
+                handlers.append(registration.handler)
+                styleIDs.append(registration.styleID)
+            }
+            let registerMilliseconds = currentMilliseconds() - registerStartedAt
+            logger.info(
+                "Android blocker register url=\(pageURL.absoluteString) prefix=\(styleIDPrefix) index=\(index) cssCount=\(rule.css.count) cssChars=\(cssCharacterCountInCSSRules(rule.css)) allowedOrigins=\(rule.allowedOriginRules.count) ms=\(formatMilliseconds(registerMilliseconds))"
+            )
         }
-        return WebEngine.androidRedirectFallbackCosmeticPlan(
-            rules: provider.cosmeticRules(for: AndroidPageContext(url: pageURL)),
-            pageURL: pageURL
-        ) { message in
-            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
-        }
+
+        return AndroidDocumentStartPlanRegistration(
+            handlers: handlers,
+            styleIDs: styleIDs
+        )
     }
 
     private func registerAndroidDocumentStartCosmeticRule(
         _ rule: AndroidCosmeticRule,
         index: Int,
+        styleIDPrefix: String,
         for pageURL: URL,
         in view: PlatformWebView
-    ) -> ScriptHandler? {
+    ) -> AndroidDocumentStartRuleRegistration? {
+        let styleID = "\(styleIDPrefix)_\(index)"
         guard let script = WebEngine.androidContentBlockerStyleInjectionScript(
             cssRules: rule.css,
-            styleID: "__skipweb_content_blockers_\(index)",
+            styleID: styleID,
             frameScope: rule.frameScope,
             urlFilterPattern: rule.urlFilterPattern
         ) else {
@@ -2368,19 +2609,78 @@ final class AndroidContentBlockerController {
         }
 
         // SKIP INSERT: try {
-        // SKIP INSERT:     return androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view, script_0, allowedOriginRules)
+        // SKIP INSERT:     return AndroidDocumentStartRuleRegistration(
+        // SKIP INSERT:         handler = androidx.webkit.WebViewCompat.addDocumentStartJavaScript(view, script_0, allowedOriginRules),
+        // SKIP INSERT:         styleID = styleID
+        // SKIP INSERT:     )
         // SKIP INSERT: } catch (t: Throwable) {
         // SKIP INSERT:     logger.warning("Skipping Android cosmetic rule registration for ${pageURL.absoluteString}: ${t.message ?: t}")
         // SKIP INSERT:     return null
         // SKIP INSERT: }
-        return WebViewCompat.addDocumentStartJavaScript(view, script, allowedOriginRules)
+        return AndroidDocumentStartRuleRegistration(
+            handler: WebViewCompat.addDocumentStartJavaScript(view, script, allowedOriginRules),
+            styleID: styleID
+        )
     }
 
-    private func clearCSS(in view: PlatformWebView) {
-        let removalScript = WebEngine.androidContentBlockerStyleRemovalScript(styleID: "__skipweb_content_blockers")
-        view.evaluateJavascript(removalScript) { _ in
-            logger.debug("Cleared Android content blocker CSS")
+    private func clearInsertedDocumentStartStyles(in view: PlatformWebView) {
+        clearInsertedStyles(styleIDs: persistentDocumentStartStyleIDs, in: view)
+        clearInsertedStyles(styleIDs: navigationDocumentStartStyleIDs, in: view)
+    }
+
+    private func clearInsertedStyles(styleIDs: [String], in view: PlatformWebView) {
+        for styleID in styleIDs {
+            let removalScript = WebEngine.androidContentBlockerStyleRemovalScript(styleID: styleID)
+            view.evaluateJavascript(removalScript) { _ in
+                logger.debug("Cleared Android content blocker CSS styleID=\(styleID)")
+            }
         }
+    }
+
+    private func injectLifecycleCSS(
+        _ cssRules: [String],
+        styleID: String,
+        in view: PlatformWebView
+    ) {
+        guard let injectionScript = WebEngine.androidContentBlockerStyleInjectionScript(
+            cssRules: cssRules,
+            styleID: styleID,
+            frameScope: .mainFrameOnly
+        ) else {
+            let removalScript = WebEngine.androidContentBlockerStyleRemovalScript(styleID: styleID)
+            view.evaluateJavascript(removalScript) { _ in
+                logger.debug("Cleared Android content blocker CSS styleID=\(styleID)")
+            }
+            return
+        }
+
+        view.evaluateJavascript(injectionScript) { _ in
+            logger.debug("Injected Android content blocker CSS styleID=\(styleID)")
+        }
+    }
+
+    private func currentMilliseconds() -> Double {
+        Date().timeIntervalSince1970 * 1000.0
+    }
+
+    private func formatMilliseconds(_ value: Double) -> String {
+        String((value * 10.0).rounded() / 10.0)
+    }
+
+    private func cssEntryCount(in rules: [AndroidCosmeticRule]) -> Int {
+        var count = 0
+        for rule in rules {
+            count += rule.css.count
+        }
+        return count
+    }
+
+    private func cssCharacterCountInCSSRules(_ cssRules: [String]) -> Int {
+        var count = 0
+        for cssRule in cssRules {
+            count += cssRule.count
+        }
+        return count
     }
 }
 
@@ -2418,7 +2718,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageCommitVisible(view: PlatformWebView, url: String) {
         logger.log("onPageCommitVisible: \(url)")
-        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         engine?.androidContentBlockerController.injectIfNeeded(into: view)
         embeddedNavigationClient?.onPageCommitVisible(view, url)
         legacyNavigationDelegate?.onPageCommitVisible(view, url)
@@ -2426,7 +2726,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
-        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         engine?.androidContentBlockerController.injectIfNeeded(into: view)
         for userScript in config?.userScripts ?? [] {
             if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
@@ -2446,7 +2746,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
-        engine?.androidContentBlockerController.recoverIfNeeded(for: url)
+        engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         if !(config?.messageHandlers.isEmpty ?? true) {
             view.evaluateJavascript("""
             if (!window.webkit) window.webkit = {};
@@ -3030,12 +3330,28 @@ public extension SkipWebUIDelegate {
         #endif
     }
 
+    /// Prepare any configured content blockers and populate `contentBlockerSetupErrors`.
+    ///
+    /// On Apple platforms this compiles or loads persisted rule lists so later web view creation
+    /// can attach them without the initial compile cost. On other platforms this is a no-op.
+    @MainActor
+    @discardableResult
+    public func prepareContentBlockers() async -> [WebContentBlockerError] {
+        #if !SKIP
+        _ = await prepareIOSContentBlockerRuleLists()
+        return contentBlockerSetupErrors
+        #else
+        contentBlockerSetupErrors = []
+        return []
+        #endif
+    }
+
     #if !SKIP
     /// Create a `WebViewConfiguration` from the properties of this configuration and
     /// asynchronously install any configured iOS content blockers.
     @MainActor public func makeWebViewConfiguration() async -> WebViewConfiguration {
         let configuration = makeBaseWebViewConfiguration()
-        _ = await installContentBlockers(into: configuration.userContentController)
+        _ = await installPreparedContentBlockers(into: configuration.userContentController)
         return configuration
     }
 
@@ -3061,10 +3377,20 @@ public extension SkipWebUIDelegate {
 
     @MainActor
     @discardableResult
-    public func installContentBlockers(into userContentController: WKUserContentController) async -> [WebContentBlockerError] {
+    fileprivate func installPreparedContentBlockers(into userContentController: WKUserContentController) async -> [WebContentBlockerError] {
+        let prepared = await prepareIOSContentBlockerRuleLists()
+        for ruleList in prepared.ruleLists {
+            userContentController.add(ruleList)
+        }
+        WebContentBlockerStore.recordInstallation(count: prepared.ruleLists.count)
+        return prepared.errors
+    }
+
+    @MainActor
+    private func prepareIOSContentBlockerRuleLists() async -> PreparedContentBlockerRuleLists {
         contentBlockerSetupErrors = []
         guard let contentBlockers, !contentBlockers.iOSRuleListPaths.isEmpty else {
-            return []
+            return PreparedContentBlockerRuleLists(ruleLists: [], errors: [])
         }
 
         let prepared = await WebContentBlockerStore.prepareRuleLists(
@@ -3072,11 +3398,7 @@ public extension SkipWebUIDelegate {
             whitelistedDomains: contentBlockers.normalizedWhitelistedDomains
         )
         contentBlockerSetupErrors = prepared.errors
-        for ruleList in prepared.ruleLists {
-            userContentController.add(ruleList)
-        }
-        WebContentBlockerStore.recordInstallation(count: prepared.ruleLists.count)
-        return prepared.errors
+        return prepared
     }
 
     @MainActor private var webKitWebsiteDataStore: WKWebsiteDataStore {
@@ -3224,6 +3546,9 @@ fileprivate enum WebContentBlockerStore {
                 content,
                 whitelistedDomains: normalizedWhitelistedDomains
             )
+            if isEmptyRuleListContent(augmentedContent) {
+                continue
+            }
             let augmentedContentData = Data(augmentedContent.utf8)
             let identifier = ruleListIdentifier(for: sourcePath, contentData: augmentedContentData)
             nextIdentifiersBySourcePath[sourcePath] = identifier
@@ -3280,6 +3605,15 @@ fileprivate enum WebContentBlockerStore {
 
     private static func ruleListIdentifier(for sourcePath: String, contentData: Data) -> String {
         "skipweb.content-blocker.\(hexString(Insecure.SHA1.hash(data: Data(sourcePath.utf8)))).\(hexString(SHA256.hash(data: contentData)))"
+    }
+
+    private static func isEmptyRuleListContent(_ content: String) -> Bool {
+        guard let data = content.data(using: .utf8),
+              let jsonObject = try? JSONSerialization.jsonObject(with: data),
+              let rules = jsonObject as? [Any] else {
+            return false
+        }
+        return rules.isEmpty
     }
 
     private static func makeStore(errors: inout [WebContentBlockerError]) -> WKContentRuleListStore? {

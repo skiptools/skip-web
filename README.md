@@ -93,6 +93,8 @@ let config = WebEngineConfiguration(
         androidMode: .custom(MyAndroidContentBlockingProvider())
     )
 )
+
+_ = await config.prepareContentBlockers()
 ```
 
 For Android navigation callbacks, prefer `WebEngineConfiguration.navigationDelegate`.
@@ -579,10 +581,11 @@ For a fuller guide with a quick integration example, whitelist behavior, and up-
 
 Quick summary:
 
-- `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and attached to the web view's `WKUserContentController`.
+- `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and attached by SkipWeb.
 - `whitelistedDomains` accepts WebKit-style entries such as `example.com` and `*.example.com`, normalizes them, and disables blocking for matching page domains across both platforms.
 - `androidMode: .custom(...)` is the primary Android API; the legacy `androidRequestBlocker` and `androidCosmeticBlocker` shims remain available as deprecated compatibility paths for one release.
 - `WebEngineConfiguration.clearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list cache so the next install recompiles from source.
+- `prepareContentBlockers()` lets apps prewarm iOS blocker setup without importing `WebKit`.
 - Popup children and caller-supplied `WKWebView` instances inherit the configured blocker setup.
 
 ## Contribution

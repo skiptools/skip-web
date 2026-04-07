@@ -15,6 +15,12 @@ import WebKit
 import SkipWeb
 
 struct ContentBlockingProvider: AndroidContentBlockingProvider {
+    var persistentCosmeticRules: [AndroidCosmeticRule] {
+        [
+            AndroidCosmeticRule(hiddenSelectors: [".ad-banner"])
+        ]
+    }
+
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
         if request.url.host?.contains("ads") == true {
             return .block
@@ -22,9 +28,8 @@ struct ContentBlockingProvider: AndroidContentBlockingProvider {
         return .allow
     }
 
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
         [
-            AndroidCosmeticRule(hiddenSelectors: [".ad-banner"]),
             AndroidCosmeticRule(
                 hiddenSelectors: [".ad-slot", ".tracking-frame"],
                 urlFilterPattern: ".*\\/ad-frame\\.html",
@@ -48,6 +53,7 @@ let configuration = WebEngineConfiguration(
 )
 
 try WebEngineConfiguration.clearContentBlockerCache()
+_ = await configuration.prepareContentBlockers()
 let webViewConfiguration = await configuration.makeWebViewConfiguration()
 let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
 let engine = WebEngine(configuration: configuration, webView: webView)
@@ -82,10 +88,8 @@ public final class WebEngineConfiguration {
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError]
 
     @MainActor public static func clearContentBlockerCache() throws
+    @MainActor public func prepareContentBlockers() async -> [WebContentBlockerError]
     @MainActor public func makeWebViewConfiguration() async -> WebViewConfiguration
-    @MainActor public func installContentBlockers(
-        into userContentController: WKUserContentController
-    ) async -> [WebContentBlockerError]
 }
 ```
 
@@ -103,8 +107,9 @@ public final class WebEngine {
 
 ```swift
 public protocol AndroidContentBlockingProvider {
+    var persistentCosmeticRules: [AndroidCosmeticRule] { get }
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
-    func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
+    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
 }
 ```
 
@@ -232,12 +237,21 @@ public protocol AndroidCosmeticBlocker {
 
 `AndroidCosmeticBlocker` remains available as a deprecated compatibility shim for one release, but the primary API is `androidMode: .custom(...)`.
 
+Think of Android cosmetics as two buckets:
+- `persistentCosmeticRules`: a long-lived baseline registered once per `WebView` and reused across navigations when it does not change
+- `navigationCosmeticRules(for:)`: page-specific CSS that is refreshed for each main-frame navigation when needed
+
+This split is mainly about avoiding repeated work. Think of it as "install the baseline once, then only swap the delta when the page changes." Rules that are effectively global to the browsing session belong in `persistentCosmeticRules`; rules that depend on the current page URL, host, or dynamic match context belong in `navigationCosmeticRules(for:)`.
+
+Whitelist opt-out is enforced inside `SkipWeb`'s Android controller. If the current main-frame URL matches `whitelistedDomains`, neither the persistent baseline nor the per-navigation delta is applied.
+
 ## iOS Rule-List Notes
 
-- `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and installed on the `WKUserContentController`.
+- `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and installed by SkipWeb.
 - SkipWeb persists compiled iOS rule lists in a cache keyed by source path plus effective compiled content.
 - `WebEngineConfiguration.clearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list store.
-- `contentBlockerSetupErrors` is populated after `makeWebViewConfiguration()` and after `awaitContentBlockerSetup()`.
+- `prepareContentBlockers()` lets apps prewarm iOS rule-list compilation without touching WebKit types directly.
+- `contentBlockerSetupErrors` is populated after `prepareContentBlockers()`, after `makeWebViewConfiguration()`, and after `awaitContentBlockerSetup()`.
 - When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.
 
 ### Whitelist Injection

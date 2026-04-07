@@ -31,19 +31,29 @@ final class WebContentBlockerTests: XCTestCase {
 
     final class StaticContentBlockingProvider: AndroidContentBlockingProvider {
         let decision: AndroidRequestBlockDecision
-        let rules: [AndroidCosmeticRule]
+        let persistentRules: [AndroidCosmeticRule]
+        let navigationRules: [AndroidCosmeticRule]
 
-        init(decision: AndroidRequestBlockDecision = AndroidRequestBlockDecision.allow, rules: [AndroidCosmeticRule] = []) {
+        init(
+            decision: AndroidRequestBlockDecision = AndroidRequestBlockDecision.allow,
+            persistentRules: [AndroidCosmeticRule] = [],
+            navigationRules: [AndroidCosmeticRule] = []
+        ) {
             self.decision = decision
-            self.rules = rules
+            self.persistentRules = persistentRules
+            self.navigationRules = navigationRules
+        }
+
+        var persistentCosmeticRules: [AndroidCosmeticRule] {
+            persistentRules
         }
 
         func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
             decision
         }
 
-        func cosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
-            rules
+        func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
+            navigationRules
         }
     }
 
@@ -107,7 +117,7 @@ final class WebContentBlockerTests: XCTestCase {
     func testPopupChildMirroredConfigurationPreservesAndroidBlockingMode() {
         let provider = StaticContentBlockingProvider(
             decision: AndroidRequestBlockDecision.block,
-            rules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
+            navigationRules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
         )
         let contentBlockers = WebContentBlockerConfiguration(
             iOSRuleListPaths: ["/tmp/rules.json"],
@@ -131,7 +141,7 @@ final class WebContentBlockerTests: XCTestCase {
             )
         )
         XCTAssertEqual(mirroredDecision, AndroidRequestBlockDecision.block)
-        XCTAssertEqual(mirroredProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)).count, 1)
+        XCTAssertEqual(mirroredProvider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)).count, 1)
     }
 
     // Verifies legacy Android blocker hooks still bridge through the compatibility provider.
@@ -156,7 +166,7 @@ final class WebContentBlockerTests: XCTestCase {
         )
         XCTAssertEqual(decision, AndroidRequestBlockDecision.allow)
         XCTAssertEqual(
-            provider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)),
+            provider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)),
             [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
         )
     }
@@ -216,10 +226,10 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(mainFrameFallbackDecision, AndroidRequestBlockDecision.allow)
     }
 
-    // Verifies Android cosmetic rules are suppressed for whitelisted page domains.
-    func testAndroidWhitelistedDomainsSuppressCosmeticRules() {
+    // Verifies whitelist wrapping no longer suppresses cosmetics at the provider layer.
+    func testAndroidWhitelistedDomainsDoNotSuppressProviderCosmeticRules() {
         let provider = StaticContentBlockingProvider(
-            rules: [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
+            navigationRules: [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
         )
         let contentBlockers = WebContentBlockerConfiguration(
             whitelistedDomains: ["example.com"],
@@ -231,15 +241,18 @@ final class WebContentBlockerTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            effectiveProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com/page")!)),
-            [AndroidCosmeticRule]()
+            effectiveProvider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com/page")!)),
+            [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
         )
     }
 
     // Verifies Android non-whitelisted domains still use the underlying provider unchanged.
     func testAndroidNonWhitelistedDomainsStillUseUnderlyingProvider() {
         let rule = AndroidCosmeticRule(css: [".ad { display: none !important; }"])
-        let provider = StaticContentBlockingProvider(decision: AndroidRequestBlockDecision.block, rules: [rule])
+        let provider = StaticContentBlockingProvider(
+            decision: AndroidRequestBlockDecision.block,
+            navigationRules: [rule]
+        )
         let contentBlockers = WebContentBlockerConfiguration(
             whitelistedDomains: ["example.com"],
             androidMode: .custom(provider)
@@ -260,7 +273,7 @@ final class WebContentBlockerTests: XCTestCase {
         )
         XCTAssertEqual(decision, AndroidRequestBlockDecision.block)
         XCTAssertEqual(
-            effectiveProvider.cosmeticRules(for: AndroidPageContext(url: URL(string: "https://news.other.com/article")!)),
+            effectiveProvider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://news.other.com/article")!)),
             [rule]
         )
     }
@@ -640,6 +653,35 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(WebContentBlockerDebug.diagnostics.cacheHitIdentifiers, [firstIdentifier])
     }
 
+    // Verifies apps can prewarm iOS rule-list compilation without constructing WebKit controller objects.
+    @MainActor
+    func testIOSContentBlockersCanBePreparedWithoutWebViewConfiguration() async throws {
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let ruleFile = fixtureDirectory.appendingPathComponent("rules.json")
+        try writeContentBlockerRuleFile(at: ruleFile, contents: validContentBlockerRules())
+
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
+        defer {
+            try? WebContentBlockerDebug.clearPersistentState()
+            WebContentBlockerDebug.setBaseDirectoryOverride(nil)
+        }
+        try? WebContentBlockerDebug.clearPersistentState()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let config = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [ruleFile.path])
+        )
+
+        let errors = await config.prepareContentBlockers()
+
+        XCTAssertTrue(errors.isEmpty)
+        XCTAssertTrue(config.contentBlockerSetupErrors.isEmpty)
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.compiledIdentifiers.count, 1)
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.installedRuleListCount, 0)
+    }
+
     // Verifies iOS whitelist rules are appended as ignore-previous-rules exemptions.
     @MainActor
     func testIOSWhitelistedDomainsAppendIgnorePreviousRules() throws {
@@ -910,6 +952,33 @@ final class WebContentBlockerTests: XCTestCase {
             return XCTFail("Expected a compilationFailed error")
         }
         XCTAssertEqual(path, invalidRuleFile.path)
+    }
+
+    // Verifies an iOS rule file that contains an empty array is treated as a no-op instead of a compilation failure.
+    @MainActor
+    func testIOSEmptyRuleListIsIgnored() async throws {
+        let testDirectory = contentBlockerTestDirectory()
+        let fixtureDirectory = contentBlockerFixtureDirectory(from: testDirectory)
+        let storeDirectory = contentBlockerStoreDirectory(from: testDirectory)
+        let emptyRuleFile = fixtureDirectory.appendingPathComponent("empty-rules.json")
+        try writeContentBlockerRuleFile(at: emptyRuleFile, contents: "[]")
+
+        WebContentBlockerDebug.setBaseDirectoryOverride(storeDirectory)
+        defer {
+            try? WebContentBlockerDebug.clearPersistentState()
+            WebContentBlockerDebug.setBaseDirectoryOverride(nil)
+        }
+        try? WebContentBlockerDebug.clearPersistentState()
+        WebContentBlockerDebug.resetDiagnostics()
+
+        let config = WebEngineConfiguration(
+            contentBlockers: WebContentBlockerConfiguration(iOSRuleListPaths: [emptyRuleFile.path])
+        )
+        _ = await config.makeWebViewConfiguration()
+
+        XCTAssertTrue(config.contentBlockerSetupErrors.isEmpty)
+        XCTAssertTrue(WebContentBlockerDebug.diagnostics.compiledIdentifiers.isEmpty)
+        XCTAssertEqual(WebContentBlockerDebug.diagnostics.installedRuleListCount, 0)
     }
     #endif
     #endif
