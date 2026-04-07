@@ -97,6 +97,20 @@ let config = WebEngineConfiguration(
 _ = await config.prepareContentBlockers()
 ```
 
+On Android, `AndroidCosmeticRule` can now carry current-frame guards directly:
+
+```swift
+AndroidCosmeticRule(
+    hiddenSelectors: ["#subframe-ad"],
+    urlFilterPattern: ".*\\/subframe\\.html",
+    ifDomainList: ["127.0.0.1"],
+    frameScope: .allFrames,
+    preferredTiming: .documentStart
+)
+```
+
+Think of it as "return selectors, render CSS once at the edge". `SkipWeb` installs the rule at document start for all frames, then the injected script checks the frame's own URL and host before turning the matching selectors into `display: none !important`. That is what makes subframe cosmetic blocking work on Android without needing a second late injection path.
+
 For Android navigation callbacks, prefer `WebEngineConfiguration.navigationDelegate`.
 `WebEngine.engineDelegate` remains available as a deprecated compatibility escape hatch, but SkipWeb now keeps blocker enforcement on an internal engine-owned `WebViewClient`.
 

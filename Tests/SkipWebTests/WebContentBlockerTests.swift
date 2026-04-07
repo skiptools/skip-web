@@ -117,7 +117,7 @@ final class WebContentBlockerTests: XCTestCase {
     func testPopupChildMirroredConfigurationPreservesAndroidBlockingMode() {
         let provider = StaticContentBlockingProvider(
             decision: AndroidRequestBlockDecision.block,
-            navigationRules: [AndroidCosmeticRule(css: [".ad{display:none!important;}"])]
+            navigationRules: [AndroidCosmeticRule(hiddenSelectors: [".ad"])]
         )
         let contentBlockers = WebContentBlockerConfiguration(
             iOSRuleListPaths: ["/tmp/rules.json"],
@@ -149,7 +149,7 @@ final class WebContentBlockerTests: XCTestCase {
         let contentBlockers = WebContentBlockerConfiguration(
             androidRequestBlocker: AllowAllRequestBlocker(),
             androidCosmeticBlocker: StaticCosmeticBlocker(
-                rules: [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
+                rules: [AndroidCosmeticRule(hiddenSelectors: [".legacy"])]
             )
         )
 
@@ -167,7 +167,7 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(decision, AndroidRequestBlockDecision.allow)
         XCTAssertEqual(
             provider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com")!)),
-            [AndroidCosmeticRule(css: [".legacy { display: none !important; }"])]
+            [AndroidCosmeticRule(hiddenSelectors: [".legacy"])]
         )
     }
 
@@ -229,7 +229,7 @@ final class WebContentBlockerTests: XCTestCase {
     // Verifies whitelist wrapping no longer suppresses cosmetics at the provider layer.
     func testAndroidWhitelistedDomainsDoNotSuppressProviderCosmeticRules() {
         let provider = StaticContentBlockingProvider(
-            navigationRules: [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
+            navigationRules: [AndroidCosmeticRule(hiddenSelectors: [".ad"])]
         )
         let contentBlockers = WebContentBlockerConfiguration(
             whitelistedDomains: ["example.com"],
@@ -242,13 +242,13 @@ final class WebContentBlockerTests: XCTestCase {
 
         XCTAssertEqual(
             effectiveProvider.navigationCosmeticRules(for: AndroidPageContext(url: URL(string: "https://example.com/page")!)),
-            [AndroidCosmeticRule(css: [".ad { display: none !important; }"])]
+            [AndroidCosmeticRule(hiddenSelectors: [".ad"])]
         )
     }
 
     // Verifies Android non-whitelisted domains still use the underlying provider unchanged.
     func testAndroidNonWhitelistedDomainsStillUseUnderlyingProvider() {
-        let rule = AndroidCosmeticRule(css: [".ad { display: none !important; }"])
+        let rule = AndroidCosmeticRule(hiddenSelectors: [".ad"])
         let provider = StaticContentBlockingProvider(
             decision: AndroidRequestBlockDecision.block,
             navigationRules: [rule]
@@ -295,10 +295,12 @@ final class WebContentBlockerTests: XCTestCase {
 
     // Verifies Android cosmetic rules default to wildcard origins, main-frame scope, and document-start timing.
     func testAndroidCosmeticRuleDefaults() {
-        let rule = AndroidCosmeticRule(css: [".ad { display: none !important; }"])
+        let rule = AndroidCosmeticRule(hiddenSelectors: [".ad"])
 
         XCTAssertNil(rule.urlFilterPattern)
         XCTAssertEqual(rule.allowedOriginRules, ["*"])
+        XCTAssertTrue(rule.ifDomainList.isEmpty)
+        XCTAssertTrue(rule.unlessDomainList.isEmpty)
         XCTAssertEqual(rule.frameScope, .mainFrameOnly)
         XCTAssertEqual(rule.preferredTiming, .documentStart)
     }
@@ -312,16 +314,20 @@ final class WebContentBlockerTests: XCTestCase {
             ],
             urlFilterPattern: ".*\\/ad-frame\\.html",
             allowedOriginRules: ["https://*.doubleclick.net"],
+            ifDomainList: ["ads.example.com"],
+            unlessDomainList: ["private.ads.example.com"],
             frameScope: .subframesOnly,
             preferredTiming: .documentStart
         )
 
-        XCTAssertEqual(rule.css, [
-            ".ad-banner { display: none !important; }",
-            "#sponsored { display: none !important; }"
+        XCTAssertEqual(rule.hiddenSelectors, [
+            ".ad-banner",
+            "#sponsored"
         ])
         XCTAssertEqual(rule.urlFilterPattern, ".*\\/ad-frame\\.html")
         XCTAssertEqual(rule.allowedOriginRules, ["https://*.doubleclick.net"])
+        XCTAssertEqual(rule.ifDomainList, ["ads.example.com"])
+        XCTAssertEqual(rule.unlessDomainList, ["private.ads.example.com"])
         XCTAssertEqual(rule.frameScope, .subframesOnly)
         XCTAssertEqual(rule.preferredTiming, .documentStart)
     }
@@ -395,13 +401,13 @@ final class WebContentBlockerTests: XCTestCase {
     func testAndroidCosmeticPlanPreservesDocumentStartRuleOrder() {
         let rules = [
             AndroidCosmeticRule(
-                css: [".primary { display: none !important; }"],
+                hiddenSelectors: [".primary"],
                 allowedOriginRules: ["https://*.doubleclick.net"],
                 frameScope: .subframesOnly,
                 preferredTiming: .documentStart
             ),
             AndroidCosmeticRule(
-                css: [".secondary { opacity: 0 !important; }"],
+                hiddenSelectors: [".secondary"],
                 allowedOriginRules: ["*"],
                 frameScope: .allFrames,
                 preferredTiming: .documentStart
@@ -418,16 +424,42 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertTrue(plan.lifecycleCSS.isEmpty)
     }
 
+    // Verifies document-start batching keeps unlike domain-list guards in separate rules.
+    func testAndroidCosmeticPlanKeepsDocumentStartRulesSeparateWhenDomainListsDiffer() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    hiddenSelectors: [".news"],
+                    ifDomainList: ["news.example.com"],
+                    frameScope: .allFrames,
+                    preferredTiming: .documentStart
+                ),
+                AndroidCosmeticRule(
+                    hiddenSelectors: [".sports"],
+                    ifDomainList: ["sports.example.com"],
+                    frameScope: .allFrames,
+                    preferredTiming: .documentStart
+                )
+            ],
+            pageURL: URL(string: "https://example.com")!,
+            isDocumentStartSupported: true
+        )
+
+        XCTAssertEqual(plan.documentStartRules.count, 2)
+        XCTAssertEqual(plan.documentStartRules[0].ifDomainList, ["news.example.com"])
+        XCTAssertEqual(plan.documentStartRules[1].ifDomainList, ["sports.example.com"])
+    }
+
     // Verifies unsupported document-start injection falls back only for main-frame rules.
     func testAndroidCosmeticPlanFallsBackOnlyForMainFrameRulesWhenUnsupported() {
         let plan = WebEngine.androidCosmeticInjectionPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".main { display: none !important; }"],
+                    hiddenSelectors: [".main"],
                     preferredTiming: .documentStart
                 ),
                 AndroidCosmeticRule(
-                    css: [".subframe { display: none !important; }"],
+                    hiddenSelectors: [".subframe"],
                     frameScope: .subframesOnly,
                     preferredTiming: .documentStart
                 )
@@ -445,11 +477,11 @@ final class WebContentBlockerTests: XCTestCase {
         let plan = WebEngine.androidCosmeticInjectionPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".late { display: none !important; }"],
+                    hiddenSelectors: [".late"],
                     preferredTiming: .pageLifecycle
                 ),
                 AndroidCosmeticRule(
-                    css: [".ignored { display: none !important; }"],
+                    hiddenSelectors: [".ignored"],
                     frameScope: .allFrames,
                     preferredTiming: .pageLifecycle
                 )
@@ -467,13 +499,40 @@ final class WebContentBlockerTests: XCTestCase {
         let plan = WebEngine.androidCosmeticInjectionPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".match { display: none !important; }"],
+                    hiddenSelectors: [".match"],
                     allowedOriginRules: ["https://*.example.com"],
                     preferredTiming: .pageLifecycle
                 ),
                 AndroidCosmeticRule(
-                    css: [".skip { display: none !important; }"],
+                    hiddenSelectors: [".skip"],
                     allowedOriginRules: ["https://ads.example.net"],
+                    preferredTiming: .pageLifecycle
+                )
+            ],
+            pageURL: URL(string: "https://news.example.com")!,
+            isDocumentStartSupported: true
+        )
+
+        XCTAssertEqual(plan.lifecycleCSS, [".match { display: none !important; }"])
+    }
+
+    // Verifies page-lifecycle fallback honors current-document domain guards before injecting into the main frame.
+    func testAndroidCosmeticPlanFiltersLifecycleRulesByDomainLists() {
+        let plan = WebEngine.androidCosmeticInjectionPlan(
+            rules: [
+                AndroidCosmeticRule(
+                    hiddenSelectors: [".match"],
+                    ifDomainList: ["news.example.com"],
+                    preferredTiming: .pageLifecycle
+                ),
+                AndroidCosmeticRule(
+                    hiddenSelectors: [".skip"],
+                    ifDomainList: ["sports.example.com"],
+                    preferredTiming: .pageLifecycle
+                ),
+                AndroidCosmeticRule(
+                    hiddenSelectors: [".excluded"],
+                    unlessDomainList: ["news.example.com"],
                     preferredTiming: .pageLifecycle
                 )
             ],
@@ -489,12 +548,12 @@ final class WebContentBlockerTests: XCTestCase {
         let plan = WebEngine.androidCosmeticInjectionPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".match { display: none !important; }"],
+                    hiddenSelectors: [".match"],
                     allowedOriginRules: ["https://example.com"],
                     preferredTiming: .documentStart
                 ),
                 AndroidCosmeticRule(
-                    css: [".skip { display: none !important; }"],
+                    hiddenSelectors: [".skip"],
                     allowedOriginRules: ["https://other.example.com"],
                     preferredTiming: .documentStart
                 )
@@ -511,12 +570,12 @@ final class WebContentBlockerTests: XCTestCase {
         let plan = WebEngine.androidCosmeticInjectionPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".match { display: none !important; }"],
+                    hiddenSelectors: [".match"],
                     urlFilterPattern: ".*\\/index\\.html",
                     preferredTiming: .documentStart
                 ),
                 AndroidCosmeticRule(
-                    css: [".skip { display: none !important; }"],
+                    hiddenSelectors: [".skip"],
                     urlFilterPattern: ".*\\/subframe\\.html",
                     preferredTiming: .documentStart
                 )
@@ -533,11 +592,11 @@ final class WebContentBlockerTests: XCTestCase {
         let plan = WebEngine.androidRedirectFallbackCosmeticPlan(
             rules: [
                 AndroidCosmeticRule(
-                    css: [".main { display: none !important; }"],
+                    hiddenSelectors: [".main"],
                     preferredTiming: .documentStart
                 ),
                 AndroidCosmeticRule(
-                    css: [".subframe { display: none !important; }"],
+                    hiddenSelectors: [".subframe"],
                     frameScope: .subframesOnly,
                     preferredTiming: .documentStart
                 )
@@ -591,6 +650,103 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertTrue(script.contains("new RegExp"))
         XCTAssertTrue(script.contains("window.location.href"))
         XCTAssertTrue(script.contains("subframe\\\\.html"))
+    }
+
+    // Verifies domain-scoped scripts bail out unless the current frame host matches the provided domain lists.
+    func testAndroidContentBlockerStyleInjectionScriptAddsDomainGuards() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerStyleInjectionScript(
+                cssRules: [".subframe { display: none !important; }"],
+                styleID: "domain-style",
+                frameScope: AndroidCosmeticFrameScope.allFrames,
+                ifDomainList: ["ads.example.com"],
+                unlessDomainList: ["private.ads.example.com"]
+            )
+        )
+
+        XCTAssertTrue(script.contains("window.location.hostname"))
+        XCTAssertTrue(script.contains("ifDomainList"))
+        XCTAssertTrue(script.contains("unlessDomainList"))
+        XCTAssertTrue(script.contains("ads.example.com"))
+        XCTAssertTrue(script.contains("private.ads.example.com"))
+    }
+
+    // Verifies batched document-start scripts can carry multiple CSS blocks behind one injected style.
+    func testAndroidContentBlockerBatchedStyleInjectionScriptCombinesMultipleRules() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerBatchedStyleInjectionScript(
+                rules: [
+                    AndroidCosmeticRule(
+                        hiddenSelectors: [".first"],
+                        frameScope: AndroidCosmeticFrameScope.allFrames
+                    ),
+                    AndroidCosmeticRule(
+                        hiddenSelectors: [".second"],
+                        frameScope: AndroidCosmeticFrameScope.allFrames,
+                        urlFilterPattern: ".*\\/subframe\\.html",
+                        ifDomainList: ["ads.example.com"]
+                    )
+                ],
+                styleID: "batched-style"
+            )
+        )
+
+        XCTAssertTrue(script.contains("var rules = ["))
+        XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".first\"]"))
+        XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".second\"]"))
+        XCTAssertTrue(script.contains("var compactedCSS = compactHiddenSelectors(collectedSelectors)"))
+        XCTAssertTrue(script.contains("style.textContent = compactedCSS.join"))
+        XCTAssertTrue(script.contains("groupedDisplayNoneCSS"))
+        XCTAssertTrue(script.contains("compactHiddenSelectors"))
+        XCTAssertTrue(script.contains("batched-style"))
+    }
+
+    // Verifies batched document-start scripts retain per-rule frame, URL, and host guards.
+    func testAndroidContentBlockerBatchedStyleInjectionScriptRetainsRuleSpecificGuards() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerBatchedStyleInjectionScript(
+                rules: [
+                    AndroidCosmeticRule(
+                        hiddenSelectors: [".subframe"],
+                        frameScope: AndroidCosmeticFrameScope.subframesOnly,
+                        urlFilterPattern: ".*\\/subframe\\.html",
+                        ifDomainList: ["ads.example.com"],
+                        unlessDomainList: ["private.ads.example.com"]
+                    )
+                ],
+                styleID: "batched-guards"
+            )
+        )
+
+        XCTAssertTrue(script.contains("frameMatches"))
+        XCTAssertTrue(script.contains("subframesOnly"))
+        XCTAssertTrue(script.contains("new RegExp"))
+        XCTAssertTrue(script.contains("ads.example.com"))
+        XCTAssertTrue(script.contains("private.ads.example.com"))
+    }
+
+    // Verifies batched scripts merge compatible display-none rules with the same batching limits as the store reducer.
+    func testAndroidContentBlockerBatchedStyleInjectionScriptCompactsDisplayNoneCSS() throws {
+        let script = try XCTUnwrap(
+            WebEngine.androidContentBlockerBatchedStyleInjectionScript(
+                rules: [
+                    AndroidCosmeticRule(
+                        hiddenSelectors: [
+                            ".first",
+                            ".second",
+                            ".first"
+                        ],
+                        frameScope: AndroidCosmeticFrameScope.allFrames
+                    )
+                ],
+                styleID: "batched-compact"
+            )
+        )
+
+        XCTAssertTrue(script.contains("maximumSelectorsPerGroupedRule = 128"))
+        XCTAssertTrue(script.contains("maximumSelectorCharactersPerGroupedRule = 16384"))
+        XCTAssertTrue(script.contains("return groupedDisplayNoneCSS(uniqueSelectors)"))
+        XCTAssertTrue(script.contains("display: none !important;"))
     }
 
     // Verifies all-frame scripts omit frame guards so they can run in any frame context.

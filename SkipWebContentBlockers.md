@@ -37,8 +37,9 @@ struct ContentBlockingProvider: AndroidContentBlockingProvider {
                 frameScope: .subframesOnly
             ),
             AndroidCosmeticRule(
-                css: ["body.modal-open { overflow: auto !important; }"],
-                preferredTiming: .pageLifecycle
+                hiddenSelectors: [".generic-overlay", "#sponsored-modal"],
+                preferredTiming: .pageLifecycle,
+                frameScope: .mainFrameOnly
             )
         ]
     }
@@ -205,29 +206,27 @@ public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Send
 
 ```swift
 public struct AndroidCosmeticRule: Equatable, Sendable {
-    public var css: [String]
+    public var hiddenSelectors: [String]
     public var urlFilterPattern: String?
     public var allowedOriginRules: [String]
+    public var ifDomainList: [String]
+    public var unlessDomainList: [String]
     public var frameScope: AndroidCosmeticFrameScope
     public var preferredTiming: AndroidCosmeticInjectionTiming
 
     public init(
-        css: [String] = [],
+        hiddenSelectors: [String] = [],
         urlFilterPattern: String? = nil,
         allowedOriginRules: [String] = ["*"],
-        frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
-    )
-
-    public init(
-        hiddenSelectors: [String],
-        urlFilterPattern: String? = nil,
-        allowedOriginRules: [String] = ["*"],
+        ifDomainList: [String] = [],
+        unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
         preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
     )
 }
 ```
+
+Think of the Android cosmetic API as "selectors plus guards". `SkipWeb` is responsible for turning those selectors into `display: none !important` when a frame actually matches.
 
 ```swift
 public protocol AndroidCosmeticBlocker {

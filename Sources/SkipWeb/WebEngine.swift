@@ -150,15 +150,41 @@ public enum WebProfileError: Error, Equatable {
     case profileSetupFailed
 }
 
+/// Cross-platform content-blocker configuration for a `WebEngine`.
+///
+/// Think of it as the single place where apps describe:
+/// - iOS rule-list files to compile and install
+/// - domains that should bypass blocking entirely
+/// - Android request and cosmetic blocking behavior
 public struct WebContentBlockerConfiguration {
+    /// Paths to iOS WebKit content-blocker JSON files.
+    ///
+    /// SkipWeb compiles these files into `WKContentRuleList` values and installs them
+    /// into the web view configuration on Apple platforms.
     public var iOSRuleListPaths: [String]
+    /// Domain allowlist entries that bypass SkipWeb-managed blocking on matching pages.
+    ///
+    /// Entries use WebKit-style host matching such as `example.com` and `*.example.com`.
     public var whitelistedDomains: [String]
+    /// Primary Android content-blocking entry point.
+    ///
+    /// Use `.custom(...)` to supply request and cosmetic blocking behavior from one provider.
     public var androidMode: AndroidContentBlockingMode
+    /// Deprecated Android request-blocking compatibility shim.
     @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
     public var androidRequestBlocker: (any AndroidRequestBlocker)?
+    /// Deprecated Android cosmetic-blocking compatibility shim.
     @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
     public var androidCosmeticBlocker: (any AndroidCosmeticBlocker)?
 
+    /// Creates a content-blocker configuration.
+    ///
+    /// - Parameters:
+    ///   - iOSRuleListPaths: iOS WebKit content-blocker JSON files to compile.
+    ///   - whitelistedDomains: Host patterns that should bypass blocking.
+    ///   - androidMode: Primary Android blocking configuration.
+    ///   - androidRequestBlocker: Deprecated Android request blocker bridge.
+    ///   - androidCosmeticBlocker: Deprecated Android cosmetic blocker bridge.
     public init(
         iOSRuleListPaths: [String] = [],
         whitelistedDomains: [String] = [],
@@ -174,28 +200,45 @@ public struct WebContentBlockerConfiguration {
     }
 }
 
+/// Android request and cosmetic blocking provider used by `AndroidContentBlockingMode.custom`.
 public protocol AndroidContentBlockingProvider {
+    /// Long-lived cosmetic rules that SkipWeb can reuse across navigations.
+    ///
+    /// Put CSS here when it acts like a baseline for the whole browsing session rather than
+    /// a rule that depends on the current page URL.
     var persistentCosmeticRules: [AndroidCosmeticRule] { get }
+    /// Returns the request-blocking decision for an Android resource load.
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
+    /// Returns page-specific cosmetic rules for the current main-frame navigation.
+    ///
+    /// Think of this as the per-page delta that sits on top of `persistentCosmeticRules`.
     func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule]
 }
 
 public extension AndroidContentBlockingProvider {
+    /// Default request-blocking implementation that allows every request.
     func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
         .allow
     }
 }
 
+/// Android content-blocking mode used by `WebContentBlockerConfiguration`.
 public enum AndroidContentBlockingMode {
+    /// Disable SkipWeb-managed Android content blocking.
     case disabled
+    /// Use a custom provider for Android request and cosmetic blocking.
     case custom(any AndroidContentBlockingProvider)
 }
 
+/// Request-blocking decision returned by Android blocker providers.
 public enum AndroidRequestBlockDecision: Equatable, Sendable {
+    /// Allow the request to continue.
     case allow
+    /// Block the request and return an empty response.
     case block
 }
 
+/// Best-effort Android resource classification exposed to request blockers.
 public enum AndroidResourceTypeHint: String, CaseIterable, Hashable, Sendable {
     case document
     case subdocument
@@ -210,16 +253,26 @@ public enum AndroidResourceTypeHint: String, CaseIterable, Hashable, Sendable {
     case other
 }
 
+/// Android request details passed to request blockers.
 public struct AndroidBlockableRequest: Equatable, Sendable {
+    /// The URL being requested.
     public var url: URL
+    /// The current main document URL when known.
     public var mainDocumentURL: URL?
+    /// The HTTP method used for the request.
     public var method: String
+    /// HTTP headers captured from the Android request when available.
     public var headers: [String: String]
+    /// Whether Android marked this as a main-frame navigation.
     public var isForMainFrame: Bool
+    /// Whether the request was triggered by a user gesture.
     public var hasGesture: Bool
+    /// Whether Android marked this request as a redirect, when known.
     public var isRedirect: Bool?
+    /// Best-effort Android resource classification for the request.
     public var resourceTypeHint: AndroidResourceTypeHint?
 
+    /// Creates an Android request description for blocker evaluation.
     public init(
         url: URL,
         mainDocumentURL: URL? = nil,
@@ -241,78 +294,98 @@ public struct AndroidBlockableRequest: Equatable, Sendable {
     }
 }
 
+/// Deprecated compatibility protocol for Android request blocking.
 public protocol AndroidRequestBlocker {
+    /// Returns the request-blocking decision for an Android resource load.
     func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
 }
 
+/// Page details passed to Android cosmetic blockers.
 public struct AndroidPageContext: Equatable, Sendable {
+    /// The current page URL.
     public var url: URL
+    /// The page host, defaulting to `url.host`.
     public var host: String?
 
+    /// Creates a page context for Android cosmetic rule evaluation.
     public init(url: URL, host: String? = nil) {
         self.url = url
         self.host = host ?? url.host
     }
 }
 
+/// Frame scope for an Android cosmetic rule.
 public enum AndroidCosmeticFrameScope: String, CaseIterable, Hashable, Sendable {
+    /// Apply only in the top-level document.
     case mainFrameOnly
+    /// Apply only in subframes.
     case subframesOnly
+    /// Apply in both the top-level document and subframes.
     case allFrames
 }
 
+/// Preferred injection timing for an Android cosmetic rule.
 public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Sendable {
+    /// Install at document start when supported.
     case documentStart
+    /// Inject later during the page lifecycle.
     case pageLifecycle
 }
 
+/// Android cosmetic rule describing CSS to hide or scope.
 public struct AndroidCosmeticRule: Equatable, Sendable {
-    public var css: [String]
+    /// Selector or selector-list entries to hide with `display: none !important`.
+    public var hiddenSelectors: [String]
+    /// Optional regex-style URL filter that must match the page or frame URL.
     public var urlFilterPattern: String?
+    /// Allowed origin rules used for Android document-start script registration.
     public var allowedOriginRules: [String]
+    /// Host patterns that must match the page host.
+    public var ifDomainList: [String]
+    /// Host patterns that must not match the page host.
+    public var unlessDomainList: [String]
+    /// Frame scope for the injected CSS.
     public var frameScope: AndroidCosmeticFrameScope
+    /// Preferred injection timing for the CSS.
     public var preferredTiming: AndroidCosmeticInjectionTiming
 
+    /// Creates an Android cosmetic rule.
+    ///
+    /// `hiddenSelectors` is the public API shape; SkipWeb turns each selector into
+    /// `display: none !important` CSS internally.
     public init(
-        css: [String] = [],
+        hiddenSelectors: [String] = [],
         urlFilterPattern: String? = nil,
         allowedOriginRules: [String] = ["*"],
+        ifDomainList: [String] = [],
+        unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
         preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
     ) {
-        self.css = css
+        self.hiddenSelectors = Self.normalizedHiddenSelectors(hiddenSelectors)
         self.urlFilterPattern = urlFilterPattern
         self.allowedOriginRules = allowedOriginRules
+        self.ifDomainList = ifDomainList
+        self.unlessDomainList = unlessDomainList
         self.frameScope = frameScope
         self.preferredTiming = preferredTiming
     }
 
-    /// Convenience initializer for selector-based hiding, matching iOS `css-display-none`.
-    public init(
-        hiddenSelectors: [String],
-        urlFilterPattern: String? = nil,
-        allowedOriginRules: [String] = ["*"],
-        frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
-    ) {
-        self.init(
-            css: Self.hideCSS(for: hiddenSelectors),
-            urlFilterPattern: urlFilterPattern,
-            allowedOriginRules: allowedOriginRules,
-            frameScope: frameScope,
-            preferredTiming: preferredTiming
-        )
-    }
-
-    fileprivate static func hideCSS(for selectors: [String]) -> [String] {
+    fileprivate static func normalizedHiddenSelectors(_ selectors: [String]) -> [String] {
         selectors
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    fileprivate static func hideCSS(for selectors: [String]) -> [String] {
+        normalizedHiddenSelectors(selectors)
             .map { "\($0) { display: none !important; }" }
     }
 }
 
+/// Deprecated compatibility protocol for Android cosmetic blocking.
 public protocol AndroidCosmeticBlocker {
+    /// Returns cosmetic rules for the given page.
     func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule]
 }
 
@@ -341,6 +414,15 @@ public extension SkipWebNavigationDelegate {
 struct AndroidCosmeticInjectionPlan {
     var documentStartRules: [AndroidCosmeticRule] = []
     var lifecycleCSS: [String] = []
+}
+
+struct AndroidDocumentStartRuleBatchKey: Hashable {
+    let frameScope: AndroidCosmeticFrameScope
+    let preferredTiming: AndroidCosmeticInjectionTiming
+    let urlFilterPattern: String?
+    let allowedOriginRules: [String]
+    let ifDomainList: [String]
+    let unlessDomainList: [String]
 }
 
 fileprivate struct LegacyAndroidContentBlockingProvider: AndroidContentBlockingProvider {
@@ -515,15 +597,25 @@ extension WebContentBlockerConfiguration {
     #endif
 }
 
+/// Errors surfaced while preparing, caching, or installing content blockers.
 public enum WebContentBlockerError: Error, Equatable, LocalizedError {
+    /// SkipWeb could not create or access the persistent content-blocker store.
     case storeUnavailable(String)
+    /// SkipWeb could not read a configured content-blocker file.
     case fileReadFailed(path: String, description: String)
+    /// A configured content-blocker file was not valid UTF-8 text.
     case fileEncodingFailed(path: String)
+    /// SkipWeb could not look up a previously compiled rule list in the cache.
     case cacheLookupFailed(identifier: String, description: String)
+    /// WebKit failed to compile a rule-list file.
     case compilationFailed(path: String, description: String)
+    /// SkipWeb could not read the persistent metadata it uses to track compiled rule lists.
     case metadataReadFailed(String)
+    /// SkipWeb could not write the persistent metadata it uses to track compiled rule lists.
     case metadataWriteFailed(String)
+    /// SkipWeb could not prune a stale compiled rule list from the cache.
     case staleRuleRemovalFailed(identifier: String, description: String)
+    /// A content-blocker store operation did not finish before the timeout.
     case operationTimedOut(String)
 
     public var errorDescription: String? {
@@ -923,6 +1015,9 @@ extension WebCookie {
 @MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
     public let webView: PlatformWebView
+    /// The latest content-blocker setup errors observed by this engine.
+    ///
+    /// On iOS this is populated after asynchronous content-blocker preparation completes.
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
     #if !SKIP
     public override var description: String {
@@ -1145,6 +1240,10 @@ extension WebCookie {
         }
     }
 
+    /// Waits for any pending content-blocker setup work and returns the resulting errors.
+    ///
+    /// This matters mainly on iOS, where rule-list compilation and installation can happen
+    /// asynchronously after engine creation.
     public func awaitContentBlockerSetup() async -> [WebContentBlockerError] {
         #if !SKIP
         if let iosContentBlockerSetupTask {
@@ -1792,10 +1891,18 @@ extension WebCookie {
         }
     }
 
+    fileprivate static func normalizedAndroidCosmeticSelectors(_ hiddenSelectors: [String]) -> [String] {
+        AndroidCosmeticRule.normalizedHiddenSelectors(hiddenSelectors)
+    }
+
     fileprivate static func normalizedAndroidCosmeticCSS(_ cssRules: [String]) -> [String] {
         cssRules
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    fileprivate static func androidDisplayNoneCSSRules(forSelectors hiddenSelectors: [String]) -> [String] {
+        AndroidCosmeticRule.hideCSS(for: hiddenSelectors)
     }
 
     fileprivate static func normalizedAndroidAllowedOriginRules(_ allowedOriginRules: [String]) -> [String] {
@@ -1919,6 +2026,45 @@ extension WebCookie {
         return normalizedRules.contains { androidOriginRule($0, matches: pageURL) }
     }
 
+    fileprivate static func androidDomainRule(_ rule: String, matchesHost host: String) -> Bool {
+        let normalizedRule = rule.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalizedRule.isEmpty else {
+            return false
+        }
+        if normalizedRule.hasPrefix("*.") {
+            let suffix = String(normalizedRule.dropFirst(2))
+            guard !suffix.isEmpty else {
+                return false
+            }
+            return host.count > suffix.count && host.hasSuffix(".\(suffix)")
+        }
+        return host == normalizedRule
+    }
+
+    fileprivate static func androidDomainListsMatchPage(
+        ifDomainList: [String],
+        unlessDomainList: [String],
+        pageURL: URL
+    ) -> Bool {
+        let host = pageURL.host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        if !ifDomainList.isEmpty {
+            guard let host else {
+                return false
+            }
+            guard ifDomainList.contains(where: { androidDomainRule($0, matchesHost: host) }) else {
+                return false
+            }
+        }
+
+        if let host,
+           unlessDomainList.contains(where: { androidDomainRule($0, matchesHost: host) }) {
+            return false
+        }
+
+        return true
+    }
+
     fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL) -> Bool {
         guard let urlFilterPattern, !urlFilterPattern.isEmpty else {
             return true
@@ -1939,55 +2085,100 @@ extension WebCookie {
 
     fileprivate static func appendAndroidDocumentStartRule(
         _ rule: AndroidCosmeticRule,
-        to batchedRules: inout [AndroidCosmeticRule]
+        to batchedRules: inout [AndroidCosmeticRule],
+        indexByKey: inout [AndroidDocumentStartRuleBatchKey: Int]
     ) {
-        var matchingIndex: Int?
-        for index in batchedRules.indices {
-            let existingRule = batchedRules[index]
-            if existingRule.frameScope == rule.frameScope &&
-                existingRule.preferredTiming == rule.preferredTiming &&
-                existingRule.urlFilterPattern == rule.urlFilterPattern &&
-                existingRule.allowedOriginRules == rule.allowedOriginRules {
-                matchingIndex = index
-                break
-            }
-        }
+        let key = AndroidDocumentStartRuleBatchKey(
+            frameScope: rule.frameScope,
+            preferredTiming: rule.preferredTiming,
+            urlFilterPattern: rule.urlFilterPattern,
+            allowedOriginRules: rule.allowedOriginRules,
+            ifDomainList: rule.ifDomainList,
+            unlessDomainList: rule.unlessDomainList
+        )
 
-        if let matchingIndex {
-            batchedRules[matchingIndex].css.append(contentsOf: rule.css)
+        if let matchingIndex = indexByKey[key] {
+            batchedRules[matchingIndex].hiddenSelectors.append(contentsOf: rule.hiddenSelectors)
         } else {
+            indexByKey[key] = batchedRules.count
             batchedRules.append(rule)
         }
     }
 
-    static func androidCosmeticInjectionPlan(
+    fileprivate static func androidDocumentStartCosmeticRules(
+        rules: [AndroidCosmeticRule],
+        isDocumentStartSupported: Bool
+    ) -> [AndroidCosmeticRule] {
+        guard isDocumentStartSupported else {
+            return []
+        }
+
+        var batchedRules: [AndroidCosmeticRule] = []
+        batchedRules.reserveCapacity(rules.count)
+        var indexByKey: [AndroidDocumentStartRuleBatchKey: Int] = [:]
+
+        for rule in rules {
+            guard rule.preferredTiming == .documentStart else {
+                continue
+            }
+
+            let normalizedSelectors = normalizedAndroidCosmeticSelectors(rule.hiddenSelectors)
+            guard !normalizedSelectors.isEmpty else {
+                continue
+            }
+
+            var normalizedRule = rule
+            normalizedRule.hiddenSelectors = normalizedSelectors
+            normalizedRule.allowedOriginRules = normalizedAndroidAllowedOriginRules(rule.allowedOriginRules)
+            appendAndroidDocumentStartRule(
+                normalizedRule,
+                to: &batchedRules,
+                indexByKey: &indexByKey
+            )
+        }
+
+        return batchedRules
+    }
+
+    fileprivate static func androidLifecycleCosmeticCSS(
         rules: [AndroidCosmeticRule],
         pageURL: URL,
         isDocumentStartSupported: Bool,
         log: ((String) -> Void)? = nil
-    ) -> AndroidCosmeticInjectionPlan {
-        var plan = AndroidCosmeticInjectionPlan()
+    ) -> [String] {
+        var lifecycleCSS: [String] = []
 
         for rule in rules {
-            let normalizedCSS = normalizedAndroidCosmeticCSS(rule.css)
-            guard !normalizedCSS.isEmpty else {
+            let normalizedSelectors = normalizedAndroidCosmeticSelectors(rule.hiddenSelectors)
+            guard !normalizedSelectors.isEmpty else {
                 continue
             }
+            let normalizedCSS = androidDisplayNoneCSSRules(forSelectors: normalizedSelectors)
 
             switch rule.preferredTiming {
             case .documentStart:
-                if isDocumentStartSupported {
-                    var normalizedRule = rule
-                    normalizedRule.css = normalizedCSS
-                    normalizedRule.allowedOriginRules = normalizedAndroidAllowedOriginRules(rule.allowedOriginRules)
-                    appendAndroidDocumentStartRule(normalizedRule, to: &plan.documentStartRules)
-                } else if rule.frameScope == .mainFrameOnly,
-                          androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
-                          androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
-                    plan.lifecycleCSS.append(contentsOf: normalizedCSS)
+                guard !isDocumentStartSupported else {
+                    continue
+                }
+
+                if rule.frameScope == .mainFrameOnly,
+                   androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
+                   androidDomainListsMatchPage(
+                    ifDomainList: rule.ifDomainList,
+                    unlessDomainList: rule.unlessDomainList,
+                    pageURL: pageURL
+                   ),
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                    lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
                         log?("Skipping Android cosmetic rule because page origin does not match allowedOriginRules")
+                    } else if !androidDomainListsMatchPage(
+                        ifDomainList: rule.ifDomainList,
+                        unlessDomainList: rule.unlessDomainList,
+                        pageURL: pageURL
+                    ) {
+                        log?("Skipping Android cosmetic rule because page host does not match domain lists")
                     } else {
                         log?("Skipping Android cosmetic rule because page URL does not match urlFilterPattern")
                     }
@@ -1997,11 +2188,22 @@ extension WebCookie {
             case .pageLifecycle:
                 if rule.frameScope == .mainFrameOnly,
                    androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL),
+                   androidDomainListsMatchPage(
+                    ifDomainList: rule.ifDomainList,
+                    unlessDomainList: rule.unlessDomainList,
+                    pageURL: pageURL
+                   ),
                    androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
-                    plan.lifecycleCSS.append(contentsOf: normalizedCSS)
+                    lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
                         log?("Skipping Android cosmetic rule because page origin does not match allowedOriginRules")
+                    } else if !androidDomainListsMatchPage(
+                        ifDomainList: rule.ifDomainList,
+                        unlessDomainList: rule.unlessDomainList,
+                        pageURL: pageURL
+                    ) {
+                        log?("Skipping Android cosmetic rule because page host does not match domain lists")
                     } else {
                         log?("Skipping Android cosmetic rule because page URL does not match urlFilterPattern")
                     }
@@ -2011,7 +2213,27 @@ extension WebCookie {
             }
         }
 
-        return plan
+        return lifecycleCSS
+    }
+
+    static func androidCosmeticInjectionPlan(
+        rules: [AndroidCosmeticRule],
+        pageURL: URL,
+        isDocumentStartSupported: Bool,
+        log: ((String) -> Void)? = nil
+    ) -> AndroidCosmeticInjectionPlan {
+        AndroidCosmeticInjectionPlan(
+            documentStartRules: androidDocumentStartCosmeticRules(
+                rules: rules,
+                isDocumentStartSupported: isDocumentStartSupported
+            ),
+            lifecycleCSS: androidLifecycleCosmeticCSS(
+                rules: rules,
+                pageURL: pageURL,
+                isDocumentStartSupported: isDocumentStartSupported,
+                log: log
+            )
+        )
     }
 
     static func androidRedirectFallbackCosmeticPlan(
@@ -2043,7 +2265,9 @@ extension WebCookie {
         cssRules: [String],
         styleID: String,
         frameScope: AndroidCosmeticFrameScope,
-        urlFilterPattern: String? = nil
+        urlFilterPattern: String? = nil,
+        ifDomainList: [String] = [],
+        unlessDomainList: [String] = []
     ) -> String? {
         let css = normalizedAndroidCosmeticCSS(cssRules).joined(separator: "\n")
         guard !css.isEmpty else {
@@ -2076,6 +2300,39 @@ extension WebCookie {
         } else {
             urlFilterGuard = ""
         }
+        let domainGuard: String
+        if !ifDomainList.isEmpty || !unlessDomainList.isEmpty {
+            guard
+                let ifDomainData = try? JSONSerialization.data(withJSONObject: ifDomainList, options: []),
+                let ifDomainEncoded = String(data: ifDomainData, encoding: .utf8),
+                let unlessDomainData = try? JSONSerialization.data(withJSONObject: unlessDomainList, options: []),
+                let unlessDomainEncoded = String(data: unlessDomainData, encoding: .utf8)
+            else {
+                return nil
+            }
+            domainGuard = """
+            var currentHost = (window.location.hostname || "").toLowerCase();
+            var ifDomainList = \(ifDomainEncoded);
+            var unlessDomainList = \(unlessDomainEncoded);
+            var domainMatches = function(ruleDomain) {
+                if (typeof ruleDomain !== "string") { return false; }
+                var normalizedRuleDomain = ruleDomain.trim().toLowerCase();
+                if (!normalizedRuleDomain) { return false; }
+                if (normalizedRuleDomain.startsWith("*.")) {
+                    var suffix = normalizedRuleDomain.slice(2);
+                    return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
+                }
+                return currentHost === normalizedRuleDomain;
+            };
+            if (ifDomainList.length > 0) {
+                if (!currentHost) { return; }
+                if (!ifDomainList.some(domainMatches)) { return; }
+            }
+            if (currentHost && unlessDomainList.some(domainMatches)) { return; }
+            """
+        } else {
+            domainGuard = ""
+        }
         let frameGuard: String
         switch frameScope {
         case .mainFrameOnly:
@@ -2089,6 +2346,7 @@ extension WebCookie {
         (function() {
             \(frameGuard)
             \(urlFilterGuard)
+            \(domainGuard)
             var styleId = "\(styleIDLiteral)";
             var css = \(cssLiteral);
             var root = document.head || document.documentElement;
@@ -2100,6 +2358,169 @@ extension WebCookie {
                 root.appendChild(style);
             }
             style.textContent = css;
+        })();
+        """
+    }
+
+    static func androidContentBlockerBatchedStyleInjectionScript(
+        rules: [AndroidCosmeticRule],
+        styleID: String
+    ) -> String? {
+        var serializedRules: [[String: Any]] = []
+        serializedRules.reserveCapacity(rules.count)
+
+        for rule in rules {
+            let hiddenSelectors = normalizedAndroidCosmeticSelectors(rule.hiddenSelectors)
+            guard !hiddenSelectors.isEmpty else {
+                continue
+            }
+            serializedRules.append(
+                [
+                    "hiddenSelectors": hiddenSelectors,
+                    "frameScope": rule.frameScope.rawValue,
+                    "urlFilterPattern": rule.urlFilterPattern ?? NSNull(),
+                    "ifDomainList": rule.ifDomainList,
+                    "unlessDomainList": rule.unlessDomainList,
+                ]
+            )
+        }
+
+        guard !serializedRules.isEmpty else {
+            return nil
+        }
+        guard
+            let rulesData = try? JSONSerialization.data(withJSONObject: serializedRules, options: []),
+            let rulesLiteral = String(data: rulesData, encoding: .utf8)
+        else {
+            return nil
+        }
+
+        let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
+        return """
+        (function() {
+            var rules = \(rulesLiteral);
+            var locationHref = window.location.href || "";
+            var currentHost = (window.location.hostname || "").toLowerCase();
+            var collectedSelectors = [];
+            var displayNoneDeclaration = "display: none !important;";
+
+            var groupedDisplayNoneCSS = function(selectors) {
+                var maximumSelectorsPerGroupedRule = 128;
+                var maximumSelectorCharactersPerGroupedRule = 16384;
+                var groupedCSS = [];
+                var currentSelectors = [];
+                var currentSelectorCharacters = 0;
+
+                var flushCurrentSelectors = function() {
+                    if (currentSelectors.length === 0) { return; }
+                    groupedCSS.push(currentSelectors.join(", ") + " { " + displayNoneDeclaration + " }");
+                    currentSelectors = [];
+                    currentSelectorCharacters = 0;
+                };
+
+                for (var selectorIndex = 0; selectorIndex < selectors.length; selectorIndex += 1) {
+                    var selector = selectors[selectorIndex];
+                    var separatorCharacters = currentSelectors.length === 0 ? 0 : 2;
+                    var projectedSelectorCharacters = currentSelectorCharacters + separatorCharacters + selector.length;
+                    if (currentSelectors.length > 0 &&
+                        (currentSelectors.length >= maximumSelectorsPerGroupedRule ||
+                         projectedSelectorCharacters > maximumSelectorCharactersPerGroupedRule)) {
+                        flushCurrentSelectors();
+                    }
+
+                    currentSelectors.push(selector);
+                    currentSelectorCharacters += (currentSelectors.length === 1 ? 0 : 2) + selector.length;
+                }
+
+                flushCurrentSelectors();
+                return groupedCSS;
+            };
+
+            var compactHiddenSelectors = function(hiddenSelectors) {
+                var normalizedSelectors = [];
+                for (var selectorIndex = 0; selectorIndex < hiddenSelectors.length; selectorIndex += 1) {
+                    var hiddenSelector = hiddenSelectors[selectorIndex];
+                    if (typeof hiddenSelector !== "string") { continue; }
+                    var normalizedSelector = hiddenSelector.trim();
+                    if (!normalizedSelector) { continue; }
+                    normalizedSelectors.push(normalizedSelector);
+                }
+
+                if (normalizedSelectors.length === 0) { return []; }
+
+                var uniqueSelectors = [];
+                var seenSelectors = Object.create(null);
+                for (var uniqueIndex = 0; uniqueIndex < normalizedSelectors.length; uniqueIndex += 1) {
+                    var normalizedSelector = normalizedSelectors[uniqueIndex];
+                    if (seenSelectors[normalizedSelector]) { continue; }
+                    seenSelectors[normalizedSelector] = true;
+                    uniqueSelectors.push(normalizedSelector);
+                }
+
+                return groupedDisplayNoneCSS(uniqueSelectors);
+            };
+
+            var domainMatches = function(ruleDomain) {
+                if (typeof ruleDomain !== "string") { return false; }
+                var normalizedRuleDomain = ruleDomain.trim().toLowerCase();
+                if (!normalizedRuleDomain) { return false; }
+                if (normalizedRuleDomain.startsWith("*.")) {
+                    var suffix = normalizedRuleDomain.slice(2);
+                    return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
+                }
+                return currentHost === normalizedRuleDomain;
+            };
+
+            var frameMatches = function(frameScope) {
+                if (frameScope === "mainFrameOnly") {
+                    return window.top === window.self;
+                }
+                if (frameScope === "subframesOnly") {
+                    return window.top !== window.self;
+                }
+                return true;
+            };
+
+            for (var index = 0; index < rules.length; index += 1) {
+                var rule = rules[index];
+                if (!frameMatches(rule.frameScope)) { continue; }
+
+                if (rule.urlFilterPattern) {
+                    try {
+                        if (!(new RegExp(rule.urlFilterPattern)).test(locationHref)) { continue; }
+                    } catch (error) {
+                        continue;
+                    }
+                }
+
+                var ifDomainList = Array.isArray(rule.ifDomainList) ? rule.ifDomainList : [];
+                var unlessDomainList = Array.isArray(rule.unlessDomainList) ? rule.unlessDomainList : [];
+
+                if (ifDomainList.length > 0) {
+                    if (!currentHost) { continue; }
+                    if (!ifDomainList.some(domainMatches)) { continue; }
+                }
+                if (currentHost && unlessDomainList.some(domainMatches)) { continue; }
+
+                var hiddenSelectors = Array.isArray(rule.hiddenSelectors) ? rule.hiddenSelectors : [];
+                for (var hiddenSelectorIndex = 0; hiddenSelectorIndex < hiddenSelectors.length; hiddenSelectorIndex += 1) {
+                    collectedSelectors.push(hiddenSelectors[hiddenSelectorIndex]);
+                }
+            }
+
+            if (collectedSelectors.length === 0) { return; }
+            var compactedCSS = compactHiddenSelectors(collectedSelectors);
+
+            var styleId = "\(styleIDLiteral)";
+            var root = document.head || document.documentElement;
+            if (!root) { return; }
+            var style = document.getElementById(styleId);
+            if (!style) {
+                style = document.createElement('style');
+                style.id = styleId;
+                root.appendChild(style);
+            }
+            style.textContent = compactedCSS.join("\\n");
         })();
         """
     }
@@ -2255,6 +2676,12 @@ fileprivate struct AndroidDocumentStartRuleRegistration {
     let styleID: String
 }
 
+fileprivate struct AndroidDocumentStartRuleBatch {
+    let allowedOriginRules: [String]
+    var rules: [AndroidCosmeticRule]
+    var approximateCharacterCount: Int
+}
+
 final class AndroidContentBlockerController {
     let config: WebEngineConfiguration
     // Think of persistent rules as a baseline installed once per WebView and reused
@@ -2295,8 +2722,18 @@ final class AndroidContentBlockerController {
         let desiredNavigationRules = desiredNavigationRules(for: pageURL, isWhitelisted: isWhitelisted)
         let cosmeticQueryMilliseconds = currentMilliseconds() - cosmeticQueryStartedAt
 
+        let persistentChanged = desiredPersistentRules != installedPersistentRules
+        let navigationChanged = desiredNavigationRules != installedNavigationRules
+
         let persistentPlanStartedAt = currentMilliseconds()
-        let persistentPlan = WebEngine.androidCosmeticInjectionPlan(
+        var persistentPlan = AndroidCosmeticInjectionPlan()
+        if persistentChanged {
+            persistentPlan.documentStartRules = WebEngine.androidDocumentStartCosmeticRules(
+                rules: desiredPersistentRules,
+                isDocumentStartSupported: documentStartSupported
+            )
+        }
+        persistentPlan.lifecycleCSS = WebEngine.androidLifecycleCosmeticCSS(
             rules: desiredPersistentRules,
             pageURL: pageURL,
             isDocumentStartSupported: documentStartSupported
@@ -2306,7 +2743,14 @@ final class AndroidContentBlockerController {
         let persistentPlanMilliseconds = currentMilliseconds() - persistentPlanStartedAt
 
         let navigationPlanStartedAt = currentMilliseconds()
-        let navigationPlan = WebEngine.androidCosmeticInjectionPlan(
+        var navigationPlan = AndroidCosmeticInjectionPlan()
+        if navigationChanged {
+            navigationPlan.documentStartRules = WebEngine.androidDocumentStartCosmeticRules(
+                rules: desiredNavigationRules,
+                isDocumentStartSupported: documentStartSupported
+            )
+        }
+        navigationPlan.lifecycleCSS = WebEngine.androidLifecycleCosmeticCSS(
             rules: desiredNavigationRules,
             pageURL: pageURL,
             isDocumentStartSupported: documentStartSupported
@@ -2317,9 +2761,6 @@ final class AndroidContentBlockerController {
 
         persistentLifecycleCosmeticCSS = persistentPlan.lifecycleCSS
         navigationLifecycleCosmeticCSS = navigationPlan.lifecycleCSS
-
-        let persistentChanged = desiredPersistentRules != installedPersistentRules
-        let navigationChanged = desiredNavigationRules != installedNavigationRules
 
         let persistentRegisterStartedAt = currentMilliseconds()
         var removedPersistentHandlerCount = 0
@@ -2371,7 +2812,7 @@ final class AndroidContentBlockerController {
 
         androidPreparedCosmeticPageURL = pageURL.absoluteString
         logger.info(
-            "Android blocker prepare url=\(pageURL.absoluteString) totalMs=\(formatMilliseconds(currentMilliseconds() - prepareStartedAt)) whitelisted=\(isWhitelisted) cosmeticQueryMs=\(formatMilliseconds(cosmeticQueryMilliseconds)) documentStartSupported=\(documentStartSupported) persistentChanged=\(persistentChanged) persistentRuleCount=\(desiredPersistentRules.count) persistentCSSCount=\(cssEntryCount(in: desiredPersistentRules)) persistentPlanMs=\(formatMilliseconds(persistentPlanMilliseconds)) persistentRegisterMs=\(formatMilliseconds(persistentRegisterMilliseconds)) removedPersistentHandlers=\(removedPersistentHandlerCount) registeredPersistentHandlers=\(registeredPersistentHandlerCount) navigationChanged=\(navigationChanged) navigationRuleCount=\(desiredNavigationRules.count) navigationCSSCount=\(cssEntryCount(in: desiredNavigationRules)) navigationPlanMs=\(formatMilliseconds(navigationPlanMilliseconds)) navigationRegisterMs=\(formatMilliseconds(navigationRegisterMilliseconds)) removedNavigationHandlers=\(removedNavigationHandlerCount) registeredNavigationHandlers=\(registeredNavigationHandlerCount)"
+            "Android blocker prepare url=\(pageURL.absoluteString) totalMs=\(formatMilliseconds(currentMilliseconds() - prepareStartedAt)) whitelisted=\(isWhitelisted) cosmeticQueryMs=\(formatMilliseconds(cosmeticQueryMilliseconds)) documentStartSupported=\(documentStartSupported) persistentChanged=\(persistentChanged) persistentRuleCount=\(desiredPersistentRules.count) persistentSelectorCount=\(selectorEntryCount(in: desiredPersistentRules)) persistentPlanMs=\(formatMilliseconds(persistentPlanMilliseconds)) persistentRegisterMs=\(formatMilliseconds(persistentRegisterMilliseconds)) removedPersistentHandlers=\(removedPersistentHandlerCount) registeredPersistentHandlers=\(registeredPersistentHandlerCount) navigationChanged=\(navigationChanged) navigationRuleCount=\(desiredNavigationRules.count) navigationSelectorCount=\(selectorEntryCount(in: desiredNavigationRules)) navigationPlanMs=\(formatMilliseconds(navigationPlanMilliseconds)) navigationRegisterMs=\(formatMilliseconds(navigationRegisterMilliseconds)) removedNavigationHandlers=\(removedNavigationHandlerCount) registeredNavigationHandlers=\(registeredNavigationHandlerCount)"
         )
     }
 
@@ -2398,19 +2839,19 @@ final class AndroidContentBlockerController {
             logger.info("Falling back to late Android cosmetic injection for \(pageURL.absoluteString)")
         }
 
-        let persistentFuturePlan = WebEngine.androidCosmeticInjectionPlan(
-            rules: desiredPersistentRules,
-            pageURL: pageURL,
-            isDocumentStartSupported: documentStartSupported
-        ) { message in
-            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        var persistentFuturePlan = AndroidCosmeticInjectionPlan()
+        if persistentChanged {
+            persistentFuturePlan.documentStartRules = WebEngine.androidDocumentStartCosmeticRules(
+                rules: desiredPersistentRules,
+                isDocumentStartSupported: documentStartSupported
+            )
         }
-        let navigationFuturePlan = WebEngine.androidCosmeticInjectionPlan(
-            rules: desiredNavigationRules,
-            pageURL: pageURL,
-            isDocumentStartSupported: documentStartSupported
-        ) { message in
-            logger.warning("\(message) for redirected final page \(pageURL.absoluteString)")
+        var navigationFuturePlan = AndroidCosmeticInjectionPlan()
+        if navigationChanged {
+            navigationFuturePlan.documentStartRules = WebEngine.androidDocumentStartCosmeticRules(
+                rules: desiredNavigationRules,
+                isDocumentStartSupported: documentStartSupported
+            )
         }
         let persistentFallbackPlan = WebEngine.androidRedirectFallbackCosmeticPlan(
             rules: desiredPersistentRules,
@@ -2562,11 +3003,12 @@ final class AndroidContentBlockerController {
     ) -> AndroidDocumentStartPlanRegistration {
         var handlers: [ScriptHandler] = []
         var styleIDs: [String] = []
+        let batchedRules = batchedDocumentStartRules(plan.documentStartRules)
 
-        for (index, rule) in plan.documentStartRules.enumerated() {
+        for (index, batch) in batchedRules.enumerated() {
             let registerStartedAt = currentMilliseconds()
-            if let registration = registerAndroidDocumentStartCosmeticRule(
-                rule,
+            if let registration = registerAndroidDocumentStartCosmeticRuleBatch(
+                batch,
                 index: index,
                 styleIDPrefix: styleIDPrefix,
                 for: pageURL,
@@ -2577,7 +3019,7 @@ final class AndroidContentBlockerController {
             }
             let registerMilliseconds = currentMilliseconds() - registerStartedAt
             logger.info(
-                "Android blocker register url=\(pageURL.absoluteString) prefix=\(styleIDPrefix) index=\(index) cssCount=\(rule.css.count) cssChars=\(cssCharacterCountInCSSRules(rule.css)) allowedOrigins=\(rule.allowedOriginRules.count) ms=\(formatMilliseconds(registerMilliseconds))"
+                "Android blocker register url=\(pageURL.absoluteString) prefix=\(styleIDPrefix) index=\(index) ruleCount=\(batch.rules.count) selectorCount=\(selectorEntryCount(in: batch.rules)) selectorChars=\(selectorCharacterCountInRules(batch.rules)) allowedOrigins=\(batch.allowedOriginRules.count) ms=\(formatMilliseconds(registerMilliseconds))"
             )
         }
 
@@ -2587,24 +3029,22 @@ final class AndroidContentBlockerController {
         )
     }
 
-    private func registerAndroidDocumentStartCosmeticRule(
-        _ rule: AndroidCosmeticRule,
+    private func registerAndroidDocumentStartCosmeticRuleBatch(
+        _ batch: AndroidDocumentStartRuleBatch,
         index: Int,
         styleIDPrefix: String,
         for pageURL: URL,
         in view: PlatformWebView
     ) -> AndroidDocumentStartRuleRegistration? {
         let styleID = "\(styleIDPrefix)_\(index)"
-        guard let script = WebEngine.androidContentBlockerStyleInjectionScript(
-            cssRules: rule.css,
-            styleID: styleID,
-            frameScope: rule.frameScope,
-            urlFilterPattern: rule.urlFilterPattern
+        guard let script = WebEngine.androidContentBlockerBatchedStyleInjectionScript(
+            rules: batch.rules,
+            styleID: styleID
         ) else {
             return nil
         }
         let allowedOriginRules: kotlin.collections.MutableSet<String> = kotlin.collections.HashSet()
-        for allowedOriginRule in rule.allowedOriginRules {
+        for allowedOriginRule in batch.allowedOriginRules {
             allowedOriginRules.add(allowedOriginRule)
         }
 
@@ -2621,6 +3061,38 @@ final class AndroidContentBlockerController {
             handler: WebViewCompat.addDocumentStartJavaScript(view, script, allowedOriginRules),
             styleID: styleID
         )
+    }
+
+    private func batchedDocumentStartRules(
+        _ rules: [AndroidCosmeticRule]
+    ) -> [AndroidDocumentStartRuleBatch] {
+        let maximumRulesPerBatch = 128
+        let maximumApproximateCharactersPerBatch = 24_000
+
+        var batches: [AndroidDocumentStartRuleBatch] = []
+        batches.reserveCapacity((rules.count / maximumRulesPerBatch) + 1)
+
+        for rule in rules {
+            let approximateCharacterCount = approximateDocumentStartRuleCharacterCount(rule)
+            if var lastBatch = batches.last,
+               lastBatch.allowedOriginRules == rule.allowedOriginRules,
+               lastBatch.rules.count < maximumRulesPerBatch,
+               lastBatch.approximateCharacterCount + approximateCharacterCount <= maximumApproximateCharactersPerBatch {
+                lastBatch.rules.append(rule)
+                lastBatch.approximateCharacterCount += approximateCharacterCount
+                batches[batches.count - 1] = lastBatch
+            } else {
+                batches.append(
+                    AndroidDocumentStartRuleBatch(
+                        allowedOriginRules: rule.allowedOriginRules,
+                        rules: [rule],
+                        approximateCharacterCount: approximateCharacterCount
+                    )
+                )
+            }
+        }
+
+        return batches
     }
 
     private func clearInsertedDocumentStartStyles(in view: PlatformWebView) {
@@ -2667,20 +3139,40 @@ final class AndroidContentBlockerController {
         String((value * 10.0).rounded() / 10.0)
     }
 
-    private func cssEntryCount(in rules: [AndroidCosmeticRule]) -> Int {
+    private func selectorEntryCount(in rules: [AndroidCosmeticRule]) -> Int {
         var count = 0
         for rule in rules {
-            count += rule.css.count
+            count += rule.hiddenSelectors.count
         }
         return count
     }
 
-    private func cssCharacterCountInCSSRules(_ cssRules: [String]) -> Int {
+    private func selectorCharacterCountInRules(_ rules: [AndroidCosmeticRule]) -> Int {
         var count = 0
-        for cssRule in cssRules {
-            count += cssRule.count
+        for rule in rules {
+            count += selectorCharacterCountInSelectorEntries(rule.hiddenSelectors)
         }
         return count
+    }
+
+    private func selectorCharacterCountInSelectorEntries(_ hiddenSelectors: [String]) -> Int {
+        var count = 0
+        for hiddenSelector in hiddenSelectors {
+            count += hiddenSelector.count
+        }
+        return count
+    }
+
+    private func approximateDocumentStartRuleCharacterCount(_ rule: AndroidCosmeticRule) -> Int {
+        var count = selectorCharacterCountInSelectorEntries(rule.hiddenSelectors)
+        count += rule.urlFilterPattern?.count ?? 0
+        for domain in rule.ifDomainList {
+            count += domain.count
+        }
+        for domain in rule.unlessDomainList {
+            count += domain.count
+        }
+        return count + 64
     }
 }
 
@@ -3251,7 +3743,9 @@ public extension SkipWebUIDelegate {
     public var schemeHandlers: [String: URLSchemeHandler]
     public var uiDelegate: (any SkipWebUIDelegate)?
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
+    /// Optional content-blocker configuration applied to web views created from this configuration.
     public var contentBlockers: WebContentBlockerConfiguration?
+    /// The latest errors produced while preparing or installing content blockers.
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
 
     #if SKIP
@@ -3321,7 +3815,7 @@ public extension SkipWebUIDelegate {
         return copy
     }
 
-    /// Clear any persisted compiled iOS content-blocker rule lists so the next install recompiles from source.
+    /// Clears the persisted iOS content-blocker cache so the next setup recompiles from source.
     ///
     /// The cache is shared across `WebEngineConfiguration` instances. On non-Apple platforms this is a no-op.
     @MainActor public static func clearContentBlockerCache() throws {
@@ -3330,7 +3824,7 @@ public extension SkipWebUIDelegate {
         #endif
     }
 
-    /// Prepare any configured content blockers and populate `contentBlockerSetupErrors`.
+    /// Prepares any configured content blockers and populates `contentBlockerSetupErrors`.
     ///
     /// On Apple platforms this compiles or loads persisted rule lists so later web view creation
     /// can attach them without the initial compile cost. On other platforms this is a no-op.
