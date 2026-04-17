@@ -49,12 +49,13 @@ let configuration = WebEngineConfiguration(
     contentBlockers: WebContentBlockerConfiguration(
         iOSRuleListPaths: ["/path/to/content-blockers.json"],
         whitelistedDomains: ["example.com", "*.example.org"],
+        popupWhitelistedSourceDomains: ["example.com"],
         androidMode: .custom(ContentBlockingProvider())
     )
 )
 
-try WebEngineConfiguration.clearContentBlockerCache()
-_ = await configuration.prepareContentBlockers()
+try WebEngineConfiguration.iOSClearContentBlockerCache()
+_ = await configuration.iOSPrepareContentBlockers()
 let webViewConfiguration = await configuration.makeWebViewConfiguration()
 let webView = WKWebView(frame: .zero, configuration: webViewConfiguration)
 let engine = WebEngine(configuration: configuration, webView: webView)
@@ -67,18 +68,14 @@ _ = await engine.awaitContentBlockerSetup()
 public struct WebContentBlockerConfiguration {
     public var iOSRuleListPaths: [String]
     public var whitelistedDomains: [String]
+    public var popupWhitelistedSourceDomains: [String]
     public var androidMode: AndroidContentBlockingMode
-    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
-    public var androidRequestBlocker: (any AndroidRequestBlocker)?
-    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
-    public var androidCosmeticBlocker: (any AndroidCosmeticBlocker)?
 
     public init(
         iOSRuleListPaths: [String] = [],
         whitelistedDomains: [String] = [],
-        androidMode: AndroidContentBlockingMode = .disabled,
-        androidRequestBlocker: (any AndroidRequestBlocker)? = nil,
-        androidCosmeticBlocker: (any AndroidCosmeticBlocker)? = nil
+        popupWhitelistedSourceDomains: [String] = [],
+        androidMode: AndroidContentBlockingMode = .disabled
     )
 }
 ```
@@ -88,8 +85,8 @@ public final class WebEngineConfiguration {
     public var contentBlockers: WebContentBlockerConfiguration?
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError]
 
-    @MainActor public static func clearContentBlockerCache() throws
-    @MainActor public func prepareContentBlockers() async -> [WebContentBlockerError]
+    @MainActor public static func iOSClearContentBlockerCache() throws
+    @MainActor public func iOSPrepareContentBlockers() async -> [WebContentBlockerError]
     @MainActor public func makeWebViewConfiguration() async -> WebViewConfiguration
 }
 ```
@@ -170,14 +167,6 @@ public struct AndroidBlockableRequest: Equatable, Sendable {
 }
 ```
 
-```swift
-public protocol AndroidRequestBlocker {
-    func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
-}
-```
-
-`AndroidRequestBlocker` remains available as a deprecated compatibility shim for one release, but the primary API is `androidMode: .custom(...)`.
-
 ### Cosmetic Blocking
 
 ```swift
@@ -228,13 +217,22 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
 
 Think of the Android cosmetic API as "selectors plus guards". `SkipWeb` is responsible for turning those selectors into `display: none !important` when a frame actually matches.
 
+Practical example:
+
 ```swift
-public protocol AndroidCosmeticBlocker {
-    func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule]
-}
+AndroidCosmeticRule(
+    hiddenSelectors: [".ad-slot", ".tracking-frame"],
+    urlFilterPattern: ".*\\/ad-frame\\.html",
+    allowedOriginRules: ["https://*.doubleclick.net"],
+    frameScope: .subframesOnly
+)
 ```
 
-`AndroidCosmeticBlocker` remains available as a deprecated compatibility shim for one release, but the primary API is `androidMode: .custom(...)`.
+Think of that rule as:
+- register this document-start script only for `https://*.doubleclick.net`
+- then, inside those matching subframes, only apply the CSS when the current frame URL also matches `.*\\/ad-frame\\.html`
+
+`allowedOriginRules` is the registration-time scope. Android's `WebViewCompat.addDocumentStartJavaScript(...)` requires those origin rules up front, so SkipWeb cannot infer them later inside the script. `urlFilterPattern`, `ifDomainList`, and `unlessDomainList` are the runtime frame guards checked by the injected script after it has been installed.
 
 Think of Android cosmetics as two buckets:
 - `persistentCosmeticRules`: a long-lived baseline registered once per `WebView` and reused across navigations when it does not change
@@ -248,9 +246,9 @@ Whitelist opt-out is enforced inside `SkipWeb`'s Android controller. If the curr
 
 - `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and installed by SkipWeb.
 - SkipWeb persists compiled iOS rule lists in a cache keyed by source path plus effective compiled content.
-- `WebEngineConfiguration.clearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list store.
-- `prepareContentBlockers()` lets apps prewarm iOS rule-list compilation without touching WebKit types directly.
-- `contentBlockerSetupErrors` is populated after `prepareContentBlockers()`, after `makeWebViewConfiguration()`, and after `awaitContentBlockerSetup()`.
+- `WebEngineConfiguration.iOSClearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list store.
+- `iOSPrepareContentBlockers()` lets apps prewarm iOS rule-list compilation without touching WebKit types directly.
+- `contentBlockerSetupErrors` is populated after `iOSPrepareContentBlockers()`, after `makeWebViewConfiguration()`, and after `awaitContentBlockerSetup()`.
 - When you create a `WebEngine` with an already-constructed `WKWebView`, SkipWeb installs configured content blockers into that supplied web view as well.
 
 ### Whitelist Injection
@@ -274,13 +272,41 @@ Generated rule shape:
 
 Caller-owned rule files on disk are not modified.
 
+### Popup Whitelist Injection
+
+`popupWhitelistedSourceDomains` is the popup-only override path. SkipWeb normalizes those entries and appends an in-memory popup exemption rule to each compiled iOS rule file when the popup whitelist is non-empty.
+
+Generated rule shape:
+
+```json
+{
+  "comment": "user-injected popup exemptions (allowed source domains)",
+  "trigger": {
+    "url-filter": ".*",
+    "resource-type": ["popup"],
+    "if-top-url": [
+      "https://example.com/*",
+      "https://*.example.com/*"
+    ]
+  },
+  "action": {
+    "type": "ignore-previous-rules"
+  }
+}
+```
+
+This is source-site based, not popup-target based. Think of it as "allow popups from this site" rather than "allow popups to this destination."
+
 ## Cross-Platform Whitelist Semantics
 
 - `whitelistedDomains` entries are trimmed, lowercased, deduplicated, and sorted before use.
+- `popupWhitelistedSourceDomains` entries are trimmed, lowercased, deduplicated, and sorted before use.
 - Exact entries like `example.com` match only that host.
 - Wildcard entries like `*.example.com` match subdomains of `example.com`.
 - Exact entries do not implicitly match subdomains.
 - On Android, matching whitelisted page domains bypass request blocking and suppress cosmetic rules for the current page while leaving the caller's custom provider unchanged for non-whitelisted domains.
+- `popupWhitelistedSourceDomains` uses site-level matching instead of exact-host matching: a bare entry like `example.com` covers both `example.com` and common subdomains such as `www.example.com`, while `*.example.com` remains subdomains-only.
+- On Android, matching popup source domains bypass popup blocking only; normal request and cosmetic blocking still use `whitelistedDomains`.
 
 ## Error Reporting
 

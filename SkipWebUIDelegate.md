@@ -22,6 +22,8 @@ public protocol SkipWebUIDelegate: AnyObject {
 - `webView(_:createWebViewWith:platformContext:)`
   - Return `nil` to deny popup creation.
   - Return a child `WebEngine` to allow popup creation.
+  - Without `WebEngineConfiguration.uiDelegate`, `_blank` / `window.open(...)` uses platform fallback behavior:
+    iOS denies the popup request, while Android may navigate the current `WebView`.
   - `request.targetURL` may be `nil` on Android at creation time.
 - `webViewDidClose(_:child:)`
   - Called when a previously-created child window is closed via javascript (`window.close()`).

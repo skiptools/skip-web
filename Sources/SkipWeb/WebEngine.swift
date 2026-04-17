@@ -155,6 +155,7 @@ public enum WebProfileError: Error, Equatable {
 /// Think of it as the single place where apps describe:
 /// - iOS rule-list files to compile and install
 /// - domains that should bypass blocking entirely
+/// - popup source domains that should bypass popup blocking only
 /// - Android request and cosmetic blocking behavior
 public struct WebContentBlockerConfiguration {
     /// Paths to iOS WebKit content-blocker JSON files.
@@ -166,37 +167,33 @@ public struct WebContentBlockerConfiguration {
     ///
     /// Entries use WebKit-style host matching such as `example.com` and `*.example.com`.
     public var whitelistedDomains: [String]
+    /// Popup source-site allowlist entries that bypass popup blocking only.
+    ///
+    /// Bare domains such as `example.com` cover both the exact host and common
+    /// subdomains. Wildcard entries such as `*.example.com` cover subdomains only.
+    public var popupWhitelistedSourceDomains: [String]
     /// Primary Android content-blocking entry point.
     ///
     /// Use `.custom(...)` to supply request and cosmetic blocking behavior from one provider.
     public var androidMode: AndroidContentBlockingMode
-    /// Deprecated Android request-blocking compatibility shim.
-    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
-    public var androidRequestBlocker: (any AndroidRequestBlocker)?
-    /// Deprecated Android cosmetic-blocking compatibility shim.
-    @available(*, deprecated, message: "Use androidMode with AndroidContentBlockingMode.custom(...) instead.")
-    public var androidCosmeticBlocker: (any AndroidCosmeticBlocker)?
 
     /// Creates a content-blocker configuration.
     ///
     /// - Parameters:
     ///   - iOSRuleListPaths: iOS WebKit content-blocker JSON files to compile.
     ///   - whitelistedDomains: Host patterns that should bypass blocking.
+    ///   - popupWhitelistedSourceDomains: Popup source-site host patterns that should bypass popup blocking only.
     ///   - androidMode: Primary Android blocking configuration.
-    ///   - androidRequestBlocker: Deprecated Android request blocker bridge.
-    ///   - androidCosmeticBlocker: Deprecated Android cosmetic blocker bridge.
     public init(
         iOSRuleListPaths: [String] = [],
         whitelistedDomains: [String] = [],
-        androidMode: AndroidContentBlockingMode = .disabled,
-        androidRequestBlocker: (any AndroidRequestBlocker)? = nil,
-        androidCosmeticBlocker: (any AndroidCosmeticBlocker)? = nil
+        popupWhitelistedSourceDomains: [String] = [],
+        androidMode: AndroidContentBlockingMode = .disabled
     ) {
         self.iOSRuleListPaths = iOSRuleListPaths
         self.whitelistedDomains = whitelistedDomains
+        self.popupWhitelistedSourceDomains = popupWhitelistedSourceDomains
         self.androidMode = androidMode
-        self.androidRequestBlocker = androidRequestBlocker
-        self.androidCosmeticBlocker = androidCosmeticBlocker
     }
 }
 
@@ -294,12 +291,6 @@ public struct AndroidBlockableRequest: Equatable, Sendable {
     }
 }
 
-/// Deprecated compatibility protocol for Android request blocking.
-public protocol AndroidRequestBlocker {
-    /// Returns the request-blocking decision for an Android resource load.
-    func decision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision
-}
-
 /// Page details passed to Android cosmetic blockers.
 public struct AndroidPageContext: Equatable, Sendable {
     /// The current page URL.
@@ -336,13 +327,20 @@ public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Send
 public struct AndroidCosmeticRule: Equatable, Sendable {
     /// Selector or selector-list entries to hide with `display: none !important`.
     public var hiddenSelectors: [String]
-    /// Optional regex-style URL filter that must match the page or frame URL.
+    /// Optional regex-style URL filter that must match the current frame URL before the rule applies.
+    ///
+    /// Think of it as a runtime frame guard: SkipWeb checks it inside the injected script
+    /// so a rule can stay registered while only applying to matching subframes or redirected pages.
     public var urlFilterPattern: String?
-    /// Allowed origin rules used for Android document-start script registration.
+    /// Allowed origins used when registering Android document-start scripts.
+    ///
+    /// This is a platform registration scope, not just an in-script filter.
+    /// `WebViewCompat.addDocumentStartJavaScript(...)` requires these origin rules up front,
+    /// so SkipWeb needs them to decide where the script is injected at all.
     public var allowedOriginRules: [String]
-    /// Host patterns that must match the page host.
+    /// Host patterns that must match the current frame host before the rule applies.
     public var ifDomainList: [String]
-    /// Host patterns that must not match the page host.
+    /// Host patterns that must not match the current frame host before the rule applies.
     public var unlessDomainList: [String]
     /// Frame scope for the injected CSS.
     public var frameScope: AndroidCosmeticFrameScope
@@ -383,12 +381,6 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
     }
 }
 
-/// Deprecated compatibility protocol for Android cosmetic blocking.
-public protocol AndroidCosmeticBlocker {
-    /// Returns cosmetic rules for the given page.
-    func cosmetics(for page: AndroidPageContext) -> [AndroidCosmeticRule]
-}
-
 public protocol SkipWebNavigationDelegate {
     func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool
     func webEngineDidCommitNavigation(_ engine: WebEngine)
@@ -423,23 +415,6 @@ struct AndroidDocumentStartRuleBatchKey: Hashable {
     let allowedOriginRules: [String]
     let ifDomainList: [String]
     let unlessDomainList: [String]
-}
-
-fileprivate struct LegacyAndroidContentBlockingProvider: AndroidContentBlockingProvider {
-    let requestBlocker: (any AndroidRequestBlocker)?
-    let cosmeticBlocker: (any AndroidCosmeticBlocker)?
-
-    var persistentCosmeticRules: [AndroidCosmeticRule] {
-        []
-    }
-
-    func requestDecision(for request: AndroidBlockableRequest) -> AndroidRequestBlockDecision {
-        requestBlocker?.decision(for: request) ?? .allow
-    }
-
-    func navigationCosmeticRules(for page: AndroidPageContext) -> [AndroidCosmeticRule] {
-        cosmeticBlocker?.cosmetics(for: page) ?? []
-    }
 }
 
 fileprivate struct WhitelistedAndroidContentBlockingProvider: AndroidContentBlockingProvider {
@@ -477,29 +452,12 @@ extension WebContentBlockerConfiguration {
         Self.normalizedWhitelistedDomains(from: whitelistedDomains)
     }
 
-    var hasLegacyAndroidHooks: Bool {
-        androidRequestBlocker != nil || androidCosmeticBlocker != nil
+    var normalizedPopupWhitelistedSourceDomains: [String] {
+        Self.normalizedWhitelistedDomains(from: popupWhitelistedSourceDomains)
     }
 
     var effectiveAndroidMode: AndroidContentBlockingMode {
-        let baseMode: AndroidContentBlockingMode
         switch androidMode {
-        case .disabled:
-            if hasLegacyAndroidHooks {
-                baseMode = .custom(
-                    LegacyAndroidContentBlockingProvider(
-                        requestBlocker: androidRequestBlocker,
-                        cosmeticBlocker: androidCosmeticBlocker
-                    )
-                )
-            } else {
-                baseMode = .disabled
-            }
-        case .custom:
-            baseMode = androidMode
-        }
-
-        switch baseMode {
         case .disabled:
             return .disabled
         case .custom(let provider):
@@ -564,27 +522,52 @@ extension WebContentBlockerConfiguration {
 
     #if !SKIP
     func augmentedIOSRuleListContent(_ content: String) -> String {
-        Self.augmentedIOSRuleListContent(content, whitelistedDomains: normalizedWhitelistedDomains)
+        Self.augmentedIOSRuleListContent(
+            content,
+            whitelistedDomains: normalizedWhitelistedDomains,
+            popupWhitelistedSourceDomains: normalizedPopupWhitelistedSourceDomains
+        )
     }
 
-    static func augmentedIOSRuleListContent(_ content: String, whitelistedDomains: [String]) -> String {
-        guard !whitelistedDomains.isEmpty,
+    static func augmentedIOSRuleListContent(
+        _ content: String,
+        whitelistedDomains: [String],
+        popupWhitelistedSourceDomains: [String] = []
+    ) -> String {
+        guard !whitelistedDomains.isEmpty || !popupWhitelistedSourceDomains.isEmpty,
               let data = content.data(using: .utf8),
               let jsonObject = try? JSONSerialization.jsonObject(with: data),
               var rules = jsonObject as? [[String: Any]] else {
             return content
         }
 
-        rules.append([
-            "comment": "user-injected domain exemptions (whitelisted domains)",
-            "trigger": [
-                "url-filter": ".*",
-                "if-domain": whitelistedDomains
-            ],
-            "action": [
-                "type": "ignore-previous-rules"
-            ]
-        ])
+        if !whitelistedDomains.isEmpty {
+            rules.append([
+                "comment": "user-injected domain exemptions (whitelisted domains)",
+                "trigger": [
+                    "url-filter": ".*",
+                    "if-domain": whitelistedDomains
+                ],
+                "action": [
+                    "type": "ignore-previous-rules"
+                ]
+            ])
+        }
+
+        let popupTopURLs = popupWhitelistTopURLs(from: popupWhitelistedSourceDomains)
+        if !popupTopURLs.isEmpty {
+            rules.append([
+                "comment": "user-injected popup exemptions (allowed source domains)",
+                "trigger": [
+                    "url-filter": ".*",
+                    "resource-type": ["popup"],
+                    "if-top-url": popupTopURLs
+                ],
+                "action": [
+                    "type": "ignore-previous-rules"
+                ]
+            ])
+        }
 
         guard JSONSerialization.isValidJSONObject(rules),
               let augmentedData = try? JSONSerialization.data(withJSONObject: rules, options: [.sortedKeys]),
@@ -593,6 +576,25 @@ extension WebContentBlockerConfiguration {
         }
 
         return augmentedContent
+    }
+
+    static func popupWhitelistTopURLs(from domains: [String]) -> [String] {
+        Array(
+            Set(
+                domains.flatMap { domain in
+                    if domain.hasPrefix("*.") {
+                        return ["http://\(domain)/*", "https://\(domain)/*"]
+                    } else {
+                        return [
+                            "http://\(domain)/*",
+                            "http://*.\(domain)/*",
+                            "https://\(domain)/*",
+                            "https://*.\(domain)/*",
+                        ]
+                    }
+                }
+            )
+        ).sorted()
     }
     #endif
 }
@@ -2931,26 +2933,25 @@ final class AndroidContentBlockerController {
             return nil
         }
         let headers = WebEngine.androidRequestHeaders(from: request)
-        let decision = provider.requestDecision(
-            for: AndroidBlockableRequest(
-                url: requestURL,
-                mainDocumentURL: WebEngine.androidMainDocumentURL(
-                    for: request,
-                    requestURL: requestURL,
-                    headers: headers
-                ),
-                method: request.method,
-                headers: headers,
-                isForMainFrame: request.isForMainFrame,
-                hasGesture: request.hasGesture(),
-                isRedirect: WebEngine.androidRequestIsRedirect(request),
-                resourceTypeHint: WebEngine.androidResourceTypeHint(
-                    for: request,
-                    requestURL: requestURL,
-                    headers: headers
-                )
+        let blockableRequest = AndroidBlockableRequest(
+            url: requestURL,
+            mainDocumentURL: WebEngine.androidMainDocumentURL(
+                for: request,
+                requestURL: requestURL,
+                headers: headers
+            ),
+            method: request.method,
+            headers: headers,
+            isForMainFrame: request.isForMainFrame,
+            hasGesture: request.hasGesture(),
+            isRedirect: WebEngine.androidRequestIsRedirect(request),
+            resourceTypeHint: WebEngine.androidResourceTypeHint(
+                for: request,
+                requestURL: requestURL,
+                headers: headers
             )
         )
+        let decision = provider.requestDecision(for: blockableRequest)
         if case .block = decision {
             return WebEngine.blockedAndroidResponse()
         }
@@ -3190,6 +3191,39 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
         engine?.configuration
     }
 
+    private func logViewportProbe(stage: String, view: PlatformWebView, url: String) {
+        logger.log(
+            "viewport probe native stage=\(stage) url=\(url) size=\(view.width)x\(view.height) measured=\(view.measuredWidth)x\(view.measuredHeight) contentHeight=\(view.contentHeight) scale=\(view.scale) scroll=\(view.scrollX),\(view.scrollY) visibility=\(view.visibility) alpha=\(view.alpha)"
+        )
+
+        let script = """
+        (function() {
+            try {
+                var doc = document.documentElement;
+                var body = document.body;
+                var vv = window.visualViewport;
+                return JSON.stringify({
+                    href: location.href,
+                    readyState: document.readyState,
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
+                    clientWidth: doc ? doc.clientWidth : null,
+                    clientHeight: doc ? doc.clientHeight : null,
+                    visualViewportWidth: vv ? vv.width : null,
+                    visualViewportHeight: vv ? vv.height : null,
+                    bodyChildCount: body ? body.children.length : null,
+                    bodyTextLength: body && body.innerText ? body.innerText.length : null
+                });
+            } catch (error) {
+                return JSON.stringify({ error: String(error) });
+            }
+        })();
+        """
+        view.evaluateJavascript(script) { result in
+            logger.log("viewport probe js stage=\(stage) url=\(url) result=\(String(describing: result))")
+        }
+    }
+
     override func doUpdateVisitedHistory(view: PlatformWebView, url: String, isReload: Bool) {
         logger.log("application")
         embeddedNavigationClient?.doUpdateVisitedHistory(view, url, isReload)
@@ -3210,6 +3244,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageCommitVisible(view: PlatformWebView, url: String) {
         logger.log("onPageCommitVisible: \(url)")
+        logViewportProbe(stage: "commit-visible", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         engine?.androidContentBlockerController.injectIfNeeded(into: view)
         embeddedNavigationClient?.onPageCommitVisible(view, url)
@@ -3218,6 +3253,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageFinished(view: PlatformWebView, url: String) {
         logger.log("onPageFinished: \(url)")
+        logViewportProbe(stage: "page-finished", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         engine?.androidContentBlockerController.injectIfNeeded(into: view)
         for userScript in config?.userScripts ?? [] {
@@ -3238,6 +3274,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
 
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
         logger.log("onPageStarted: \(url)")
+        logViewportProbe(stage: "page-started", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         if !(config?.messageHandlers.isEmpty ?? true) {
             view.evaluateJavascript("""
@@ -3751,6 +3788,13 @@ public extension SkipWebUIDelegate {
     #if SKIP
     /// The Android context to use for creating a web context
     public var context: android.content.Context? = nil
+    /// Optional Android-only callback for popup child-window creation.
+    ///
+    /// Think of it as the Android popup hook that runs before `SkipWebUIDelegate`:
+    /// return a child `WebEngine` to allow popup creation, or `nil` to deny it.
+    public var androidCreateWindowHandler: ((WebView, WebWindowRequest, AndroidCreateWindowParams) -> WebEngine?)?
+    /// Optional Android-only callback for popup child-window closure events.
+    public var androidCloseWindowHandler: ((WebView, WebEngine) -> Void)?
     #endif
 
     public init(javaScriptEnabled: Bool = true,
@@ -3811,6 +3855,8 @@ public extension SkipWebUIDelegate {
         )
         #if SKIP
         copy.context = context
+        copy.androidCreateWindowHandler = androidCreateWindowHandler
+        copy.androidCloseWindowHandler = androidCloseWindowHandler
         #endif
         return copy
     }
@@ -3818,7 +3864,7 @@ public extension SkipWebUIDelegate {
     /// Clears the persisted iOS content-blocker cache so the next setup recompiles from source.
     ///
     /// The cache is shared across `WebEngineConfiguration` instances. On non-Apple platforms this is a no-op.
-    @MainActor public static func clearContentBlockerCache() throws {
+    @MainActor public static func iOSClearContentBlockerCache() throws {
         #if !SKIP
         try WebContentBlockerStore.clearPersistentState()
         #endif
@@ -3830,7 +3876,7 @@ public extension SkipWebUIDelegate {
     /// can attach them without the initial compile cost. On other platforms this is a no-op.
     @MainActor
     @discardableResult
-    public func prepareContentBlockers() async -> [WebContentBlockerError] {
+    public func iOSPrepareContentBlockers() async -> [WebContentBlockerError] {
         #if !SKIP
         _ = await prepareIOSContentBlockerRuleLists()
         return contentBlockerSetupErrors
@@ -3889,7 +3935,8 @@ public extension SkipWebUIDelegate {
 
         let prepared = await WebContentBlockerStore.prepareRuleLists(
             from: contentBlockers.iOSRuleListPaths,
-            whitelistedDomains: contentBlockers.normalizedWhitelistedDomains
+            whitelistedDomains: contentBlockers.normalizedWhitelistedDomains,
+            popupWhitelistedSourceDomains: contentBlockers.normalizedPopupWhitelistedSourceDomains
         )
         contentBlockerSetupErrors = prepared.errors
         return prepared
@@ -3979,6 +4026,18 @@ struct WebContentBlockerDiagnostics: Equatable {
             whitelistedDomains: WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: whitelistedDomains)
         )
     }
+
+    static func augmentedRuleListContent(
+        _ content: String,
+        whitelistedDomains: [String],
+        popupWhitelistedSourceDomains: [String]
+    ) -> String {
+        WebContentBlockerConfiguration.augmentedIOSRuleListContent(
+            content,
+            whitelistedDomains: WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: whitelistedDomains),
+            popupWhitelistedSourceDomains: WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: popupWhitelistedSourceDomains)
+        )
+    }
 }
 
 @MainActor
@@ -4000,12 +4059,17 @@ fileprivate enum WebContentBlockerStore {
     private static let storeDirectoryName = "RuleListStore"
     private static let metadataVersion = 1
 
-    static func prepareRuleLists(from sourcePaths: [String], whitelistedDomains: [String]) async -> PreparedContentBlockerRuleLists {
+    static func prepareRuleLists(
+        from sourcePaths: [String],
+        whitelistedDomains: [String],
+        popupWhitelistedSourceDomains: [String] = []
+    ) async -> PreparedContentBlockerRuleLists {
         var ruleLists: [WKContentRuleList] = []
         var errors: [WebContentBlockerError] = []
 
         let normalizedSourcePaths = normalizedPaths(from: sourcePaths)
         let normalizedWhitelistedDomains = WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: whitelistedDomains)
+        let normalizedPopupWhitelistedSourceDomains = WebContentBlockerConfiguration.normalizedWhitelistedDomains(from: popupWhitelistedSourceDomains)
         guard !normalizedSourcePaths.isEmpty else {
             diagnostics.errors = []
             return PreparedContentBlockerRuleLists(ruleLists: [], errors: [])
@@ -4038,7 +4102,8 @@ fileprivate enum WebContentBlockerStore {
 
             let augmentedContent = WebContentBlockerConfiguration.augmentedIOSRuleListContent(
                 content,
-                whitelistedDomains: normalizedWhitelistedDomains
+                whitelistedDomains: normalizedWhitelistedDomains,
+                popupWhitelistedSourceDomains: normalizedPopupWhitelistedSourceDomains
             )
             if isEmptyRuleListContent(augmentedContent) {
                 continue

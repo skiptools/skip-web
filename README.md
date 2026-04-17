@@ -90,11 +90,14 @@ let config = WebEngineConfiguration(
             "example.com",
             "*.example.org"
         ],
+        popupWhitelistedSourceDomains: [
+            "example.com"
+        ],
         androidMode: .custom(MyAndroidContentBlockingProvider())
     )
 )
 
-_ = await config.prepareContentBlockers()
+_ = await config.iOSPrepareContentBlockers()
 ```
 
 On Android, `AndroidCosmeticRule` can now carry current-frame guards directly:
@@ -113,6 +116,27 @@ Think of it as "return selectors, render CSS once at the edge". `SkipWeb` instal
 
 For Android navigation callbacks, prefer `WebEngineConfiguration.navigationDelegate`.
 `WebEngine.engineDelegate` remains available as a deprecated compatibility escape hatch, but SkipWeb now keeps blocker enforcement on an internal engine-owned `WebViewClient`.
+
+For example, you can use `shouldOverrideURLLoading` to hand `mailto:` links or app deep links to native code before the `WebView` navigates:
+
+```swift
+final class AppNavigationDelegate: SkipWebNavigationDelegate {
+    func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool {
+        if url.scheme == "mailto" {
+            openSystemMailComposer(url)
+            return true
+        }
+        if url.scheme == "myapp" {
+            routeIntoNativeScreen(url)
+            return true
+        }
+        return false
+    }
+}
+
+let config = WebEngineConfiguration()
+config.navigationDelegate = AppNavigationDelegate()
+```
 
 Navigation APIs:
 
@@ -260,6 +284,8 @@ The `createWebViewWith` callback returns a `WebEngine?`:
 
 - Return `nil` to deny child-window creation.
 - Return a child `WebEngine` to allow child-window creation.
+- Without `WebEngineConfiguration.uiDelegate`, `_blank` / `window.open(...)` falls back to platform defaults:
+  on iOS the popup request is denied, while on Android the current `WebView` may navigate instead of opening a child window.
 
 JavaScript popup behavior can be configured with:
 
@@ -597,9 +623,10 @@ Quick summary:
 
 - `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and attached by SkipWeb.
 - `whitelistedDomains` accepts WebKit-style entries such as `example.com` and `*.example.com`, normalizes them, and disables blocking for matching page domains across both platforms.
-- `androidMode: .custom(...)` is the primary Android API; the legacy `androidRequestBlocker` and `androidCosmeticBlocker` shims remain available as deprecated compatibility paths for one release.
-- `WebEngineConfiguration.clearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list cache so the next install recompiles from source.
-- `prepareContentBlockers()` lets apps prewarm iOS blocker setup without importing `WebKit`.
+- `popupWhitelistedSourceDomains` is the popup-only override. A bare entry like `example.com` means "this site", so it covers both `example.com` and common subdomains such as `www.example.com`; `*.example.com` remains subdomains-only.
+- `androidMode: .custom(...)` is the Android content-blocking entry point.
+- `WebEngineConfiguration.iOSClearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list cache so the next install recompiles from source.
+- `iOSPrepareContentBlockers()` lets apps prewarm iOS blocker setup without importing `WebKit`.
 - Popup children and caller-supplied `WKWebView` instances inherit the configured blocker setup.
 
 ## Contribution
