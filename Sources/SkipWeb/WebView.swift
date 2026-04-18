@@ -12,6 +12,7 @@ public typealias PlatformWebView = android.webkit.WebView
 //import android.webkit.WebView // not imported because it conflicts with SkipWeb.WebView
 
 import androidx.compose.runtime.Composable
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat.startActivity
@@ -20,6 +21,7 @@ import android.webkit.WebViewClient
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.view.ViewGroup
 
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewAssetLoader
@@ -218,7 +220,7 @@ public class WebViewNavigator: @unchecked Sendable {
         logger.info("goForward webView: \(self.webEngine?.description ?? "NONE")")
         webEngine?.goForward()
     }
-    
+
     @MainActor public func evaluateJavaScript(_ js: String) async throws -> String? {
         logger.info("evaluateJavaScript: \(js)")
         return try await webEngine?.evaluate(js: js)
@@ -382,7 +384,7 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
         childEngine.webView.setBackgroundColor(0x000000)
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
-        childEngine.engineDelegate = WebEngineDelegate(childEngine.configuration, WebViewClient(
+        childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: self.webView.state,
             onNavigationCommitted: self.webView.onNavigationCommitted,
             onNavigationFinished: self.webView.onNavigationFinished,
@@ -394,7 +396,9 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
     }
 
     override func onCreateWindow(view: PlatformWebView, isDialog: Bool, isUserGesture: Bool, resultMsg: android.os.Message) -> Bool {
-        guard let uiDelegate = webEngine.configuration.uiDelegate else {
+        let createWindowHandler = webEngine.configuration.androidCreateWindowHandler
+        let uiDelegate = webEngine.configuration.uiDelegate
+        guard createWindowHandler != nil || uiDelegate != nil else {
             return false
         }
 
@@ -412,11 +416,17 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
             resultMessage: resultMsg
         )
 
-        guard let childEngine = uiDelegate.webView(
-            webView,
-            createWebViewWith: request,
-            platformContext: params
-        ) else {
+        let childEngine: WebEngine?
+        if let createWindowHandler {
+            childEngine = createWindowHandler(webView, request, params)
+        } else {
+            childEngine = uiDelegate?.webView(
+                webView,
+                createWebViewWith: request,
+                platformContext: params
+            )
+        }
+        guard let childEngine else {
             return false
         }
 
@@ -442,7 +452,11 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
         guard let childEngine = childEnginesByWebViewHash.removeValue(forKey: window.hashCode()) else {
             return
         }
-        webEngine.configuration.uiDelegate?.webViewDidClose(webView, child: childEngine)
+        if let closeWindowHandler = webEngine.configuration.androidCloseWindowHandler {
+            closeWindowHandler(self.webView, childEngine)
+        } else {
+            webEngine.configuration.uiDelegate?.webViewDidClose(self.webView, child: childEngine)
+        }
     }
 }
 
@@ -462,7 +476,9 @@ extension WebView : ViewRepresentable {
         let settings = webEngine.webView.settings
         settings.setJavaScriptEnabled(config.javaScriptEnabled)
         settings.setJavaScriptCanOpenWindowsAutomatically(config.javaScriptCanOpenWindowsAutomatically)
-        settings.setSupportMultipleWindows(config.uiDelegate != nil)
+        settings.setSupportMultipleWindows(
+            config.uiDelegate != nil || config.androidCreateWindowHandler != nil
+        )
         settings.setSafeBrowsingEnabled(false)
         settings.setAllowContentAccess(true)
         settings.setAllowFileAccess(true)
@@ -472,14 +488,14 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
-        webEngine.engineDelegate = WebEngineDelegate(webEngine.configuration, WebViewClient(
+        webEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: state,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,
             onNavigationFailed: onNavigationFailed,
             shouldOverrideUrlLoadingHandler: shouldOverrideUrlLoading
         ))
-        if config.uiDelegate != nil {
+        if config.uiDelegate != nil || config.androidCreateWindowHandler != nil {
             webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
         } else {
             webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
@@ -591,10 +607,22 @@ extension WebView : ViewRepresentable {
                 config.context = ctx
                 // Re-use the navigator-owned engine so Android WebView survives
                 // screen navigation with the same navigator instance.
-                let webEngine = navigator.webEngine ?? WebEngine(config)
-
-                return setupWebView(webEngine, coordinator: coordinator).webView
-            }, modifier: ctx.modifier, update: { webView in
+                let webEngine = navigator.webEngine ?? WebEngine(configuration: config)
+                let view = setupWebView(webEngine, coordinator: coordinator).webView
+                // AndroidView does not reliably push the parent's fill constraints into the
+                // embedded WebView on the first layout pass, so we request fill sizing from both
+                // Compose and the native view to avoid a zero-height viewport.
+                view.layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+                view.minimumHeight = 1
+                return view
+            }, modifier: ctx.modifier.fillMaxSize(), update: { webView in
+                webView.layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
                 coordinator.update(from: self)
                 coordinator.configureAndroidScrollTracking(webView: webView)
                 self.update(webView: webView, coordinator: coordinator)
@@ -637,6 +665,11 @@ extension WebView : ViewRepresentable {
         context.coordinator.navigator.webEngine = webEngine
 
         let webView = webEngine.webView
+        Task { @MainActor in
+            if let error = await webEngine.awaitContentBlockerSetup().first {
+                context.coordinator.state.error = error
+            }
+        }
 
         webView.allowsLinkPreview = true
         webView.navigationDelegate = context.coordinator

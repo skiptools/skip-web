@@ -22,6 +22,8 @@ public protocol SkipWebUIDelegate: AnyObject {
 - `webView(_:createWebViewWith:platformContext:)`
   - Return `nil` to deny popup creation.
   - Return a child `WebEngine` to allow popup creation.
+  - Without `WebEngineConfiguration.uiDelegate`, `_blank` / `window.open(...)` uses platform fallback behavior:
+    iOS denies the popup request, while Android may navigate the current `WebView`.
   - `request.targetURL` may be `nil` on Android at creation time.
 - `webViewDidClose(_:child:)`
   - Called when a previously-created child window is closed via javascript (`window.close()`).
@@ -128,6 +130,7 @@ struct PopupHostView: View {
 - If this contract is violated, WebKit can raise `NSInternalInconsistencyException` with: `Returned WKWebView was not created with the given configuration.`
 - For iOS popup creation, return a child created via `platformContext.makeChildWebEngine(...)`.
 - `makeChildWebEngine()` mirrors the parent `WebEngineConfiguration` and inspectability by default. Pass an explicit configuration only when you intentionally want different child behavior.
+- Mirrored popup configuration includes `contentBlockers`, so child engines created this way inherit the parent's blocker setup.
 - `makeChildWebEngine()` does not automatically copy platform delegate assignments (`WKUIDelegate`, `WKNavigationDelegate`) from the parent web view; assign those explicitly when needed.
 - On Android, after your delegate returns a child `WebEngine`, SkipWeb mirrors key parent web settings and inherits the parent `WebProfile` onto that child; if profile inheritance fails, popup creation is denied.
 - `PlatformCreateWindowContext` aliases `WebKitCreateWindowParams` on iOS and `AndroidCreateWindowParams` on Android.

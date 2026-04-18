@@ -1,3 +1,12 @@
+## Unreleased
+
+  - Add portable content-blocker configuration with iOS rule-list support and Android request/cosmetic blocker hooks
+  - Mirror content blockers into popup child engines and install them for caller-supplied `WKWebView` instances
+  - Recompile changed iOS content-blocker rule files, prune stale cached rule lists, and expose setup errors on `WebEngine`/`WebEngineConfiguration`
+  - Add `WebEngineConfiguration.iOSClearContentBlockerCache()` so apps can explicitly remove persisted iOS compiled rule lists
+  - Add shared `whitelistedDomains` content-blocker config that bypasses blocking on matching iOS and Android page domains
+  - Make Android redirect detection best-effort for request blocking on runtimes that do not support `WEB_RESOURCE_REQUEST_IS_REDIRECT`
+
 ## 0.5.1
 
 Released 2024-09-03
@@ -86,5 +95,3 @@ Released 2023-11-22
 ## 0.0.2
 
 Released 2023-11-22
-
-
