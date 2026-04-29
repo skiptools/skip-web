@@ -112,6 +112,71 @@ final class SkipWebTests: XCTestCase {
         XCTAssertNotNil(config.uiDelegate)
     }
 
+    func testConfigurationRegisteredMessageHandlerNamesIncludeLegacyHandlers() {
+        let config = WebEngineConfiguration(
+            scriptMessageHandlerNames: ["modern"],
+            messageHandlers: [
+                "legacy": { _ in }
+            ]
+        )
+
+        XCTAssertEqual(config.scriptMessageHandlerNameSet.count, 1)
+        XCTAssertTrue(config.scriptMessageHandlerNameSet.contains("modern"))
+
+        XCTAssertEqual(config.allRegisteredMessageHandlerNames.count, 2)
+        XCTAssertTrue(config.allRegisteredMessageHandlerNames.contains("legacy"))
+        XCTAssertTrue(config.allRegisteredMessageHandlerNames.contains("modern"))
+    }
+
+    #if !SKIP
+    @MainActor
+    func testPersistentWebViewCacheReusesSameID() {
+        WebView.removePersistentWebView(id: "persistent-a")
+
+        let first = WebView.resolvePersistentWebEngine(id: "persistent-a") {
+            WebEngine(configuration: WebEngineConfiguration())
+        }
+        let second = WebView.resolvePersistentWebEngine(id: "persistent-a") {
+            WebEngine(configuration: WebEngineConfiguration())
+        }
+
+        XCTAssertFalse(first.reused)
+        XCTAssertTrue(second.reused)
+        XCTAssertTrue(first.engine === second.engine)
+        XCTAssertTrue(WebView.cachedPersistentWebEngine(id: "persistent-a") === first.engine)
+
+        WebView.removePersistentWebView(id: "persistent-a")
+        XCTAssertNil(WebView.cachedPersistentWebEngine(id: "persistent-a"))
+    }
+
+    @MainActor
+    func testPersistentWebViewCacheSeparatesDistinctIDsAndRecreatesAfterRemoval() {
+        WebView.removePersistentWebViews(ids: ["persistent-b", "persistent-c"])
+
+        let first = WebView.resolvePersistentWebEngine(id: "persistent-b") {
+            WebEngine(configuration: WebEngineConfiguration())
+        }
+        let second = WebView.resolvePersistentWebEngine(id: "persistent-c") {
+            WebEngine(configuration: WebEngineConfiguration())
+        }
+
+        XCTAssertFalse(first.engine === second.engine)
+
+        WebView.removePersistentWebViews(ids: ["persistent-b", "persistent-c"])
+        XCTAssertNil(WebView.cachedPersistentWebEngine(id: "persistent-b"))
+        XCTAssertNil(WebView.cachedPersistentWebEngine(id: "persistent-c"))
+
+        let recreated = WebView.resolvePersistentWebEngine(id: "persistent-b") {
+            WebEngine(configuration: WebEngineConfiguration())
+        }
+
+        XCTAssertFalse(recreated.reused)
+        XCTAssertFalse(recreated.engine === first.engine)
+
+        WebView.removePersistentWebView(id: "persistent-b")
+    }
+    #endif
+
     @MainActor
     func testWebScrollViewProxyIdentityEquality() {
         let proxy = WebScrollViewProxy()
@@ -197,6 +262,11 @@ final class SkipWebTests: XCTestCase {
     #endif
 
     #if SKIP
+    func testAndroidPersistentWebViewEvictionMissingEntryNoCrash() {
+        WebView.removePersistentWebView(id: "missing-persistent-webview")
+        WebView.removePersistentWebViews(ids: ["missing-a", "missing-b"])
+    }
+
     func testAndroidScaledContentSizeUsesScale() {
         let size = AndroidScrollTracker.scaledContentSize(
             visibleSize: CGSize(width: 120, height: 200),
