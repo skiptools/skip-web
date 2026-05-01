@@ -455,7 +455,7 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
     private func inheritParentConfiguration(for childEngine: WebEngine) -> Bool {
         let parentConfig = webEngine.configuration
-        if let profileError = childEngine.inheritAndroidProfile(from: parentConfig.profile) {
+        if let profileError = childEngine.inheritAndroidProfile(from: parentConfig) {
             logger.error("onCreateWindow: failed to inherit parent WebProfile \(String(describing: parentConfig.profile)): \(String(describing: profileError))")
             return false
         }

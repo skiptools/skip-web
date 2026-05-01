@@ -7,7 +7,7 @@ import WebKit
 #endif
 @testable import SkipWeb
 
-#if SKIP || os(iOS)
+#if SKIP || os(iOS) // This helper constructs an iOS WKWebView/WKWebsiteDataStore-backed engine or Android WebView; native macOS host tests cannot exercise that runtime path.
 @MainActor
 func makeCookieTestEngine(profile: WebProfile = WebProfile.default) async -> WebEngine {
     let config = WebEngineConfiguration(profile: profile)

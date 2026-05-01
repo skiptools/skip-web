@@ -118,6 +118,18 @@ let config = WebEngineConfiguration(
 )
 ```
 
+Use `.ephemeral` when the web view should avoid the normal persistent website data store:
+
+```swift
+let config = WebEngineConfiguration(
+    profile: .ephemeral
+)
+```
+
+On iOS this uses `WKWebsiteDataStore.nonPersistent()`. On Android this requires AndroidX WebKit
+`WebViewFeature.MULTI_PROFILE`; SkipWeb creates a generated named profile for the engine so
+cookies and storage do not share the default WebView store.
+
 `WebViewNavigator` can keep a warm `WebEngine` and reuse it across view recreation.
 When the same navigator is rebound to an engine that already has content/history, `initialURL`/`initialHTML` are not reloaded.
 This lets apps preserve page state when navigating away and back with the same navigator instance.
@@ -700,7 +712,7 @@ extension View {
 Supporting types:
 
 - `WebCookie` (`name`, `value`, optional `domain`/`path`/`expires`, plus `isSecure`/`isHTTPOnly`)
-- `WebProfile` (`.default`, `.named(String)`)
+- `WebProfile` (`.default`, `.named(String)`, `.ephemeral`)
 - `WebSiteDataType` (`cookies`, `diskCache`, `memoryCache`, `offlineWebApplicationCache`, `localStorage`, `sessionStorage`, `webSQLDatabases`, `indexedDBDatabases`)
 
 Example:
@@ -733,11 +745,14 @@ Platform behavior:
 | --- | --- | --- |
 | `.default` | `WKWebsiteDataStore.default()` | Default process-wide store |
 | `.named("id")` | `WKWebsiteDataStore(forIdentifier: "id")` | AndroidX WebKit named profile (requires `WebViewFeature.MULTI_PROFILE`) |
+| `.ephemeral` | `WKWebsiteDataStore.nonPersistent()` | Generated AndroidX WebKit named profile (requires `WebViewFeature.MULTI_PROFILE`) |
 
 - iOS cookie scope follows the `WKWebsiteDataStore` attached to the `WKWebView`.
 - Android `.default` uses `android.webkit.CookieManager` singleton.
 - Android `.named("id")` requires `WebViewFeature.MULTI_PROFILE`; otherwise profile setup fails with `WebProfileError.unsupportedOnAndroid` (no fallback to default).
-- On Android, always check profile support at runtime before using `.named("id")` profiles. You can use `WebEngine.isAndroidMultiProfileSupported()` (or the underlying `WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)` check directly).
+- Android `.ephemeral` also requires `WebViewFeature.MULTI_PROFILE`; otherwise profile setup fails with `WebProfileError.unsupportedOnAndroid` instead of falling back to the default store.
+- Each Android `.ephemeral` engine receives a generated named profile. Popup child engines inherit the parent's resolved generated profile so opener and child share the same isolated store.
+- On Android, always check profile support at runtime before using `.named("id")` or `.ephemeral` profiles. You can use `WebEngine.isAndroidMultiProfileSupported()` (or the underlying `WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)` check directly).
 - `cookies(for:)` returns URL-matching cookies; on Android this is best-effort because `CookieManager` reads as a cookie-header string (limited metadata).
 - `setCookie(_:requestURL:)` requires either `cookie.domain` or a `requestURL` host; otherwise it throws `WebCookieError.missingCookieDomain`.
 - `removeData(ofTypes:modifiedSince:)` maps to iOS `WKWebsiteDataStore.removeData`.

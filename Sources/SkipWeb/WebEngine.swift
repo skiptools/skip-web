@@ -24,6 +24,66 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 #endif
 
+public enum WebProfile: Equatable, Hashable, Sendable {
+    /// Uses the platform default persistent website data store.
+    case `default`
+    /// Uses a persistent website data store isolated by the supplied identifier.
+    case named(String)
+    /// Uses an in-memory website data store when the platform supports one.
+    ///
+    /// On iOS this maps to `WKWebsiteDataStore.nonPersistent()`. On Android this maps to
+    /// a generated named WebView profile when `MULTI_PROFILE` is supported.
+    case ephemeral
+
+    fileprivate var normalizedNamedIdentifier: String? {
+        guard case .named(let rawIdentifier) = self else {
+            return nil
+        }
+        let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty else {
+            return nil
+        }
+        if identifier.lowercased() == "default" {
+            return nil
+        }
+        return identifier
+    }
+}
+
+public enum WebProfileError: Error, Equatable {
+    case unsupportedOnAndroid
+    case invalidProfileName
+    case profileSetupFailed
+}
+
+enum WebProfilePolicy {
+    static func validationError(for profile: WebProfile) -> WebProfileError? {
+        switch profile {
+        case .default, .ephemeral:
+            return nil
+        case .named:
+            return profile.normalizedNamedIdentifier == nil ? .invalidProfileName : nil
+        }
+    }
+
+    static func androidSupportError(
+        for profile: WebProfile,
+        isMultiProfileFeatureSupported: Bool
+    ) -> WebProfileError? {
+        if let validationError = validationError(for: profile) {
+            return validationError
+        }
+        switch profile {
+        case .default:
+            return nil
+        case .ephemeral:
+            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
+        case .named:
+            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
+        }
+    }
+}
+
 #if SKIP || os(iOS)
 
 /// A bridge-safe message sent from JavaScript to the host app.
@@ -185,31 +245,6 @@ public enum WebCookieError: Error {
     case invalidCookieName
     case missingCookieDomain
     case invalidCookie
-}
-
-public enum WebProfile: Equatable, Hashable, Sendable {
-    case `default`
-    case named(String)
-
-    fileprivate var normalizedNamedIdentifier: String? {
-        guard case .named(let rawIdentifier) = self else {
-            return nil
-        }
-        let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !identifier.isEmpty else {
-            return nil
-        }
-        if identifier.lowercased() == "default" {
-            return nil
-        }
-        return identifier
-    }
-}
-
-public enum WebProfileError: Error, Equatable {
-    case unsupportedOnAndroid
-    case invalidProfileName
-    case profileSetupFailed
 }
 
 /// Cross-platform content-blocker configuration for a `WebEngine`.
@@ -1127,8 +1162,10 @@ extension WebCookie {
         case .success(let androidProfileResources):
             self.androidProfileCookieManager = androidProfileResources.cookieManager
             self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.configuration.androidResolvedProfile = androidProfileResources.resolvedProfile
             self.profileSetupError = nil
         case .failure(let error):
+            self.configuration.androidResolvedProfile = nil
             self.profileSetupError = error
         }
         if let suppliedAndroidWebViewClient,
@@ -1292,12 +1329,7 @@ extension WebCookie {
     }
 
     static func profileValidationError(for profile: WebProfile) -> WebProfileError? {
-        switch profile {
-        case .default:
-            return nil
-        case .named:
-            return profile.normalizedNamedIdentifier == nil ? .invalidProfileName : nil
-        }
+        WebProfilePolicy.validationError(for: profile)
     }
 
     private func throwProfileSetupErrorIfNeeded() throws {
@@ -1325,6 +1357,7 @@ extension WebCookie {
     struct AndroidProfileResources {
         let cookieManager: android.webkit.CookieManager?
         let webStorage: android.webkit.WebStorage?
+        let resolvedProfile: WebProfile?
     }
 
     public static func isAndroidMultiProfileSupported() -> Bool {
@@ -1432,7 +1465,20 @@ extension WebCookie {
 
         switch profile {
         case .default:
-            return .success(AndroidProfileResources(cookieManager: nil, webStorage: nil))
+            return .success(AndroidProfileResources(cookieManager: nil, webStorage: nil, resolvedProfile: .default))
+        case .ephemeral:
+            let identifier = androidEphemeralProfileIdentifier()
+            guard applyAndroidProfile(identifier, to: webView) else {
+                return .failure(.profileSetupFailed)
+            }
+            let profile = WebViewCompat.getProfile(webView)
+            return .success(
+                AndroidProfileResources(
+                    cookieManager: profile.getCookieManager(),
+                    webStorage: profile.getWebStorage(),
+                    resolvedProfile: .named(identifier)
+                )
+            )
         case .named:
             guard let identifier = profile.normalizedNamedIdentifier else {
                 return .failure(.invalidProfileName)
@@ -1444,22 +1490,23 @@ extension WebCookie {
             return .success(
                 AndroidProfileResources(
                     cookieManager: profile.getCookieManager(),
-                    webStorage: profile.getWebStorage()
+                    webStorage: profile.getWebStorage(),
+                    resolvedProfile: .named(identifier)
                 )
             )
         }
     }
 
     static func androidProfileSupportError(for profile: WebProfile, isMultiProfileFeatureSupported: Bool) -> WebProfileError? {
-        if let validationError = profileValidationError(for: profile) {
-            return validationError
-        }
-        switch profile {
-        case .default:
-            return nil
-        case .named:
-            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
-        }
+        WebProfilePolicy.androidSupportError(
+            for: profile,
+            isMultiProfileFeatureSupported: isMultiProfileFeatureSupported
+        )
+    }
+
+    @discardableResult
+    func inheritAndroidProfile(from parentConfiguration: WebEngineConfiguration) -> WebProfileError? {
+        inheritAndroidProfile(from: parentConfiguration.androidResolvedProfile ?? parentConfiguration.profile)
     }
 
     @discardableResult
@@ -1472,12 +1519,18 @@ extension WebCookie {
         case .success(let androidProfileResources):
             self.androidProfileCookieManager = androidProfileResources.cookieManager
             self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.configuration.androidResolvedProfile = androidProfileResources.resolvedProfile
             self.profileSetupError = nil
             return nil
         case .failure(let error):
+            self.configuration.androidResolvedProfile = nil
             self.profileSetupError = error
             return error
         }
+    }
+
+    private static func androidEphemeralProfileIdentifier() -> String {
+        "skipweb-ephemeral-\(UUID().uuidString)"
     }
 
     private static func applyAndroidProfile(_ identifier: String, to webView: PlatformWebView) -> Bool {
@@ -3964,6 +4017,7 @@ public extension SkipWebUIDelegate {
     #if SKIP
     /// The Android context to use for creating a web context
     public var context: android.content.Context? = nil
+    fileprivate var androidResolvedProfile: WebProfile?
     /// Optional Android-only callback for popup child-window creation.
     ///
     /// Think of it as the Android popup hook that runs before `SkipWebUIDelegate`:
@@ -4045,6 +4099,7 @@ public extension SkipWebUIDelegate {
         )
         #if SKIP
         copy.context = context
+        copy.androidResolvedProfile = androidResolvedProfile
         copy.androidCreateWindowHandler = androidCreateWindowHandler
         copy.androidCloseWindowHandler = androidCloseWindowHandler
         #endif
@@ -4136,6 +4191,8 @@ public extension SkipWebUIDelegate {
         switch profile {
         case .default:
             return WKWebsiteDataStore.default()
+        case .ephemeral:
+            return WKWebsiteDataStore.nonPersistent()
         case .named(let identifier):
             guard let dataStoreIdentifier = webKitDataStoreIdentifier(for: identifier) else {
                 return WKWebsiteDataStore.default()
