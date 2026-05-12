@@ -6,16 +6,37 @@ import Foundation
 
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class WebProfileSegregationTests: XCTestCase {
-    #if SKIP || os(iOS)
-
     /// Verifies profile validation accepts real identifiers and rejects reserved or blank names.
-    @MainActor
     func testWebProfileValidationRules() {
-        XCTAssertNil(WebEngine.profileValidationError(for: WebProfile.default))
-        XCTAssertNil(WebEngine.profileValidationError(for: WebProfile.named("profile-a")))
-        XCTAssertEqual(WebEngine.profileValidationError(for: WebProfile.named(" ")), WebProfileError.invalidProfileName)
-        XCTAssertEqual(WebEngine.profileValidationError(for: WebProfile.named("default")), WebProfileError.invalidProfileName)
+        XCTAssertNil(WebProfilePolicy.validationError(for: WebProfile.default))
+        XCTAssertNil(WebProfilePolicy.validationError(for: WebProfile.ephemeral))
+        XCTAssertNil(WebProfilePolicy.validationError(for: WebProfile.named("profile-a")))
+        XCTAssertEqual(WebProfilePolicy.validationError(for: WebProfile.named(" ")), WebProfileError.invalidProfileName)
+        XCTAssertEqual(WebProfilePolicy.validationError(for: WebProfile.named("default")), WebProfileError.invalidProfileName)
     }
+
+    /// Verifies Android profile support decisions match the default, ephemeral, named, and invalid cases.
+    func testAndroidProfileSupportMatrix() {
+        XCTAssertNil(WebProfilePolicy.androidSupportError(for: WebProfile.default, isMultiProfileFeatureSupported: false))
+        XCTAssertEqual(
+            WebProfilePolicy.androidSupportError(for: WebProfile.ephemeral, isMultiProfileFeatureSupported: false),
+            WebProfileError.unsupportedOnAndroid
+        )
+        XCTAssertNil(WebProfilePolicy.androidSupportError(for: WebProfile.ephemeral, isMultiProfileFeatureSupported: true))
+        XCTAssertEqual(
+            WebProfilePolicy.androidSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: false),
+            WebProfileError.unsupportedOnAndroid
+        )
+        XCTAssertNil(
+            WebProfilePolicy.androidSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: true)
+        )
+        XCTAssertEqual(
+            WebProfilePolicy.androidSupportError(for: WebProfile.named(" "), isMultiProfileFeatureSupported: true),
+            WebProfileError.invalidProfileName
+        )
+    }
+
+    #if SKIP || os(iOS) // These tests create WebEngine/PlatformWebView instances backed by iOS WKWebView/WKWebsiteDataStore APIs or Android WebView; native macOS SwiftPM cannot exercise those runtime APIs.
 
     /// Confirms navigator loading surfaces invalid profile errors from its backing engine.
     @MainActor
@@ -108,22 +129,6 @@ final class WebProfileSegregationTests: XCTestCase {
     #endif
 
     #if SKIP
-    /// Verifies Android profile support decisions match the default, named, and invalid cases.
-    func testAndroidProfileSupportMatrix() {
-        XCTAssertNil(WebEngine.androidProfileSupportError(for: WebProfile.default, isMultiProfileFeatureSupported: false))
-        XCTAssertEqual(
-            WebEngine.androidProfileSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: false),
-            WebProfileError.unsupportedOnAndroid
-        )
-        XCTAssertNil(
-            WebEngine.androidProfileSupportError(for: WebProfile.named("android-profile"), isMultiProfileFeatureSupported: true)
-        )
-        XCTAssertEqual(
-            WebEngine.androidProfileSupportError(for: WebProfile.named(" "), isMultiProfileFeatureSupported: true),
-            WebProfileError.invalidProfileName
-        )
-    }
-
     /// Confirms inheriting an invalid Android child profile fails before any cookie write can proceed.
     @MainActor
     func testAndroidChildProfileInheritanceRejectsInvalidProfile() async throws {
@@ -181,6 +186,27 @@ final class WebProfileSegregationTests: XCTestCase {
         }
     }
 
+    /// Ensures Android ephemeral profiles reject cookie operations instead of sharing the default store when multi-profile is unsupported.
+    @MainActor
+    func testAndroidEphemeralProfileThrowsWhenUnsupported() async throws {
+        if isRobolectric {
+            throw XCTSkip("WebView feature probes are unavailable in Robolectric")
+        }
+        if WebEngine.isAndroidMultiProfileSupported() {
+            throw XCTSkip("device WebView runtime supports multi-profile")
+        }
+        let engine = await makeCookieTestEngine(profile: .ephemeral)
+        let requestURL = try XCTUnwrap(URL(string: "https://android-ephemeral.example.com/path"))
+        do {
+            try await engine.setCookie(WebCookie(name: "session", value: "1"), requestURL: requestURL)
+            XCTFail("Expected ephemeral profile operations to throw when multi-profile is unsupported")
+        } catch let error as WebProfileError {
+            XCTAssertEqual(error, WebProfileError.unsupportedOnAndroid)
+        } catch {
+            XCTFail("Unexpected error type: \(error)")
+        }
+    }
+
     /// Verifies distinct Android named profiles keep cookie state isolated when multi-profile support exists.
     @MainActor
     func testAndroidNamedProfilesIsolateCookiesWhenSupported() async throws {
@@ -199,6 +225,33 @@ final class WebProfileSegregationTests: XCTestCase {
 
         let requestURL = try XCTUnwrap(URL(string: "https://android-profile.example.com/path"))
         let cookieName = "android_profile_cookie_\(suffix)"
+        try await engineA.setCookie(WebCookie(name: cookieName, value: "1"), requestURL: requestURL)
+        let headerA = await engineA.cookieHeader(for: requestURL)
+        let headerB = await engineB.cookieHeader(for: requestURL)
+        XCTAssertTrue(headerA?.contains("\(cookieName)=1") == true)
+        XCTAssertFalse(headerB?.contains("\(cookieName)=1") == true)
+
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+    }
+
+    /// Verifies Android ephemeral profiles use isolated generated stores when multi-profile support exists.
+    @MainActor
+    func testAndroidEphemeralProfilesIsolateCookiesWhenSupported() async throws {
+        if isRobolectric {
+            throw XCTSkip("cookie/profile store tests are not reliable in Robolectric")
+        }
+        if !WebEngine.isAndroidMultiProfileSupported() {
+            throw XCTSkip("device WebView runtime does not support multi-profile")
+        }
+
+        let engineA = await makeCookieTestEngine(profile: .ephemeral)
+        let engineB = await makeCookieTestEngine(profile: .ephemeral)
+        await engineA.clearCookies()
+        await engineB.clearCookies()
+
+        let requestURL = try XCTUnwrap(URL(string: "https://android-ephemeral.example.com/path"))
+        let cookieName = "android_ephemeral_cookie_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
         try await engineA.setCookie(WebCookie(name: cookieName, value: "1"), requestURL: requestURL)
         let headerA = await engineA.cookieHeader(for: requestURL)
         let headerB = await engineB.cookieHeader(for: requestURL)

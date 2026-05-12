@@ -33,8 +33,12 @@ import androidx.webkit.WebViewFeature
 #if SKIP || os(iOS)
 
 /// An embedded WebKit view. It is configured using a `WebEngineConfiguration`
-///  and driven with a `WebViewNavigator` which can be associated
-///  with user interface controls like back/forward buttons and a URL bar.
+/// and driven with a `WebViewNavigator` which can be associated
+/// with user interface controls like back/forward buttons and a URL bar.
+///
+/// For single-page flows, a navigator is usually enough to keep one browser runtime warm.
+/// For multi-tab browsers, use `persistentWebViewID` so each tab can own and later rebind
+/// its own cached `WebEngine`.
 public struct WebView : View {
     fileprivate let config: WebEngineConfiguration
     let navigator: WebViewNavigator
@@ -49,13 +53,22 @@ public struct WebView : View {
     let onNavigationFailed: (() -> Void)?
     let scrollDelegate: (any SkipWebScrollDelegate)?
     let shouldOverrideUrlLoading: ((_ url: URL) -> Bool)?
-    let persistentWebViewID: String? = nil
+    let persistentWebViewID: String?
 
     private static var engineCache: [String: WebEngine] = [:]
 
     //let onWarm: (() async -> Void)?
     //@State fileprivate var isWarm = false
 
+    /// Creates an embedded web view backed by a `WebEngine`.
+    ///
+    /// Think of it as the view wrapper around one browser runtime. If you are building
+    /// a multi-tab browser, `persistentWebViewID` is the mechanism that lets each tab
+    /// keep its own live engine while the SwiftUI view mounts and unmounts around it.
+    ///
+    /// Use a stable per-tab identifier, such as a tab UUID string, when each tab should
+    /// resume its own history and in-page state after being rebound. Omit
+    /// `persistentWebViewID` when the web view does not need cross-mount identity.
     public init(
         configuration: WebEngineConfiguration = WebEngineConfiguration(),
         navigator: WebViewNavigator = WebViewNavigator(),
@@ -66,7 +79,8 @@ public struct WebView : View {
         onNavigationCommitted: (() -> Void)? = nil,
         onNavigationFinished: (() -> Void)? = nil,
         onNavigationFailed: (() -> Void)? = nil,
-        shouldOverrideUrlLoading: ((_ url: URL) -> Bool)? = nil
+        shouldOverrideUrlLoading: ((_ url: URL) -> Bool)? = nil,
+        persistentWebViewID: String? = nil
     ) {
         self.config = configuration
         self.navigator = navigator
@@ -82,12 +96,76 @@ public struct WebView : View {
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
         self.shouldOverrideUrlLoading = shouldOverrideUrlLoading
+        self.persistentWebViewID = persistentWebViewID
+    }
+
+    /// Removes one cached persistent web view so the next mount recreates its engine.
+    ///
+    /// Think of it as explicitly dropping one parked browser engine from the shared cache.
+    /// Multi-tab hosts should call this when a tab closes or when a background tab should
+    /// no longer keep a live engine in memory.
+    @MainActor
+    public static func removePersistentWebView(id: String) {
+        guard let engine = engineCache.removeValue(forKey: id) else {
+            return
+        }
+        teardownPersistentWebEngine(engine)
+    }
+
+    /// Removes multiple cached persistent web views so the next mount recreates their engines.
+    ///
+    /// Think of it as a bulk purge for parked browser engines that should no longer stay warm.
+    /// This is useful when a browser feature trims its warm tab pool after memory pressure
+    /// or session changes.
+    @MainActor
+    public static func removePersistentWebViews(ids: [String]) {
+        for id in ids {
+            removePersistentWebView(id: id)
+        }
+    }
+
+    @MainActor
+    static func cachedPersistentWebEngine(id: String) -> WebEngine? {
+        engineCache[id]
+    }
+
+    @MainActor
+    static func resolvePersistentWebEngine(
+        id: String?,
+        make: () -> WebEngine
+    ) -> (engine: WebEngine, reused: Bool) {
+        if let id, let cachedEngine = engineCache[id] {
+            return (cachedEngine, true)
+        }
+
+        let engine = make()
+        if let id {
+            engineCache[id] = engine
+        }
+        return (engine, false)
+    }
+
+    @MainActor
+    private static func teardownPersistentWebEngine(_ engine: WebEngine) {
+        engine.stopLoading()
+        #if !SKIP
+        engine.webView.navigationDelegate = nil
+        engine.webView.uiDelegate = nil
+        engine.webView.scrollView.delegate = nil
+        engine.webView.removeFromSuperview()
+        #else
+        engine.webView.stopLoading()
+        engine.webView.loadUrl("about:blank")
+        engine.webView.clearHistory()
+        engine.webView.removeAllViews()
+        engine.webView.destroy()
+        #endif
     }
 }
 
 /// The current state of a web page, including the loading status and the current URL
 @available(macOS 14.0, iOS 17.0, *)
-@Observable public class WebViewState: @unchecked Sendable {
+@Observable public final class WebViewState: @unchecked Sendable {
     public internal(set) var isLoading: Bool = false
     public internal(set) var isProvisionallyNavigating: Bool = false
     /// Preferred URL accessor for parity with `WKWebView.url`.
@@ -138,7 +216,7 @@ public struct WebView : View {
 }
 
 /// A controller that can drive a `WebEngine` from a user interface.
-public class WebViewNavigator: @unchecked Sendable {
+public final class WebViewNavigator: @unchecked Sendable {
     var initialURL: URL?
     var initialHTML: String?
     #if SKIP
@@ -296,16 +374,28 @@ typealias ViewRepresentable = NSViewRepresentable
 public struct MessageHandlerRouter {
     let webEngine: WebEngine
     // SKIP INSERT: @android.webkit.JavascriptInterface
-    public func postMessage(_ name: String, json: String) {
-        guard let messageHandler = webEngine.configuration.messageHandlers[name] else {
-            logger.error("no messageHandler for \(name)")
+    public func postMessage(_ name: String, bodyJSON: String, sourceURL: String, isMainFrame: Bool) {
+        guard webEngine.configuration.allRegisteredMessageHandlerNames.contains(name) else {
+            logger.error("no scriptMessageHandler for \(name)")
             return
         }
-        let frameInfo = FrameInfo(isMainFrame: true, request: URLRequest(url: URL(string: "about:blank")!), securityOrigin: SecurityOrigin(), webView: webEngine.webView)
-        let body = try JSONSerialization.jsonObject(with: json.data(using: .utf8)!, options: [])
-        let message = WebViewMessage(frameInfo: frameInfo, uuid: UUID(), name: name, body: body)
-        Task {
-            await messageHandler(message)
+        let message = WebViewScriptMessage(
+            name: name,
+            bodyJSON: bodyJSON,
+            sourceURL: sourceURL.isEmpty ? nil : sourceURL,
+            isMainFrame: isMainFrame
+        )
+        Task { @MainActor [webEngine, message] in
+            webEngine.configuration.scriptMessageDelegate?.webEngine(webEngine, didReceiveScriptMessage: message)
+        }
+        if let messageHandler = webEngine.configuration.legacyMessageHandlers[name] {
+            let frameURL = URL(string: sourceURL.isEmpty ? "about:blank" : sourceURL) ?? URL(string: "about:blank")!
+            let frameInfo = FrameInfo(isMainFrame: isMainFrame, request: URLRequest(url: frameURL), securityOrigin: SecurityOrigin(), webView: webEngine.webView)
+            let body = try JSONSerialization.jsonObject(with: bodyJSON.data(using: .utf8)!, options: [])
+            let legacyMessage = WebViewMessage(frameInfo: frameInfo, uuid: UUID(), name: name, body: body)
+            Task {
+                await messageHandler(legacyMessage)
+            }
         }
     }
 }
@@ -365,7 +455,7 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
     private func inheritParentConfiguration(for childEngine: WebEngine) -> Bool {
         let parentConfig = webEngine.configuration
-        if let profileError = childEngine.inheritAndroidProfile(from: parentConfig.profile) {
+        if let profileError = childEngine.inheritAndroidProfile(from: parentConfig) {
             logger.error("onCreateWindow: failed to inherit parent WebProfile \(String(describing: parentConfig.profile)): \(String(describing: profileError))")
             return false
         }
@@ -384,6 +474,8 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
 
         childEngine.webView.setBackgroundColor(0x000000)
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
+        childEngine.installAndroidScriptMessageFacadeIfNeeded()
+        childEngine.installAndroidDocumentStartUserScriptsIfNeeded()
         childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: self.webView.state,
             onNavigationCommitted: self.webView.onNavigationCommitted,
@@ -488,6 +580,8 @@ extension WebView : ViewRepresentable {
         }
         webEngine.webView.setBackgroundColor(0x000000) // prevents screen flashing: https://issuetracker.google.com/issues/314821744
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
+        webEngine.installAndroidScriptMessageFacadeIfNeeded()
+        webEngine.installAndroidDocumentStartUserScriptsIfNeeded()
         webEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: state,
             onNavigationCommitted: onNavigationCommitted,
@@ -605,10 +699,18 @@ extension WebView : ViewRepresentable {
             let coordinator = rememberedCoordinator()
             AndroidView(factory: { ctx in
                 config.context = ctx
-                // Re-use the navigator-owned engine so Android WebView survives
-                // screen navigation with the same navigator instance.
-                let webEngine = navigator.webEngine ?? WebEngine(configuration: config)
-                let view = setupWebView(webEngine, coordinator: coordinator).webView
+                let resolvedWebEngine: WebEngine
+                if let persistentWebViewID {
+                    resolvedWebEngine = Self.resolvePersistentWebEngine(id: persistentWebViewID) {
+                        WebEngine(configuration: config)
+                    }.engine
+                } else {
+                    // Preserve navigator-owned reuse for single WebViews without a tab cache ID.
+                    resolvedWebEngine = navigator.webEngine ?? WebEngine(configuration: config)
+                }
+                let webEngine = setupWebView(resolvedWebEngine, coordinator: coordinator)
+                navigator.webEngine = webEngine
+                let view = webEngine.webView
                 // AndroidView does not reliably push the parent's fill constraints into the
                 // embedded WebView on the first layout pass, so we request fill sizing from both
                 // Compose and the native view to avoid a zero-height viewport.
@@ -631,31 +733,25 @@ extension WebView : ViewRepresentable {
     }
     #else
     @MainActor private func makeWebEngine(id: String?, config: WebEngineConfiguration, coordinator: WebViewCoordinator) -> WebEngine {
-        var web: WebEngine?
-        if let id = id {
-            web = Self.engineCache[id] // it is UI thread so safe to access static
-            for messageHandlerName in coordinator.messageHandlerNames {
-                web?.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
-            }
-        }
-        if web == nil {
+        let resolvedEngine = Self.resolvePersistentWebEngine(id: id) {
             let engine = WebEngine(configuration: config)
             logger.info("created WebEngine \(id ?? "noid"): \(engine)")
-            web = setupWebView(engine, coordinator: coordinator)
-            if let id = id {
-                Self.engineCache[id] = engine
+            return engine
+        }
+        let web = resolvedEngine.engine
+
+        if resolvedEngine.reused {
+            for messageHandlerName in coordinator.messageHandlerNames {
+                web.webView.configuration.userContentController.removeScriptMessageHandler(forName: messageHandlerName)
             }
-
-            #if !os(macOS) // API unavailable on macOS
-            web?.webView.isOpaque = false
-            web?.webView.backgroundColor = .clear
-            //web?.backgroundColor = .white
-            #endif
         }
+        _ = setupWebView(web, coordinator: coordinator)
 
-        guard let web = web else {
-            fatalError("couldn't instantiate WKWebView for WebView.")
-        }
+        #if !os(macOS) // API unavailable on macOS
+        web.webView.isOpaque = false
+        web.webView.backgroundColor = .clear
+        //web?.backgroundColor = .white
+        #endif
 
         return web
     }
@@ -815,7 +911,7 @@ extension WebView : ViewRepresentable {
     }
 
     var messageHandlerNames: [String] {
-        config.messageHandlers.keys.map { $0 }
+        Array(config.allRegisteredMessageHandlerNames)
     }
 
     init(webView: WebView, navigator: WebViewNavigator, scriptCaller: WebViewScriptCaller? = nil, config: WebEngineConfiguration) {

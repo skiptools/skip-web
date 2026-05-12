@@ -24,8 +24,130 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 #endif
 
+public enum WebProfile: Equatable, Hashable, Sendable {
+    /// Uses the platform default persistent website data store.
+    case `default`
+    /// Uses a persistent website data store isolated by the supplied identifier.
+    case named(String)
+    /// Uses an in-memory website data store when the platform supports one.
+    ///
+    /// On iOS this maps to `WKWebsiteDataStore.nonPersistent()`. On Android this maps to
+    /// a generated named WebView profile when `MULTI_PROFILE` is supported.
+    case ephemeral
+
+    fileprivate var normalizedNamedIdentifier: String? {
+        guard case .named(let rawIdentifier) = self else {
+            return nil
+        }
+        let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !identifier.isEmpty else {
+            return nil
+        }
+        if identifier.lowercased() == "default" {
+            return nil
+        }
+        return identifier
+    }
+}
+
+public enum WebProfileError: Error, Equatable {
+    case unsupportedOnAndroid
+    case invalidProfileName
+    case profileSetupFailed
+}
+
+enum WebProfilePolicy {
+    static func validationError(for profile: WebProfile) -> WebProfileError? {
+        switch profile {
+        case .default, .ephemeral:
+            return nil
+        case .named:
+            return profile.normalizedNamedIdentifier == nil ? .invalidProfileName : nil
+        }
+    }
+
+    static func androidSupportError(
+        for profile: WebProfile,
+        isMultiProfileFeatureSupported: Bool
+    ) -> WebProfileError? {
+        if let validationError = validationError(for: profile) {
+            return validationError
+        }
+        switch profile {
+        case .default:
+            return nil
+        case .ephemeral:
+            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
+        case .named:
+            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
+        }
+    }
+}
+
 #if SKIP || os(iOS)
 
+/// A bridge-safe message sent from JavaScript to the host app.
+///
+/// `bodyJSON` is the canonical payload. JavaScript values posted through
+/// `window.webkit.messageHandlers.<name>.postMessage(...)` are encoded with
+/// `JSON.stringify` before crossing the platform bridge.
+public struct WebViewScriptMessage: Equatable, Sendable {
+    /// The configured message handler name.
+    public let name: String
+    /// The JSON-encoded JavaScript message body.
+    public let bodyJSON: String
+    /// The URL of the frame that sent the message, when available.
+    public let sourceURL: String?
+    /// Whether the sending frame is the main frame, when available.
+    public let isMainFrame: Bool?
+
+    /// Creates a script message envelope.
+    public init(name: String, bodyJSON: String, sourceURL: String? = nil, isMainFrame: Bool? = nil) {
+        self.name = name
+        self.bodyJSON = bodyJSON
+        self.sourceURL = sourceURL
+        self.isMainFrame = isMainFrame
+    }
+}
+
+/// Delegate for bridge-safe JavaScript messages sent from a web view.
+@MainActor
+public protocol WebViewScriptMessageDelegate: AnyObject {
+    /// Called when JavaScript posts a message to a configured handler name.
+    func webEngine(_ webEngine: WebEngine, didReceiveScriptMessage message: WebViewScriptMessage)
+}
+
+#if !SKIP
+private func webViewScriptMessageBodyJSON(from body: Any) -> String {
+    if body is NSNull {
+        return "null"
+    }
+
+    if JSONSerialization.isValidJSONObject(body),
+       let data = try? JSONSerialization.data(withJSONObject: body, options: []),
+       let json = String(data: data, encoding: .utf8) {
+        return json
+    }
+
+    let wrappedBody: [Any] = [body]
+    if JSONSerialization.isValidJSONObject(wrappedBody),
+       let data = try? JSONSerialization.data(withJSONObject: wrappedBody, options: []),
+       let wrappedJSON = String(data: data, encoding: .utf8),
+       wrappedJSON.hasPrefix("["),
+       wrappedJSON.hasSuffix("]") {
+        let start = wrappedJSON.index(after: wrappedJSON.startIndex)
+        let end = wrappedJSON.index(before: wrappedJSON.endIndex)
+        return String(wrappedJSON[start..<end])
+    }
+
+    if let data = try? JSONEncoder().encode(String(describing: body)),
+       let json = String(data: data, encoding: .utf8) {
+        return json
+    }
+
+    return "null"
+}
+#endif
 
 public struct SkipWebSnapshotRect: Equatable, Sendable {
     public static let null = SkipWebSnapshotRect(x: 0.0, y: 0.0, width: -1.0, height: -1.0)
@@ -123,31 +245,6 @@ public enum WebCookieError: Error {
     case invalidCookieName
     case missingCookieDomain
     case invalidCookie
-}
-
-public enum WebProfile: Equatable, Hashable, Sendable {
-    case `default`
-    case named(String)
-
-    fileprivate var normalizedNamedIdentifier: String? {
-        guard case .named(let rawIdentifier) = self else {
-            return nil
-        }
-        let identifier = rawIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !identifier.isEmpty else {
-            return nil
-        }
-        if identifier.lowercased() == "default" {
-            return nil
-        }
-        return identifier
-    }
-}
-
-public enum WebProfileError: Error, Equatable {
-    case unsupportedOnAndroid
-    case invalidProfileName
-    case profileSetupFailed
 }
 
 /// Cross-platform content-blocker configuration for a `WebEngine`.
@@ -1037,6 +1134,8 @@ extension WebCookie {
     private var androidEmbeddedNavigationClient: android.webkit.WebViewClient?
     private var androidLegacyNavigationDelegate: WebEngineDelegate?
     private var androidPendingPageLoadCallbacks: [UUID: (Result<Void, Error>) -> Void] = [:]
+    private var androidScriptMessageFacadeHandler: ScriptHandler?
+    private var androidUserScriptHandlers: [ScriptHandler] = []
     #endif
 
     /// Create a WebEngine with the specified configuration.
@@ -1063,8 +1162,10 @@ extension WebCookie {
         case .success(let androidProfileResources):
             self.androidProfileCookieManager = androidProfileResources.cookieManager
             self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.configuration.androidResolvedProfile = androidProfileResources.resolvedProfile
             self.profileSetupError = nil
         case .failure(let error):
+            self.configuration.androidResolvedProfile = nil
             self.profileSetupError = error
         }
         if let suppliedAndroidWebViewClient,
@@ -1228,12 +1329,7 @@ extension WebCookie {
     }
 
     static func profileValidationError(for profile: WebProfile) -> WebProfileError? {
-        switch profile {
-        case .default:
-            return nil
-        case .named:
-            return profile.normalizedNamedIdentifier == nil ? .invalidProfileName : nil
-        }
+        WebProfilePolicy.validationError(for: profile)
     }
 
     private func throwProfileSetupErrorIfNeeded() throws {
@@ -1261,6 +1357,7 @@ extension WebCookie {
     struct AndroidProfileResources {
         let cookieManager: android.webkit.CookieManager?
         let webStorage: android.webkit.WebStorage?
+        let resolvedProfile: WebProfile?
     }
 
     public static func isAndroidMultiProfileSupported() -> Bool {
@@ -1271,6 +1368,96 @@ extension WebCookie {
         WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
     }
 
+    func installAndroidScriptMessageFacadeIfNeeded() {
+        guard androidScriptMessageFacadeHandler == nil,
+              !configuration.allRegisteredMessageHandlerNames.isEmpty,
+              Self.isAndroidDocumentStartScriptSupported() else {
+            return
+        }
+
+        let allowedOriginRules: kotlin.collections.MutableSet<String> = kotlin.collections.HashSet()
+        allowedOriginRules.add("*")
+        let script = Self.androidScriptMessageFacadeScript()
+        // SKIP INSERT: try {
+        // SKIP INSERT:     androidScriptMessageFacadeHandler = androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, script, allowedOriginRules)
+        // SKIP INSERT: } catch (t: Throwable) {
+        // SKIP INSERT:     logger.warning("Skipping Android script message document-start registration: ${t.message ?: t}")
+        // SKIP INSERT: }
+        androidScriptMessageFacadeHandler = WebViewCompat.addDocumentStartJavaScript(webView, script, allowedOriginRules)
+    }
+
+    func installAndroidDocumentStartUserScriptsIfNeeded() {
+        guard androidUserScriptHandlers.isEmpty,
+              !configuration.userScripts.isEmpty,
+              Self.isAndroidDocumentStartScriptSupported() else {
+            return
+        }
+
+        for userScript in configuration.userScripts {
+            let allowedOriginRules: kotlin.collections.MutableSet<String> = kotlin.collections.HashSet()
+            allowedOriginRules.add("*")
+            let script = Self.androidDocumentStartUserScriptSource(for: userScript)
+            // SKIP INSERT: try {
+            // SKIP INSERT:     androidUserScriptHandlers.append(androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, script, allowedOriginRules))
+            // SKIP INSERT: } catch (t: Throwable) {
+            // SKIP INSERT:     logger.warning("Skipping Android user-script document-start registration: ${t.message ?: t}")
+            // SKIP INSERT: }
+            androidUserScriptHandlers.append(WebViewCompat.addDocumentStartJavaScript(webView, script, allowedOriginRules))
+        }
+    }
+
+    static func androidDocumentStartUserScriptSource(for userScript: WebViewUserScript) -> String {
+        var source = userScript.webKitUserScript.source
+        if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
+            source = """
+            (function () {
+              var skipWebRunUserScript = function () {
+                \(source)
+              };
+              if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", skipWebRunUserScript, { once: true });
+              } else {
+                skipWebRunUserScript();
+              }
+            })();
+            """
+        }
+
+        if userScript.webKitUserScript.isForMainFrameOnly {
+            source = """
+            (function () {
+              if (window.top !== window.self) { return; }
+              \(source)
+            })();
+            """
+        }
+        return source
+    }
+
+    static func androidScriptMessageFacadeScript() -> String {
+        """
+        (function () {
+          if (!window.webkit) window.webkit = {};
+          window.webkit.messageHandlers = new Proxy(window.webkit.messageHandlers || {}, {
+            get: function (target, messageHandlerName) {
+              if (target && target[messageHandlerName]) { return target[messageHandlerName]; }
+              return {
+                postMessage: function (body) {
+                  var bodyJSON = JSON.stringify(body);
+                  if (bodyJSON === undefined) { bodyJSON = "null"; }
+                  var sourceURL = "";
+                  var isMainFrame = false;
+                  try { sourceURL = window.location.href || ""; } catch (e) {}
+                  try { isMainFrame = window.top === window.self; } catch (e) {}
+                  skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), bodyJSON, sourceURL, isMainFrame);
+                }
+              };
+            }
+          });
+        })();
+        """
+    }
+
     private static func configureAndroidProfile(_ profile: WebProfile, for webView: PlatformWebView) -> Result<AndroidProfileResources, WebProfileError> {
         if let supportError = androidProfileSupportError(for: profile, isMultiProfileFeatureSupported: isAndroidMultiProfileSupported()) {
             return .failure(supportError)
@@ -1278,7 +1465,20 @@ extension WebCookie {
 
         switch profile {
         case .default:
-            return .success(AndroidProfileResources(cookieManager: nil, webStorage: nil))
+            return .success(AndroidProfileResources(cookieManager: nil, webStorage: nil, resolvedProfile: .default))
+        case .ephemeral:
+            let identifier = androidEphemeralProfileIdentifier()
+            guard applyAndroidProfile(identifier, to: webView) else {
+                return .failure(.profileSetupFailed)
+            }
+            let profile = WebViewCompat.getProfile(webView)
+            return .success(
+                AndroidProfileResources(
+                    cookieManager: profile.getCookieManager(),
+                    webStorage: profile.getWebStorage(),
+                    resolvedProfile: .named(identifier)
+                )
+            )
         case .named:
             guard let identifier = profile.normalizedNamedIdentifier else {
                 return .failure(.invalidProfileName)
@@ -1290,22 +1490,23 @@ extension WebCookie {
             return .success(
                 AndroidProfileResources(
                     cookieManager: profile.getCookieManager(),
-                    webStorage: profile.getWebStorage()
+                    webStorage: profile.getWebStorage(),
+                    resolvedProfile: .named(identifier)
                 )
             )
         }
     }
 
     static func androidProfileSupportError(for profile: WebProfile, isMultiProfileFeatureSupported: Bool) -> WebProfileError? {
-        if let validationError = profileValidationError(for: profile) {
-            return validationError
-        }
-        switch profile {
-        case .default:
-            return nil
-        case .named:
-            return isMultiProfileFeatureSupported ? nil : .unsupportedOnAndroid
-        }
+        WebProfilePolicy.androidSupportError(
+            for: profile,
+            isMultiProfileFeatureSupported: isMultiProfileFeatureSupported
+        )
+    }
+
+    @discardableResult
+    func inheritAndroidProfile(from parentConfiguration: WebEngineConfiguration) -> WebProfileError? {
+        inheritAndroidProfile(from: parentConfiguration.androidResolvedProfile ?? parentConfiguration.profile)
     }
 
     @discardableResult
@@ -1318,12 +1519,18 @@ extension WebCookie {
         case .success(let androidProfileResources):
             self.androidProfileCookieManager = androidProfileResources.cookieManager
             self.androidProfileWebStorage = androidProfileResources.webStorage
+            self.configuration.androidResolvedProfile = androidProfileResources.resolvedProfile
             self.profileSetupError = nil
             return nil
         case .failure(let error):
+            self.configuration.androidResolvedProfile = nil
             self.profileSetupError = error
             return error
         }
+    }
+
+    private static func androidEphemeralProfileIdentifier() -> String {
+        "skipweb-ephemeral-\(UUID().uuidString)"
     }
 
     private static func applyAndroidProfile(_ identifier: String, to webView: PlatformWebView) -> Bool {
@@ -2576,7 +2783,7 @@ extension WebCookie {
     @MainActor
     public func refreshMessageHandlers() {
         let userContentController = webView.configuration.userContentController
-        for messageHandlerName in Self.systemMessageHandlers + configuration.messageHandlers.keys {
+        for messageHandlerName in Self.systemMessageHandlers + Array(configuration.allRegisteredMessageHandlerNames) {
             if registeredMessageHandlerNames.contains(messageHandlerName) { continue }
 
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
@@ -2584,7 +2791,7 @@ extension WebCookie {
             userContentController.add(self, contentWorld: .page, name: messageHandlerName)
             registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        for missing in registeredMessageHandlerNames.subtracting(Self.systemMessageHandlers + configuration.messageHandlers.keys) {
+        for missing in registeredMessageHandlerNames.subtracting(Set(Self.systemMessageHandlers).union(configuration.allRegisteredMessageHandlerNames)) {
             userContentController.removeScriptMessageHandler(forName: missing)
             registeredMessageHandlerNames.remove(missing)
         }
@@ -2633,10 +2840,21 @@ extension WebEngine: ScriptMessageHandler {
             }
             return
         }
-        guard let messageHandler = configuration.messageHandlers[message.name] else { return }
-        let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
-        Task {
-            await messageHandler(msg)
+        if configuration.scriptMessageHandlerNameSet.contains(message.name) {
+            let scriptMessage = WebViewScriptMessage(
+                name: message.name,
+                bodyJSON: webViewScriptMessageBodyJSON(from: message.body),
+                sourceURL: message.frameInfo.request.url?.absoluteString,
+                isMainFrame: message.frameInfo.isMainFrame
+            )
+            configuration.scriptMessageDelegate?.webEngine(self, didReceiveScriptMessage: scriptMessage)
+        }
+
+        if let messageHandler = configuration.legacyMessageHandlers[message.name] {
+            let msg = WebViewMessage(frameInfo: message.frameInfo, uuid: UUID(), name: message.name, body: message.body)
+            Task {
+                await messageHandler(msg)
+            }
         }
     }
 }
@@ -3256,11 +3474,13 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
         logViewportProbe(stage: "page-finished", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
         engine?.androidContentBlockerController.injectIfNeeded(into: view)
-        for userScript in config?.userScripts ?? [] {
-            if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
-                let source = userScript.webKitUserScript.source
-                view.evaluateJavascript(source) { _ in
-                    logger.debug("Executed user script \(source)")
+        if !WebEngine.isAndroidDocumentStartScriptSupported() {
+            for userScript in config?.userScripts ?? [] {
+                if userScript.webKitUserScript.injectionTime == .atDocumentEnd {
+                    let source = userScript.webKitUserScript.source
+                    view.evaluateJavascript(source) { _ in
+                        logger.debug("Executed user script \(source)")
+                    }
                 }
             }
         }
@@ -3276,21 +3496,17 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
         logger.log("onPageStarted: \(url)")
         logViewportProbe(stage: "page-started", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
-        if !(config?.messageHandlers.isEmpty ?? true) {
-            view.evaluateJavascript("""
-            if (!window.webkit) window.webkit = {};
-            webkit.messageHandlers = new Proxy({}, {
-                get: (target, messageHandlerName, receiver) => ({
-                    postMessage: (body) => skipWebAndroidMessageHandler.postMessage(String(messageHandlerName), JSON.stringify(body))
-                })
-            });
-        """) { _ in logger.debug("Added webkit.messageHandlers") }
+        if !(config?.allRegisteredMessageHandlerNames.isEmpty ?? true),
+           !WebEngine.isAndroidDocumentStartScriptSupported() {
+            view.evaluateJavascript(WebEngine.androidScriptMessageFacadeScript()) { _ in logger.debug("Added webkit.messageHandlers") }
         }
-        for userScript in config?.userScripts ?? [] {
-            if userScript.webKitUserScript.injectionTime == .atDocumentStart {
-                let source = userScript.webKitUserScript.source
-                view.evaluateJavascript(source) { _ in
-                    logger.debug("Executed user script \(source)")
+        if !WebEngine.isAndroidDocumentStartScriptSupported() {
+            for userScript in config?.userScripts ?? [] {
+                if userScript.webKitUserScript.injectionTime == .atDocumentStart {
+                    let source = userScript.webKitUserScript.source
+                    view.evaluateJavascript(source) { _ in
+                        logger.debug("Executed user script \(source)")
+                    }
                 }
             }
         }
@@ -3776,7 +3992,20 @@ public extension SkipWebUIDelegate {
     public var customUserAgent: String?
     public var profile: WebProfile
     public var userScripts: [WebViewUserScript]
-    public var messageHandlers: [String: ((WebViewMessage) async -> Void)]
+    /// JavaScript message handler names exposed through `window.webkit.messageHandlers`.
+    public var scriptMessageHandlerNames: [String]
+    /// Delegate that receives bridge-safe JavaScript messages.
+    public var scriptMessageDelegate: (any WebViewScriptMessageDelegate)?
+    fileprivate var legacyMessageHandlers: [String: ((WebViewMessage) async -> Void)]
+    @available(*, deprecated, message: "Use scriptMessageHandlerNames and scriptMessageDelegate.")
+    public var messageHandlers: [String: ((WebViewMessage) async -> Void)] {
+        get {
+            legacyMessageHandlers
+        }
+        set {
+            legacyMessageHandlers = newValue
+        }
+    }
     public var schemeHandlers: [String: URLSchemeHandler]
     public var uiDelegate: (any SkipWebUIDelegate)?
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
@@ -3788,6 +4017,7 @@ public extension SkipWebUIDelegate {
     #if SKIP
     /// The Android context to use for creating a web context
     public var context: android.content.Context? = nil
+    fileprivate var androidResolvedProfile: WebProfile?
     /// Optional Android-only callback for popup child-window creation.
     ///
     /// Think of it as the Android popup hook that runs before `SkipWebUIDelegate`:
@@ -3809,6 +4039,8 @@ public extension SkipWebUIDelegate {
                 customUserAgent: String? = nil,
                 profile: WebProfile = .default,
                 userScripts: [WebViewUserScript] = [],
+                scriptMessageHandlerNames: [String] = [],
+                scriptMessageDelegate: (any WebViewScriptMessageDelegate)? = nil,
                 messageHandlers: [String: ((WebViewMessage) async -> Void)] = [:],
                 schemeHandlers: [String: URLSchemeHandler] = [:],
                 uiDelegate: (any SkipWebUIDelegate)? = nil,
@@ -3826,11 +4058,21 @@ public extension SkipWebUIDelegate {
         self.customUserAgent = customUserAgent
         self.profile = profile
         self.userScripts = userScripts
-        self.messageHandlers = messageHandlers
+        self.scriptMessageHandlerNames = scriptMessageHandlerNames
+        self.scriptMessageDelegate = scriptMessageDelegate
+        self.legacyMessageHandlers = messageHandlers
         self.schemeHandlers = schemeHandlers
         self.uiDelegate = uiDelegate
         self.navigationDelegate = navigationDelegate
         self.contentBlockers = contentBlockers
+    }
+
+    var scriptMessageHandlerNameSet: Set<String> {
+        Set(scriptMessageHandlerNames)
+    }
+
+    var allRegisteredMessageHandlerNames: Set<String> {
+        scriptMessageHandlerNameSet.union(legacyMessageHandlers.keys)
     }
 
     public func popupChildMirroredConfiguration() -> WebEngineConfiguration {
@@ -3847,7 +4089,9 @@ public extension SkipWebUIDelegate {
             customUserAgent: customUserAgent,
             profile: profile,
             userScripts: userScripts,
-            messageHandlers: messageHandlers,
+            scriptMessageHandlerNames: scriptMessageHandlerNames,
+            scriptMessageDelegate: scriptMessageDelegate,
+            messageHandlers: legacyMessageHandlers,
             schemeHandlers: schemeHandlers,
             uiDelegate: uiDelegate,
             navigationDelegate: navigationDelegate,
@@ -3855,6 +4099,7 @@ public extension SkipWebUIDelegate {
         )
         #if SKIP
         copy.context = context
+        copy.androidResolvedProfile = androidResolvedProfile
         copy.androidCreateWindowHandler = androidCreateWindowHandler
         copy.androidCloseWindowHandler = androidCloseWindowHandler
         #endif
@@ -3946,6 +4191,8 @@ public extension SkipWebUIDelegate {
         switch profile {
         case .default:
             return WKWebsiteDataStore.default()
+        case .ephemeral:
+            return WKWebsiteDataStore.nonPersistent()
         case .named(let identifier):
             guard let dataStoreIdentifier = webKitDataStoreIdentifier(for: identifier) else {
                 return WKWebsiteDataStore.default()
