@@ -1353,6 +1353,37 @@ extension WebCookie {
         return contentBlockerSetupErrors
     }
 
+    /// Reapplies content blockers to the current web view from the configuration's current state.
+    ///
+    /// Use this after mutating `configuration.contentBlockers` (for example, after toggling
+    /// settings or updating whitelists) to make those changes take effect on the live web view.
+    ///
+    /// On Apple platforms this removes any installed content rule lists and re-prepares and
+    /// reinstalls them from the latest `iOSRuleListPaths` and `whitelistedDomains`. Subsequent
+    /// page loads use the new rules.
+    ///
+    /// On Android this is a no-op because the Android blocker reads `configuration.contentBlockers`
+    /// dynamically on each request, so live mutation already takes effect on the next resource load.
+    @MainActor
+    @discardableResult
+    public func reapplyContentBlockers() async -> [WebContentBlockerError] {
+        #if !SKIP
+        let userContentController = webView.configuration.userContentController
+        userContentController.removeAllContentRuleLists()
+        iosContentBlockerSetupTask = nil
+        let task = Task { @MainActor [configuration, weak self] in
+            let errors = await configuration.installPreparedContentBlockers(into: userContentController)
+            self?.contentBlockerSetupErrors = errors
+            return errors
+        }
+        iosContentBlockerSetupTask = task
+        return await task.value
+        #else
+        contentBlockerSetupErrors = []
+        return []
+        #endif
+    }
+
     #if SKIP
     struct AndroidProfileResources {
         let cookieManager: android.webkit.CookieManager?
