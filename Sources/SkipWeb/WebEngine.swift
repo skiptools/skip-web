@@ -4609,7 +4609,7 @@ public class WebHistoryItem {
     }
 
     /// The URL of the webpage represented by this item.
-    public var url: String {
+    @MainActor public var url: String {
         #if !SKIP
         return item.url.absoluteString
         #else
@@ -4618,7 +4618,7 @@ public class WebHistoryItem {
     }
 
     /// The URL of the initial request that created this item.
-    public var initialURL: String {
+    @MainActor public var initialURL: String {
         #if !SKIP
         return item.initialURL.absoluteString
         #else
@@ -4627,7 +4627,7 @@ public class WebHistoryItem {
     }
 
     /// The title of the webpage represented by this item.
-    public var title: String? {
+    @MainActor public var title: String? {
         #if !SKIP
         return item.title
         #else

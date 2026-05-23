@@ -203,7 +203,7 @@ public struct WebView : View {
     public init() {
     }
 
-    func updatePageState(webView: PlatformWebView) {
+    @MainActor func updatePageState(webView: PlatformWebView) {
         self.url = webView.currentURL
         self.isLoading = webView.isLoading
         self.estimatedProgress = webView.estimatedProgress
