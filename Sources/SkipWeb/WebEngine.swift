@@ -192,7 +192,7 @@ public struct SkipWebSnapshotConfiguration {
 }
 
 /// A captured web-view snapshot stored as PNG bytes plus pixel dimensions.
-public struct SkipWebSnapshot {
+public struct SkipWebSnapshot: Sendable {
     public let pngData: Data
     public let pixelWidth: Int
     public let pixelHeight: Int
