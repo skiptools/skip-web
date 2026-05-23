@@ -1741,8 +1741,8 @@ extension UIView {
 // SKIP @nobridge
 public class WebViewScriptCaller: Equatable, ObservableObject {
     let uuid = UUID().uuidString
-    var caller: ((String, ((Any?, Error?) -> Void)?) -> Void)? = nil
-    var asyncCaller: ((String, [String: Any]?, FrameInfo?, ContentWorld?) async throws -> Any?)? = nil
+    var caller: (@MainActor (String, ((Any?, Error?) -> Void)?) -> Void)? = nil
+    var asyncCaller: (@MainActor (String, [String: Any]?, FrameInfo?, ContentWorld?) async throws -> Any?)? = nil
 
     private var multiTargetFrames = [String: FrameInfo]()
 
@@ -1763,7 +1763,7 @@ public class WebViewScriptCaller: Equatable, ObservableObject {
     }
 
     @MainActor
-    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, frame: FrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: ContentWorld? = ContentWorld.page, completionHandler: ((Result<Any?, any Error>) async throws -> Void)? = nil) async {
+    public func evaluateJavaScript(_ js: String, arguments: [String: Any]? = nil, frame: FrameInfo? = nil, duplicateInMultiTargetFrames: Bool = false, in world: ContentWorld? = ContentWorld.page, completionHandler: (@MainActor (Result<Any?, any Error>) async throws -> Void)? = nil) async {
         guard let asyncCaller = asyncCaller else {
             logger.error("evaluateJavaScript: no asyncCaller set for WebViewScriptCaller \(self.uuid)") // TODO: Error
             return

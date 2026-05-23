@@ -4750,7 +4750,7 @@ public struct WebViewUserScript: Equatable, Hashable {
         && lhs.allowedDomains == rhs.allowedDomains
     }
 
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
+    @MainActor public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
         self.source = source
         self.webKitUserScript = UserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
         self.allowedDomains = allowedDomains
@@ -4764,7 +4764,7 @@ public struct WebViewUserScript: Equatable, Hashable {
     #if SKIP
     fileprivate static let systemScripts: [WebViewUserScript] = []
     #else
-    fileprivate static let systemScripts = [
+    @MainActor fileprivate static let systemScripts = [
         ConsoleLogUserScript().userScript
     ]
     #endif
@@ -4774,7 +4774,7 @@ public struct WebViewUserScript: Equatable, Hashable {
 fileprivate struct ConsoleLogUserScript {
     let userScript: WebViewUserScript
     
-    init() {
+    @MainActor init() {
         let contents = """
         (function() {
         function log(level, args) {
