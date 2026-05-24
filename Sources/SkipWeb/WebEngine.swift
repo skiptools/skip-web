@@ -179,7 +179,7 @@ public struct SkipWebSnapshotRect: Equatable, Sendable {
 /// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
 /// - `snapshotWidth`: optional output width while preserving aspect ratio
 /// - `afterScreenUpdates`: capture after pending updates when possible
-public struct SkipWebSnapshotConfiguration {
+public struct SkipWebSnapshotConfiguration: Sendable {
     public var rect: SkipWebSnapshotRect
     public var snapshotWidth: Double?
     public var afterScreenUpdates: Bool
