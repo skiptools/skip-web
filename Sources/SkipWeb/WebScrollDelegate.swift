@@ -53,7 +53,7 @@ public struct WebScrollSize: Equatable {
 
 @MainActor
 public final class WebScrollViewProxy: Equatable {
-    public static func == (lhs: WebScrollViewProxy, rhs: WebScrollViewProxy) -> Bool {
+    public nonisolated static func == (lhs: WebScrollViewProxy, rhs: WebScrollViewProxy) -> Bool {
         lhs === rhs
     }
 

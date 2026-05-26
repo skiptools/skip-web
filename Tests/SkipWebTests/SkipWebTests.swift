@@ -889,7 +889,7 @@ final class SkipWebTests: XCTestCase {
     @MainActor
     func takeSnapshotWithTimeout(_ engine: WebEngine, timeoutNanoseconds: UInt64 = UInt64(30_000_000_000)) async throws -> SkipWebSnapshot {
         try await withThrowingTaskGroup(of: SkipWebSnapshot.self) { group in
-            group.addTask { @MainActor in
+            group.addTask {
                 try await engine.takeSnapshot()
             }
             group.addTask {
@@ -912,7 +912,7 @@ final class SkipWebTests: XCTestCase {
         timeoutNanoseconds: UInt64 = UInt64(30_000_000_000)
     ) async throws -> SkipWebSnapshot {
         try await withThrowingTaskGroup(of: SkipWebSnapshot.self) { group in
-            group.addTask { @MainActor in
+            group.addTask {
                 try await engine.takeSnapshot(configuration: configuration)
             }
             group.addTask {

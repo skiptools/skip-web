@@ -179,7 +179,7 @@ public struct SkipWebSnapshotRect: Equatable, Sendable {
 /// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
 /// - `snapshotWidth`: optional output width while preserving aspect ratio
 /// - `afterScreenUpdates`: capture after pending updates when possible
-public struct SkipWebSnapshotConfiguration {
+public struct SkipWebSnapshotConfiguration: Sendable {
     public var rect: SkipWebSnapshotRect
     public var snapshotWidth: Double?
     public var afterScreenUpdates: Bool
@@ -192,7 +192,7 @@ public struct SkipWebSnapshotConfiguration {
 }
 
 /// A captured web-view snapshot stored as PNG bytes plus pixel dimensions.
-public struct SkipWebSnapshot {
+public struct SkipWebSnapshot: Sendable {
     public let pngData: Data
     public let pixelWidth: Int
     public let pixelHeight: Int
@@ -4609,7 +4609,7 @@ public class WebHistoryItem {
     }
 
     /// The URL of the webpage represented by this item.
-    public var url: String {
+    @MainActor public var url: String {
         #if !SKIP
         return item.url.absoluteString
         #else
@@ -4618,7 +4618,7 @@ public class WebHistoryItem {
     }
 
     /// The URL of the initial request that created this item.
-    public var initialURL: String {
+    @MainActor public var initialURL: String {
         #if !SKIP
         return item.initialURL.absoluteString
         #else
@@ -4627,7 +4627,7 @@ public class WebHistoryItem {
     }
 
     /// The title of the webpage represented by this item.
-    public var title: String? {
+    @MainActor public var title: String? {
         #if !SKIP
         return item.title
         #else
@@ -4750,7 +4750,7 @@ public struct WebViewUserScript: Equatable, Hashable {
         && lhs.allowedDomains == rhs.allowedDomains
     }
 
-    public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
+    @MainActor public init(source: String, injectionTime: UserScriptInjectionTime, forMainFrameOnly: Bool, world: ContentWorld = .page, allowedDomains: Set<String> = Set()) {
         self.source = source
         self.webKitUserScript = UserScript(source: source, injectionTime: injectionTime, forMainFrameOnly: forMainFrameOnly, in: world)
         self.allowedDomains = allowedDomains
@@ -4764,7 +4764,7 @@ public struct WebViewUserScript: Equatable, Hashable {
     #if SKIP
     fileprivate static let systemScripts: [WebViewUserScript] = []
     #else
-    fileprivate static let systemScripts = [
+    @MainActor fileprivate static let systemScripts = [
         ConsoleLogUserScript().userScript
     ]
     #endif
@@ -4774,7 +4774,7 @@ public struct WebViewUserScript: Equatable, Hashable {
 fileprivate struct ConsoleLogUserScript {
     let userScript: WebViewUserScript
     
-    init() {
+    @MainActor init() {
         let contents = """
         (function() {
         function log(level, args) {
