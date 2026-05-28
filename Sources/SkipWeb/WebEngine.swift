@@ -2814,7 +2814,8 @@ extension WebCookie {
     @MainActor
     public func refreshMessageHandlers() {
         let userContentController = webView.configuration.userContentController
-        for messageHandlerName in Self.systemMessageHandlers + Array(configuration.allRegisteredMessageHandlerNames) {
+        let systemMessageHandlers = configuration.capturesConsoleOutput ? Self.systemMessageHandlers : []
+        for messageHandlerName in systemMessageHandlers + Array(configuration.allRegisteredMessageHandlerNames) {
             if registeredMessageHandlerNames.contains(messageHandlerName) { continue }
 
             // Sometimes we reuse an underlying WKWebView for a new SwiftUI component.
@@ -2822,7 +2823,7 @@ extension WebCookie {
             userContentController.add(self, contentWorld: .page, name: messageHandlerName)
             registeredMessageHandlerNames.insert(messageHandlerName)
         }
-        for missing in registeredMessageHandlerNames.subtracting(Set(Self.systemMessageHandlers).union(configuration.allRegisteredMessageHandlerNames)) {
+        for missing in registeredMessageHandlerNames.subtracting(Set(systemMessageHandlers).union(configuration.allRegisteredMessageHandlerNames)) {
             userContentController.removeScriptMessageHandler(forName: missing)
             registeredMessageHandlerNames.remove(missing)
         }
@@ -2831,7 +2832,8 @@ extension WebCookie {
     @MainActor
     public func updateUserScripts() {
         let userContentController = webView.configuration.userContentController
-        let allScripts = WebViewUserScript.systemScripts + configuration.userScripts
+        let systemScripts = configuration.capturesConsoleOutput ? WebViewUserScript.systemScripts : []
+        let allScripts = systemScripts + configuration.userScripts
         if userContentController.userScripts.sorted(by: { $0.source > $1.source }) != allScripts.map({ $0.webKitUserScript }).sorted(by: { $0.source > $1.source }) {
             userContentController.removeAllUserScripts()
             for script in allScripts {
@@ -4042,6 +4044,8 @@ public extension SkipWebUIDelegate {
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
     /// Optional content-blocker configuration applied to web views created from this configuration.
     public var contentBlockers: WebContentBlockerConfiguration?
+    /// Enables the built-in page-world console bridge that forwards page `console.*` calls to native logs.
+    public var capturesConsoleOutput: Bool
     /// The latest errors produced while preparing or installing content blockers.
     public private(set) var contentBlockerSetupErrors: [WebContentBlockerError] = []
 
@@ -4076,7 +4080,8 @@ public extension SkipWebUIDelegate {
                 schemeHandlers: [String: URLSchemeHandler] = [:],
                 uiDelegate: (any SkipWebUIDelegate)? = nil,
                 navigationDelegate: (any SkipWebNavigationDelegate)? = nil,
-                contentBlockers: WebContentBlockerConfiguration? = nil) {
+                contentBlockers: WebContentBlockerConfiguration? = nil,
+                capturesConsoleOutput: Bool = true) {
         self.javaScriptEnabled = javaScriptEnabled
         self.javaScriptCanOpenWindowsAutomatically = javaScriptCanOpenWindowsAutomatically
         self.allowsBackForwardNavigationGestures = allowsBackForwardNavigationGestures
@@ -4096,6 +4101,7 @@ public extension SkipWebUIDelegate {
         self.uiDelegate = uiDelegate
         self.navigationDelegate = navigationDelegate
         self.contentBlockers = contentBlockers
+        self.capturesConsoleOutput = capturesConsoleOutput
     }
 
     var scriptMessageHandlerNameSet: Set<String> {
@@ -4126,7 +4132,8 @@ public extension SkipWebUIDelegate {
             schemeHandlers: schemeHandlers,
             uiDelegate: uiDelegate,
             navigationDelegate: navigationDelegate,
-            contentBlockers: contentBlockers
+            contentBlockers: contentBlockers,
+            capturesConsoleOutput: capturesConsoleOutput
         )
         #if SKIP
         copy.context = context
