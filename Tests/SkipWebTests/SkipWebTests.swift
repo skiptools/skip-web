@@ -81,12 +81,19 @@ final class SkipWebTests: XCTestCase {
         XCTAssertFalse(config.javaScriptCanOpenWindowsAutomatically)
         XCTAssertNil(config.uiDelegate)
         XCTAssertEqual(config.profile, WebProfile.default)
+        XCTAssertTrue(config.capturesConsoleOutput)
     }
 
     func testPopupChildMirroredConfigurationPreservesProfile() {
         let config = WebEngineConfiguration(profile: .named("popup-profile"))
         let mirrored = config.popupChildMirroredConfiguration()
         XCTAssertEqual(mirrored.profile, .named("popup-profile"))
+    }
+
+    func testPopupChildMirroredConfigurationPreservesConsoleCapture() {
+        let config = WebEngineConfiguration(capturesConsoleOutput: false)
+        let mirrored = config.popupChildMirroredConfiguration()
+        XCTAssertFalse(mirrored.capturesConsoleOutput)
     }
 
     func testWebWindowRequestCarriesFields() throws {

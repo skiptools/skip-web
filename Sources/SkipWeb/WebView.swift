@@ -711,6 +711,9 @@ extension WebView : ViewRepresentable {
                 let webEngine = setupWebView(resolvedWebEngine, coordinator: coordinator)
                 navigator.webEngine = webEngine
                 let view = webEngine.webView
+                if let parent = view.parent as? ViewGroup {
+                    parent.removeView(view)
+                }
                 // AndroidView does not reliably push the parent's fill constraints into the
                 // embedded WebView on the first layout pass, so we request fill sizing from both
                 // Compose and the native view to avoid a zero-height viewport.
@@ -1612,7 +1615,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
         guard let url = navigationAction.request.url else {
             return (.allow, preferences)
         }
-        
+
         if (self.webView.shouldOverrideUrlLoading?(url) ?? false) {
             logger.log("Override URL loading for \(url)")
             self.webView.state.isProvisionallyNavigating = false

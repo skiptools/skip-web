@@ -26,8 +26,8 @@ The package currently targets Apple platforms starting at iOS 17, macOS 14, tvOS
 Current package dependencies are:
 
 - `skip` from `1.8.9`
-- `skip-ui` from `1.51.3`
-- when `SKIP_BRIDGE` is enabled, `skip-bridge` in `0.0.0..<2.0.0` and `skip-fuse-ui` from `1.14.5`
+- `skip-ui` from `1.54.0`
+- when `SKIP_BRIDGE` is enabled, `skip-bridge` in `0.0.0..<2.0.0` and `skip-fuse-ui` from `1.15.2`
 
 ## WebView: Customizable Embedded Web Browser
 
