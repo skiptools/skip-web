@@ -3754,6 +3754,7 @@ public class WebEngineDelegate : WebObjectBase, WKNavigationDelegate {
     func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error)
     func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences)
     func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy
+    func consumePageLoadPolicyCancellationSuppression() -> Bool
 }
 #endif
 
@@ -3843,7 +3844,7 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
             return (.allow, preferences)
         }
         if decision.0 == .cancel {
-            suppressNextPolicyCancellationFailure = true
+            suppressNextPolicyCancellationFailure = (forwardingDelegate as? (any PageLoadNavigationForwarding))?.consumePageLoadPolicyCancellationSuppression() ?? false
         }
         return decision
     }
@@ -3853,7 +3854,7 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
             return .allow
         }
         if policy == .cancel {
-            suppressNextPolicyCancellationFailure = true
+            suppressNextPolicyCancellationFailure = (forwardingDelegate as? (any PageLoadNavigationForwarding))?.consumePageLoadPolicyCancellationSuppression() ?? false
         }
         return policy
     }

@@ -60,25 +60,38 @@ public struct WebDownloadRequest: Equatable, Hashable, Sendable {
         mimeType: String? = nil,
         url: URL? = nil
     ) -> Bool {
-        if let contentDisposition {
-            let normalizedDisposition = contentDisposition.lowercased()
-            if normalizedDisposition.contains("attachment") {
+        if let dispositionType = normalizedContentDispositionType(contentDisposition) {
+            if dispositionType == "attachment" {
                 return true
-            }
-            if normalizedDisposition.contains("inline") {
-                return false
             }
         }
 
+        let isInlineDisposition = normalizedContentDispositionType(contentDisposition) == "inline"
+
         if normalizedMIMEType(mimeType) == "application/octet-stream" {
-            return !hasKnownPlayableMediaSignal(url)
+            if hasKnownPlayableMediaSignal(url) {
+                return false
+            }
+            return !isInlineDisposition || !canShowMIMEType
         }
 
         if hasKnownPlayableMediaSignal(url) {
             return false
         }
 
+        if isInlineDisposition, canShowMIMEType {
+            return false
+        }
+
         return !canShowMIMEType
+    }
+
+    private static func normalizedContentDispositionType(_ contentDisposition: String?) -> String? {
+        contentDisposition?
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
     }
 
     private static func normalizedMIMEType(_ mimeType: String?) -> String? {
@@ -524,6 +537,14 @@ struct WebViewDownloadListener : android.webkit.DownloadListener {
     let state: WebViewState
     let onDownloadRequested: ((WebDownloadRequest) -> Void)?
 
+    static func suggestedFilename(url: String, contentDisposition: String, mimeType: String) -> String? {
+        let filename = android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
+        if filename.isEmpty {
+            return nil
+        }
+        return filename
+    }
+
     override func onDownloadStart(
         url: String,
         userAgent: String,
@@ -534,11 +555,16 @@ struct WebViewDownloadListener : android.webkit.DownloadListener {
         state.isLoading = false
         state.isProvisionallyNavigating = false
         state.estimatedProgress = 0
+        state.error = nil
 
         onDownloadRequested?(
             WebDownloadRequest(
                 url: URL(string: url),
-                suggestedFilename: nil,
+                suggestedFilename: Self.suggestedFilename(
+                    url: url,
+                    contentDisposition: contentDisposition,
+                    mimeType: mimetype
+                ),
                 mimeType: mimetype.isEmpty ? nil : mimetype,
                 contentDisposition: contentDisposition.isEmpty ? nil : contentDisposition,
                 contentLength: contentLength
@@ -1021,6 +1047,7 @@ extension WebView : ViewRepresentable {
     #if !SKIP
     var subscriptions: Set<AnyCancellable> = []
     var childEnginesByWebViewID: [ObjectIdentifier: WebEngine] = [:]
+    var suppressNextPageLoadPolicyCancellationFailure = false
     #else
     var androidScrollTracker: AndroidScrollTracker?
     #endif
@@ -1101,6 +1128,24 @@ extension WebView : ViewRepresentable {
     }
 
     #if !SKIP
+    func consumePageLoadPolicyCancellationSuppression() -> Bool {
+        let shouldSuppress = suppressNextPageLoadPolicyCancellationFailure
+        suppressNextPageLoadPolicyCancellationFailure = false
+        return shouldSuppress
+    }
+
+    func shouldSuppressPolicyCancellationFailure(_ error: Error) -> Bool {
+        guard suppressNextPageLoadPolicyCancellationFailure else {
+            return false
+        }
+        let nsError = error as NSError
+        guard nsError.domain == "WebKitErrorDomain", nsError.code == 102 else {
+            return false
+        }
+        suppressNextPageLoadPolicyCancellationFailure = false
+        return true
+    }
+
     func contentDispositionHeader(from response: URLResponse) -> String? {
         guard let httpResponse = response as? HTTPURLResponse else {
             return nil
@@ -1719,6 +1764,10 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error) {
+        if shouldSuppressPolicyCancellationFailure(error) {
+            return
+        }
+
         logger.log("webView(\(webView)) didFailProvisionalNavigation: \(navigation), withError: \(error)")
         scriptCaller?.removeAllMultiTargetFrames()
         self.webView.state.isLoading = false
@@ -1769,6 +1818,10 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
+        #if !SKIP
+        suppressNextPageLoadPolicyCancellationFailure = false
+        #endif
+
         guard let url = navigationAction.request.url else {
             return (.allow, preferences)
         }
@@ -1783,6 +1836,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
         #if !SKIP
         if navigationAction.shouldPerformDownload {
             finishDownloadRequest(WebDownloadRequest(url: url))
+            suppressNextPageLoadPolicyCancellationFailure = true
             return (.cancel, preferences)
         }
         #endif
@@ -1793,6 +1847,8 @@ extension WebViewCoordinator: WebNavigationDelegate {
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy {
         #if !SKIP
+        suppressNextPageLoadPolicyCancellationFailure = false
+
         if navigationResponse.isForMainFrame {
             let contentDisposition = contentDispositionHeader(from: navigationResponse.response)
             if WebDownloadRequest.shouldTreatResponseAsDownload(
@@ -1807,6 +1863,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
                         contentDisposition: contentDisposition
                     )
                 )
+                suppressNextPageLoadPolicyCancellationFailure = true
                 return .cancel
             }
         }

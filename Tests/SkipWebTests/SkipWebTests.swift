@@ -71,6 +71,28 @@ final class SkipWebTests: XCTestCase {
         )
     }
 
+    func testDownloadDetectionTreatsUnsupportedInlineResponseAsDownload() {
+        XCTAssertTrue(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: false,
+                contentDisposition: "inline; filename=\"file.zip\"",
+                mimeType: "application/zip",
+                url: URL(string: "https://example.com/file.zip")
+            )
+        )
+    }
+
+    func testDownloadDetectionOnlyUsesContentDispositionType() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: "inline; filename=\"attachment.pdf\"",
+                mimeType: "application/octet-stream",
+                url: URL(string: "https://example.com/attachment.pdf")
+            )
+        )
+    }
+
     func testDownloadDetectionAllowsOctetStreamWithMediaURL() {
         XCTAssertFalse(
             WebDownloadRequest.shouldTreatResponseAsDownload(
@@ -102,6 +124,19 @@ final class SkipWebTests: XCTestCase {
             )
         )
     }
+
+    #if SKIP
+    func testAndroidDownloadSuggestedFilenameUsesContentDisposition() {
+        XCTAssertEqual(
+            WebViewDownloadListener.suggestedFilename(
+                url: "https://example.com/download",
+                contentDisposition: "attachment; filename=\"report.pdf\"",
+                mimeType: "application/pdf"
+            ),
+            "report.pdf"
+        )
+    }
+    #endif
 
     #if SKIP || os(iOS)
 
