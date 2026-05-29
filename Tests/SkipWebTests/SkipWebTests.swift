@@ -31,6 +31,17 @@ final class SkipWebTests: XCTestCase {
         XCTAssertEqual(request.contentLength, 42)
     }
 
+    func testWebDownloadRequestTreatsUnknownContentLengthAsNil() {
+        let defaultRequest = WebDownloadRequest(url: URL(string: "https://example.com/file.zip"))
+        XCTAssertNil(defaultRequest.contentLength)
+
+        let platformUnknownRequest = WebDownloadRequest(
+            url: URL(string: "https://example.com/file.zip"),
+            contentLength: -1
+        )
+        XCTAssertNil(platformUnknownRequest.contentLength)
+    }
+
     func testDownloadDetectionTreatsUnsupportedMIMETypeAsDownload() {
         XCTAssertTrue(
             WebDownloadRequest.shouldTreatResponseAsDownload(

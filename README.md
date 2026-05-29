@@ -285,7 +285,7 @@ public struct WebDownloadRequest {
     public let suggestedFilename: String?
     public let mimeType: String?
     public let contentDisposition: String?
-    public let contentLength: Int64 // -1 means unknown
+    public let contentLength: Int64? // nil means unknown
 }
 ```
 

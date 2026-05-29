@@ -37,20 +37,24 @@ public struct WebDownloadRequest: Equatable, Hashable, Sendable {
     public let suggestedFilename: String?
     public let mimeType: String?
     public let contentDisposition: String?
-    public let contentLength: Int64
+    public let contentLength: Int64?
 
     public init(
         url: URL?,
         suggestedFilename: String? = nil,
         mimeType: String? = nil,
         contentDisposition: String? = nil,
-        contentLength: Int64 = -1
+        contentLength: Int64? = nil
     ) {
         self.url = url
         self.suggestedFilename = suggestedFilename
         self.mimeType = mimeType
         self.contentDisposition = contentDisposition
-        self.contentLength = contentLength
+        if let contentLength, contentLength >= 0 {
+            self.contentLength = contentLength
+        } else {
+            self.contentLength = nil
+        }
     }
 
     /// Returns whether a response should be treated as a download instead of a page.
