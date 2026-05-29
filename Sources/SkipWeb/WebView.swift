@@ -1,6 +1,7 @@
 // Copyright 2024–2026 Skip
 // SPDX-License-Identifier: MPL-2.0
 #if !SKIP_BRIDGE
+import Foundation
 import SwiftUI
 import OSLog
 import Combine
@@ -30,6 +31,79 @@ import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 #endif
 
+/// Metadata for a browser navigation that the platform runtime wants to treat as a download.
+public struct WebDownloadRequest: Equatable, Hashable, Sendable {
+    public let url: URL?
+    public let suggestedFilename: String?
+    public let mimeType: String?
+    public let contentDisposition: String?
+    public let contentLength: Int64
+
+    public init(
+        url: URL?,
+        suggestedFilename: String? = nil,
+        mimeType: String? = nil,
+        contentDisposition: String? = nil,
+        contentLength: Int64 = -1
+    ) {
+        self.url = url
+        self.suggestedFilename = suggestedFilename
+        self.mimeType = mimeType
+        self.contentDisposition = contentDisposition
+        self.contentLength = contentLength
+    }
+
+    /// Returns whether a response should be treated as a download instead of a page.
+    public static func shouldTreatResponseAsDownload(
+        canShowMIMEType: Bool,
+        contentDisposition: String?,
+        mimeType: String? = nil,
+        url: URL? = nil
+    ) -> Bool {
+        if let contentDisposition {
+            let normalizedDisposition = contentDisposition.lowercased()
+            if normalizedDisposition.contains("attachment") {
+                return true
+            }
+            if normalizedDisposition.contains("inline") {
+                return false
+            }
+        }
+
+        if normalizedMIMEType(mimeType) == "application/octet-stream" {
+            return !hasKnownPlayableMediaSignal(url)
+        }
+
+        if hasKnownPlayableMediaSignal(url) {
+            return false
+        }
+
+        return !canShowMIMEType
+    }
+
+    private static func normalizedMIMEType(_ mimeType: String?) -> String? {
+        mimeType?
+            .split(separator: ";", maxSplits: 1)
+            .first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+    }
+
+    private static func hasKnownPlayableMediaSignal(_ url: URL?) -> Bool {
+        guard let pathExtension = url?.pathExtension.lowercased(),
+              !pathExtension.isEmpty else {
+            return false
+        }
+
+        switch pathExtension {
+        case "3gp", "aac", "flac", "m3u8", "m4a", "m4v", "mkv", "mov", "mp3", "mp4", "mpeg", "mpg", "mpd", "oga", "ogg", "opus", "ts", "wav", "webm":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 #if SKIP || os(iOS)
 
 /// An embedded WebKit view. It is configured using a `WebEngineConfiguration`
@@ -51,6 +125,7 @@ public struct WebView : View {
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
     let onNavigationFailed: (() -> Void)?
+    let onDownloadRequested: ((WebDownloadRequest) -> Void)?
     let scrollDelegate: (any SkipWebScrollDelegate)?
     let shouldOverrideUrlLoading: ((_ url: URL) -> Bool)?
     let persistentWebViewID: String?
@@ -79,6 +154,7 @@ public struct WebView : View {
         onNavigationCommitted: (() -> Void)? = nil,
         onNavigationFinished: (() -> Void)? = nil,
         onNavigationFailed: (() -> Void)? = nil,
+        onDownloadRequested: ((WebDownloadRequest) -> Void)? = nil,
         shouldOverrideUrlLoading: ((_ url: URL) -> Bool)? = nil,
         persistentWebViewID: String? = nil
     ) {
@@ -95,6 +171,7 @@ public struct WebView : View {
         self.onNavigationCommitted = onNavigationCommitted
         self.onNavigationFinished = onNavigationFinished
         self.onNavigationFailed = onNavigationFailed
+        self.onDownloadRequested = onDownloadRequested
         self.shouldOverrideUrlLoading = shouldOverrideUrlLoading
         self.persistentWebViewID = persistentWebViewID
     }
@@ -443,6 +520,33 @@ struct WebViewClient : android.webkit.WebViewClient {
     }
 }
 
+struct WebViewDownloadListener : android.webkit.DownloadListener {
+    let state: WebViewState
+    let onDownloadRequested: ((WebDownloadRequest) -> Void)?
+
+    override func onDownloadStart(
+        url: String,
+        userAgent: String,
+        contentDisposition: String,
+        mimetype: String,
+        contentLength: Int64
+    ) {
+        state.isLoading = false
+        state.isProvisionallyNavigating = false
+        state.estimatedProgress = 0
+
+        onDownloadRequested?(
+            WebDownloadRequest(
+                url: URL(string: url),
+                suggestedFilename: nil,
+                mimeType: mimetype.isEmpty ? nil : mimetype,
+                contentDisposition: contentDisposition.isEmpty ? nil : contentDisposition,
+                contentLength: contentLength
+            )
+        )
+    }
+}
+
 final class SkipWebChromeClient : android.webkit.WebChromeClient {
     let webView: WebView
     let webEngine: WebEngine
@@ -476,6 +580,10 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
         childEngine.installAndroidScriptMessageFacadeIfNeeded()
         childEngine.installAndroidDocumentStartUserScriptsIfNeeded()
+        childEngine.webView.setDownloadListener(WebViewDownloadListener(
+            state: self.webView.state,
+            onDownloadRequested: self.webView.onDownloadRequested
+        ))
         childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: self.webView.state,
             onNavigationCommitted: self.webView.onNavigationCommitted,
@@ -582,6 +690,10 @@ extension WebView : ViewRepresentable {
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
         webEngine.installAndroidScriptMessageFacadeIfNeeded()
         webEngine.installAndroidDocumentStartUserScriptsIfNeeded()
+        webEngine.webView.setDownloadListener(WebViewDownloadListener(
+            state: state,
+            onDownloadRequested: onDownloadRequested
+        ))
         webEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
             state: state,
             onNavigationCommitted: onNavigationCommitted,
@@ -680,6 +792,11 @@ extension WebView : ViewRepresentable {
     public func update(webView: PlatformWebView, coordinator: WebViewCoordinator? = nil) {
         coordinator?.update(from: self)
         #if !SKIP
+        if let coordinator, webView.navigationDelegate == nil {
+            webView.navigationDelegate = coordinator
+        }
+        webView.uiDelegate = coordinator
+        webView.scrollView.delegate = coordinator
         webView.scrollView.isScrollEnabled = config.isScrollEnabled
         #endif
         //logger.info("WebView.update: \(webView)")
@@ -973,6 +1090,42 @@ extension WebView : ViewRepresentable {
     var publicScrollDelegate: (any SkipWebScrollDelegate)? {
         webView.scrollDelegate
     }
+
+    func finishDownloadRequest(_ request: WebDownloadRequest) {
+        scriptCaller?.removeAllMultiTargetFrames()
+        state.isLoading = false
+        state.isProvisionallyNavigating = false
+        state.estimatedProgress = 0
+        state.error = nil
+        webView.onDownloadRequested?(request)
+    }
+
+    #if !SKIP
+    func contentDispositionHeader(from response: URLResponse) -> String? {
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return nil
+        }
+
+        for (name, value) in httpResponse.allHeaderFields {
+            guard String(describing: name).caseInsensitiveCompare("Content-Disposition") == .orderedSame else {
+                continue
+            }
+            return String(describing: value)
+        }
+
+        return nil
+    }
+
+    func downloadRequest(from response: URLResponse, contentDisposition: String?) -> WebDownloadRequest {
+        WebDownloadRequest(
+            url: response.url,
+            suggestedFilename: response.suggestedFilename,
+            mimeType: response.mimeType,
+            contentDisposition: contentDisposition,
+            contentLength: response.expectedContentLength
+        )
+    }
+    #endif
 
     func proxySnapshot() -> (contentOffset: CGPoint, contentSize: CGSize, visibleSize: CGSize) {
         (
@@ -1590,6 +1743,10 @@ extension WebViewCoordinator: WebNavigationDelegate {
         self.webView.state.error = error
 
         state.updatePageState(webView: webView)
+
+        if let onNavigationFailed = self.webView.onNavigationFailed {
+            onNavigationFailed()
+        }
     }
 
     @MainActor
@@ -1623,11 +1780,38 @@ extension WebViewCoordinator: WebNavigationDelegate {
             return (.cancel, preferences)
         }
 
+        #if !SKIP
+        if navigationAction.shouldPerformDownload {
+            finishDownloadRequest(WebDownloadRequest(url: url))
+            return (.cancel, preferences)
+        }
+        #endif
+
         return (.allow, preferences)
     }
 
     @MainActor
     public func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy {
+        #if !SKIP
+        if navigationResponse.isForMainFrame {
+            let contentDisposition = contentDispositionHeader(from: navigationResponse.response)
+            if WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: navigationResponse.canShowMIMEType,
+                contentDisposition: contentDisposition,
+                mimeType: navigationResponse.response.mimeType,
+                url: navigationResponse.response.url
+            ) {
+                finishDownloadRequest(
+                    downloadRequest(
+                        from: navigationResponse.response,
+                        contentDisposition: contentDisposition
+                    )
+                )
+                return .cancel
+            }
+        }
+        #endif
+
         if navigationResponse.isForMainFrame, let url = navigationResponse.response.url, self.webView.state.url != url {
             scriptCaller?.removeAllMultiTargetFrames()
             let newState = self.webView.state
@@ -1645,6 +1829,11 @@ extension WebViewCoordinator: WebNavigationDelegate {
         //download.delegate = downloadDelegate // track progress, cancellation, and file destination
     }
 }
+
+#if !SKIP
+@available(macOS 14.0, iOS 17.0, *)
+extension WebViewCoordinator: PageLoadNavigationForwarding {}
+#endif
 
 @available(macOS 14.0, iOS 17.0, *)
 extension WebViewCoordinator: UIScrollViewDelegate {
