@@ -14,6 +14,141 @@ let logger: Logger = Logger(subsystem: "SkipWeb", category: "Tests")
 
 // SKIP INSERT: @androidx.test.annotation.UiThreadTest
 final class SkipWebTests: XCTestCase {
+    func testWebDownloadRequestCarriesFields() throws {
+        let url = try XCTUnwrap(URL(string: "https://example.com/file.zip"))
+        let request = WebDownloadRequest(
+            url: url,
+            suggestedFilename: "file.zip",
+            mimeType: "application/zip",
+            contentDisposition: "attachment; filename=\"file.zip\"",
+            contentLength: 42
+        )
+
+        XCTAssertEqual(request.url, url)
+        XCTAssertEqual(request.suggestedFilename, "file.zip")
+        XCTAssertEqual(request.mimeType, "application/zip")
+        XCTAssertEqual(request.contentDisposition, "attachment; filename=\"file.zip\"")
+        XCTAssertEqual(request.contentLength, 42)
+    }
+
+    func testWebDownloadRequestTreatsUnknownContentLengthAsNil() {
+        let defaultRequest = WebDownloadRequest(url: URL(string: "https://example.com/file.zip"))
+        XCTAssertNil(defaultRequest.contentLength)
+
+        let platformUnknownRequest = WebDownloadRequest(
+            url: URL(string: "https://example.com/file.zip"),
+            contentLength: -1
+        )
+        XCTAssertNil(platformUnknownRequest.contentLength)
+    }
+
+    func testDownloadDetectionTreatsUnsupportedMIMETypeAsDownload() {
+        XCTAssertTrue(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: false,
+                contentDisposition: nil
+            )
+        )
+    }
+
+    func testDownloadDetectionTreatsAttachmentDispositionAsDownload() {
+        XCTAssertTrue(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: "attachment; filename=\"file.zip\""
+            )
+        )
+    }
+
+    func testDownloadDetectionTreatsOctetStreamAsDownload() {
+        XCTAssertTrue(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: nil,
+                mimeType: "application/octet-stream",
+                url: URL(string: "https://example.com/drip")
+            )
+        )
+    }
+
+    func testDownloadDetectionAllowsInlineOctetStream() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: "inline",
+                mimeType: "application/octet-stream",
+                url: URL(string: "https://example.com/file.bin")
+            )
+        )
+    }
+
+    func testDownloadDetectionTreatsUnsupportedInlineResponseAsDownload() {
+        XCTAssertTrue(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: false,
+                contentDisposition: "inline; filename=\"file.zip\"",
+                mimeType: "application/zip",
+                url: URL(string: "https://example.com/file.zip")
+            )
+        )
+    }
+
+    func testDownloadDetectionOnlyUsesContentDispositionType() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: "inline; filename=\"attachment.pdf\"",
+                mimeType: "application/octet-stream",
+                url: URL(string: "https://example.com/attachment.pdf")
+            )
+        )
+    }
+
+    func testDownloadDetectionAllowsOctetStreamWithMediaURL() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: nil,
+                mimeType: "application/octet-stream",
+                url: URL(string: "https://cdn.example.com/video.mp4")
+            )
+        )
+    }
+
+    func testDownloadDetectionAllowsUnsupportedMIMETypeWithMediaURL() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: false,
+                contentDisposition: nil,
+                mimeType: "application/x-unknown",
+                url: URL(string: "https://cdn.example.com/live.m3u8")
+            )
+        )
+    }
+
+    func testDownloadDetectionAllowsShowableInlineResponse() {
+        XCTAssertFalse(
+            WebDownloadRequest.shouldTreatResponseAsDownload(
+                canShowMIMEType: true,
+                contentDisposition: "inline",
+                mimeType: "text/html"
+            )
+        )
+    }
+
+    #if SKIP
+    func testAndroidDownloadSuggestedFilenameUsesContentDisposition() {
+        XCTAssertEqual(
+            WebViewDownloadListener.suggestedFilename(
+                url: "https://example.com/download",
+                contentDisposition: "attachment; filename=\"report.pdf\"",
+                mimeType: "application/pdf"
+            ),
+            "report.pdf"
+        )
+    }
+    #endif
+
     #if SKIP || os(iOS)
 
     final class DummyUIDelegate: SkipWebUIDelegate { }

@@ -235,6 +235,70 @@ Navigation APIs:
 - `load(url:)` is fire-and-forget and logs load failures.
 - `loadOrThrow(url:)` is async/throwing and should be used when callers need explicit error handling (including `WebProfileError` preflight failures).
 
+### Download detection
+
+`WebView` can detect navigations that the platform runtime wants to treat as downloads.
+This is a detect-only API: SkipWeb does not save files, show a destination picker, hand off
+to the system browser, or provide download progress UI.
+
+Attach `onDownloadRequested` when creating the `WebView`:
+
+```swift
+import Foundation
+import SwiftUI
+import SkipWeb
+
+struct DownloadAwareWebView: View {
+    @State private var navigator = WebViewNavigator(initialURL: URL(string: "https://example.com")!)
+    @State private var state = WebViewState()
+    @State private var downloadMessage: String?
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            WebView(
+                navigator: navigator,
+                state: $state,
+                onDownloadRequested: { request in
+                    let name = request.suggestedFilename ?? request.url?.lastPathComponent ?? "file"
+                    downloadMessage = "Downloads are not supported yet: \(name)"
+                }
+            )
+
+            if let downloadMessage {
+                Text(downloadMessage)
+                    .padding(12)
+                    .background(Color.black.opacity(0.85))
+                    .foregroundColor(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .padding(.top, 24)
+            }
+        }
+    }
+}
+```
+
+The callback receives a `WebDownloadRequest`:
+
+```swift
+public struct WebDownloadRequest {
+    public let url: URL?
+    public let suggestedFilename: String?
+    public let mimeType: String?
+    public let contentDisposition: String?
+    public let contentLength: Int64? // nil means unknown
+}
+```
+
+On iOS, SkipWeb detects downloads from `WKNavigationAction.shouldPerformDownload`,
+`Content-Disposition: attachment`, MIME types WebKit cannot display, and
+`application/octet-stream` responses that do not look like playable media.
+
+On Android, SkipWeb emits the callback from `android.webkit.DownloadListener`.
+
+When a download is detected, SkipWeb cancels the page navigation and clears the loading/provisional
+state. The host app should decide what to show to the user and whether to restore any address-bar
+text or other browser chrome state.
+
 ### JavaScript
 
 JavaScript can be executed against the browser with:

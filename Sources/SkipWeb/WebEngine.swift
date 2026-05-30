@@ -2784,18 +2784,19 @@ extension WebCookie {
             block()
         }
         #else
-        let pdelegate = self.engineDelegate
-        defer { self.engineDelegate = pdelegate }
+        let previousNavigationDelegate = webView.navigationDelegate
+        let forwardingDelegate = previousNavigationDelegate as? (any PageLoadNavigationForwarding)
+        defer { webView.navigationDelegate = previousNavigationDelegate }
 
         // need to retain the navigation delegate or else it will drop the continuation
         var loadDelegate: PageLoadDelegate? = nil
 
         let _: Void? = try await withCheckedThrowingContinuation { continuation in
-            loadDelegate = PageLoadDelegate(config: configuration) { result in
+            loadDelegate = PageLoadDelegate(config: configuration, forwardingDelegate: forwardingDelegate) { result in
                 continuation.resume(with: result)
             }
 
-            self.engineDelegate = loadDelegate
+            self.webView.navigationDelegate = loadDelegate
             logger.log("WebEngine: awaitPageLoaded block()")
             block()
         }
@@ -3744,14 +3745,37 @@ public class WebEngineDelegate : WebObjectBase, WKNavigationDelegate {
 }
 #endif
 
+#if !SKIP
+@MainActor protocol PageLoadNavigationForwarding: AnyObject {
+    func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!)
+    func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: Error)
+    func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!)
+    func webView(_ webView: PlatformWebView, didCommit navigation: WebNavigation!)
+    func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error)
+    func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences)
+    func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy
+    func consumePageLoadPolicyCancellationSuppression() -> Bool
+}
+#endif
+
 /// A temporary NavigationDelegate that uses a callback to integrate with checked continuations
 fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
+    #if !SKIP
+    let forwardingDelegate: AnyObject?
+    var suppressNextPolicyCancellationFailure = false
+    #endif
     var callbackInvoked = false
 
-    init(config: WebEngineConfiguration, callback: @escaping (Result<Void, Error>) -> Void) {
+    init(
+        config: WebEngineConfiguration,
+        forwardingDelegate: AnyObject? = nil,
+        callback: @escaping (Result<Void, Error>) -> Void
+    ) {
         #if SKIP
         super.init(config: config)
+        #else
+        self.forwardingDelegate = forwardingDelegate
         #endif
         self.callback = callback
     }
@@ -3765,7 +3789,8 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.callback(Result<Void, Error>.success(()))
     }
     #else
-    @objc func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
+    @MainActor func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
+        (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFinish: navigation)
         logger.info("webView: \(webView) didFinish: \(navigation!)")
         if self.callbackInvoked { return }
         callbackInvoked = true
@@ -3781,11 +3806,62 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.callback(Result<Void, Error>.failure(WebLoadError(msg: String(error.description), code: error.errorCode)))
     }
     #else
-    @objc func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: any Error) {
+    @MainActor func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: Error) {
+        (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFail: navigation, withError: error)
         logger.info("webView: \(webView) didFail: \(navigation!) error: \(error)")
         if self.callbackInvoked { return }
         callbackInvoked = true
         self.callback(.failure(error))
+    }
+
+    @MainActor func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
+        (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didStartProvisionalNavigation: navigation)
+    }
+
+    @MainActor func webView(_ webView: PlatformWebView, didCommit navigation: WebNavigation!) {
+        (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didCommit: navigation)
+    }
+
+    @MainActor func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error) {
+        if suppressNextPolicyCancellationFailure, Self.isPolicyCancellation(error) {
+            suppressNextPolicyCancellationFailure = false
+            if !callbackInvoked {
+                callbackInvoked = true
+                callback(.success(()))
+            }
+            return
+        }
+
+        (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFailProvisionalNavigation: navigation, withError: error)
+        logger.info("webView: \(webView) didFailProvisionalNavigation: \(navigation!) error: \(error)")
+        if self.callbackInvoked { return }
+        callbackInvoked = true
+        self.callback(.failure(error))
+    }
+
+    @MainActor func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
+        guard let decision = await (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, decidePolicyFor: navigationAction, preferences: preferences) else {
+            return (.allow, preferences)
+        }
+        if decision.0 == .cancel {
+            suppressNextPolicyCancellationFailure = (forwardingDelegate as? (any PageLoadNavigationForwarding))?.consumePageLoadPolicyCancellationSuppression() ?? false
+        }
+        return decision
+    }
+
+    @MainActor func webView(_ webView: PlatformWebView, decidePolicyFor navigationResponse: NavigationResponse) async -> NavigationResponsePolicy {
+        guard let policy = await (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, decidePolicyFor: navigationResponse) else {
+            return .allow
+        }
+        if policy == .cancel {
+            suppressNextPolicyCancellationFailure = (forwardingDelegate as? (any PageLoadNavigationForwarding))?.consumePageLoadPolicyCancellationSuppression() ?? false
+        }
+        return policy
+    }
+
+    private static func isPolicyCancellation(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == "WebKitErrorDomain" && nsError.code == 102
     }
     #endif
 }
