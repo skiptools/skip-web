@@ -1212,7 +1212,30 @@ extension WebCookie {
         #if !SKIP
         webView.go(to: item.item)
         #else
-        // TODO: there's no "go" equivalent in WebView, so we'll probably need to use `goBackOrForward(int steps)` based on matching the item in the back/forward list
+        // Android `WebView` has no direct equivalent of `go(to:)`. Locate
+        // the target entry's index in the copied back-forward list and
+        // dispatch the relative-step `goBackOrForward(int)` so the user
+        // jumps straight to it. We match by URL because the wrapper item
+        // may not be reference-equal to whatever lives in the platform
+        // list after subsequent navigations.
+        let list = webView.copyBackForwardList()
+        let currentIndex: Int = Int(list.currentIndex)
+        let size: Int = Int(list.size)
+        guard size > 0 else { return }
+        let targetURL = item.item.url
+        var targetIndex: Int = -1
+        for i in 0..<size {
+            if list.getItemAtIndex(i).url == targetURL {
+                targetIndex = i
+                break
+            }
+        }
+        if targetIndex >= 0 && targetIndex != currentIndex {
+            let steps = targetIndex - currentIndex
+            if webView.canGoBackOrForward(steps) {
+                webView.goBackOrForward(steps)
+            }
+        }
         #endif
     }
 

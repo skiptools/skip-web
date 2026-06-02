@@ -1205,18 +1205,41 @@ extension WebView : ViewRepresentable {
                              contentSize: CGSize,
                              visibleSize: CGSize,
                              isTracking: Bool) {
-        // Preserve the existing toolbar-direction semantics: only user tracking
-        // updates the state, and inertial scrolling is ignored.
-        if state.isLoading || !isTracking {
+        if state.isLoading {
+            return
+        }
+
+        let offsetY = contentOffset.y
+        // Tolerance covers Android's CSS-px vs device-px unit mismatch
+        // between `getContentHeight()` and `getScrollY()` — without it
+        // the comparison rounds just shy of the real bottom on most
+        // Compose builds and the chrome never reappears at the footer.
+        let atBottomEdge = (offsetY + visibleSize.height) >= (contentSize.height - 4.0)
+
+        // Reaching the bottom edge is reported even during inertial
+        // scroll (after the user has lifted their finger) so any
+        // browser chrome tied to `scrollingDown` reappears once the
+        // page can't be scrolled further. Without this carve-out the
+        // chrome stays hidden because the existing `!isTracking` guard
+        // below would drop the final-frame update that lands on the
+        // bottom edge via momentum.
+        if atBottomEdge {
+            if state.scrollingDown {
+                state.scrollingDown = false
+            }
+            lastScrollOffset = contentOffset
+            return
+        }
+
+        // Preserve the existing toolbar-direction semantics: only user
+        // tracking updates direction, inertial scrolling is ignored.
+        if !isTracking {
             return
         }
 
         defer { lastScrollOffset = contentOffset }
 
-        let offsetY = contentOffset.y
-        let isScrollingDown = ((offsetY + visibleSize.height) >= contentSize.height)
-            || (offsetY > 0 && offsetY > lastScrollOffset.y)
-
+        let isScrollingDown = offsetY > 0 && offsetY > lastScrollOffset.y
         if state.scrollingDown != isScrollingDown {
             state.scrollingDown = isScrollingDown
         }
