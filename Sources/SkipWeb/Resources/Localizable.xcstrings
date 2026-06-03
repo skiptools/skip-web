@@ -1,18 +1,7 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
-    "Copy Link" : {
-      "comment" : "context menu action name for copying a URL link"
-    },
-    "Open" : {
-      "comment" : "context menu action name for opening a url"
-    },
-    "Open in Default Browser" : {
-      "comment" : "context menu action name for opening a url in the system browser"
-    },
-    "Open in New Tab" : {
-      "comment" : "context menu action name for opening a url in a new tab"
-    }
+
   },
   "version" : "1.0"
 }
