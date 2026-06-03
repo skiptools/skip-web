@@ -4111,6 +4111,25 @@ public extension SkipWebUIDelegate {
 }
 
 /// The configuration for a WebEngine
+/// A single entry in skip-web's cross-platform link long-press
+/// context menu. The host app builds an array of these on demand
+/// via `WebEngineConfiguration.linkContextMenuActions` and skip-web
+/// renders them platform-natively: as `UIAction`s on iOS's WKWebView
+/// preview menu and as `android.widget.PopupMenu` items on Android.
+///
+/// Title-only: per-item icons aren't supported by Android's
+/// `PopupMenu` API, so we don't carry an iOS-only image here either
+/// — the title needs to convey the action's meaning unambiguously.
+public struct WebContextMenuAction {
+    public let title: String
+    public let handler: (URL) -> Void
+
+    public init(title: String, handler: @escaping (URL) -> Void) {
+        self.title = title
+        self.handler = handler
+    }
+}
+
 @Observable public class WebEngineConfiguration {
     public var javaScriptEnabled: Bool
     public var javaScriptCanOpenWindowsAutomatically: Bool
@@ -4139,6 +4158,20 @@ public extension SkipWebUIDelegate {
         }
     }
     public var schemeHandlers: [String: URLSchemeHandler]
+    /// Builds the list of actions shown when the user long-presses
+    /// a link in the WebView. The closure receives the link URL and
+    /// returns the list of menu items to display.
+    ///
+    /// On iOS the returned `WebContextMenuAction`s are surfaced as
+    /// `UIAction` entries on the WKWebView's native link
+    /// `UIContextMenuConfiguration`. On Android the same actions
+    /// are surfaced as `android.widget.PopupMenu` items shown at
+    /// the long-pressed location.
+    ///
+    /// If `nil`, the platform's default link long-press behaviour
+    /// is used (WKWebView's preview menu on iOS; text-selection
+    /// action mode on Android).
+    public var linkContextMenuActions: ((URL) -> [WebContextMenuAction])? = nil
     public var uiDelegate: (any SkipWebUIDelegate)?
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
     /// Optional content-blocker configuration applied to web views created from this configuration.

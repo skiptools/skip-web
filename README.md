@@ -623,6 +623,38 @@ let png = snapshot.pngData
 On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
 If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
 
+### Link Context Menu (long-press)
+
+When the user long-presses a link or image-link in a `WebView`, SkipWeb can show a fully customizable native menu populated from an array of `WebContextMenuAction` items. The same closure drives both platforms — on iOS the items become `UIAction`s inside WKWebView's native preview menu, and on Android they become `android.widget.PopupMenu` items shown at the long-pressed location.
+
+Configure the menu by setting `WebEngineConfiguration.linkContextMenuActions` to a closure that receives the long-pressed `URL` and returns the actions to display:
+
+```swift
+let config = WebEngineConfiguration()
+config.linkContextMenuActions = { url in
+    return [
+        WebContextMenuAction(title: NSLocalizedString("Open", comment: "")) { url in
+            navigator.load(url: url)
+        },
+        WebContextMenuAction(title: NSLocalizedString("Open in New Tab", comment: "")) { url in
+            openInNewTab(url)
+        },
+        WebContextMenuAction(title: NSLocalizedString("Copy Link", comment: "")) { url in
+            UIPasteboard.general.url = url
+        },
+        WebContextMenuAction(title: NSLocalizedString("Share…", comment: "")) { url in
+            // Present a UIActivityViewController on iOS / send an ACTION_SEND intent on Android
+        },
+    ]
+}
+```
+
+`WebContextMenuAction` carries only a `title` (`String`) and a `handler` (`(URL) -> Void`). Per-item icons aren't included because Android's `PopupMenu` API doesn't render them, so the title alone must convey the action.
+
+Returning an empty array (or leaving `linkContextMenuActions` as `nil`) falls back to each platform's default link long-press behaviour — WKWebView's preview menu on iOS, the text-selection action mode on Android.
+
+The closure is called every time the user long-presses, so dynamic actions (e.g. "Add Bookmark" / "Remove Bookmark" depending on store state) are straightforward — just branch on the URL when assembling the array.
+
 ## WebBrowser: Lightweight In-App Browser
 
 For cases where you want to display a web page without the full power and complexity of an embedded `WebView`, SkipWeb provides the `View.openWebBrowser()` modifier. This opens a URL in the platform's native in-app browser:

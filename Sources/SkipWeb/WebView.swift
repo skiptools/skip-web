@@ -738,6 +738,47 @@ extension WebView : ViewRepresentable {
         }
         coordinator?.configureAndroidScrollTracking(webView: webEngine.webView)
 
+        // Cross-platform link context menu on Android: when the
+        // user long-presses a link or image-link, build the same
+        // `WebContextMenuAction` list the iOS WKUIDelegate uses and
+        // render it as a centered `AlertDialog`. Without
+        // `linkContextMenuActions` configured, fall through to
+        // Android's default text-selection action mode.
+        //
+        // `PopupMenu` was rejected here: it anchors to the WebView
+        // and bottom-lefts itself in the viewport, which feels
+        // disconnected from the link the user pressed. `AlertDialog`
+        // centers on screen and shows the URL as the dialog title so
+        // the user can confirm what they're acting on.
+        let configRef = self.config
+        webEngine.webView.setOnLongClickListener { view in
+            let nativeWebView = view as android.webkit.WebView
+            let hitTest = nativeWebView.hitTestResult
+            let type = hitTest.type
+            if type == android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE
+                || type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE {
+                if let urlString = hitTest.extra, let url = URL(string: urlString),
+                   let actionsProvider = configRef.linkContextMenuActions {
+                    let actions = actionsProvider(url)
+                    if !actions.isEmpty {
+                        let titles: kotlin.Array<CharSequence> = kotlin.Array(actions.count) { i in
+                            actions[i].title as CharSequence
+                        }
+                        let builder = android.app.AlertDialog.Builder(view.context)
+                        builder.setTitle(url.absoluteString)
+                        builder.setItems(titles) { _, which in
+                            if which >= 0 && which < actions.count {
+                                actions[which].handler(url)
+                            }
+                        }
+                        builder.create().show()
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+
         //settings.setAlgorithmicDarkeningAllowed(boolean allow)
         //settings.setAllowContentAccess(boolean allow)
         //settings.setAllowFileAccess(boolean allow)
@@ -1733,7 +1774,7 @@ extension WebViewCoordinator: WebUIDelegate {
         config.uiDelegate?.webViewDidClose(self.webView, child: childEngine)
     }
 
-    @MainActor public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping (UIContextMenuConfiguration?) -> Void) {
+    @MainActor public func webView(_ webView: WKWebView, contextMenuConfigurationForElement elementInfo: WKContextMenuElementInfo, completionHandler: @escaping @MainActor (UIContextMenuConfiguration?) -> Void) {
         guard let url = elementInfo.linkURL else {
             completionHandler(nil)
             return
@@ -1741,28 +1782,28 @@ extension WebViewCoordinator: WebUIDelegate {
 
         logger.log("webView contextMenuConfigurationFor: \(url)")
 
-        let menu = UIMenu(title: "", children: [
-            UIAction(title: NSLocalizedString("Open", bundle: .module, comment: "context menu action name for opening a url"), image: UIImage(systemName: "plus.square")) { _ in
-                self.navigator.load(url: url)
-                self.openURL(url: url, newTab: false)
-            },
-            UIAction(title: NSLocalizedString("Open in New Tab", bundle: .module, comment: "context menu action name for opening a url in a new tab"), image: UIImage(systemName: "plus.square.on.square")) { _ in
-                self.openURL(url: url, newTab: true)
-            },
-            UIAction(title: NSLocalizedString("Open in Default Browser", bundle: .module, comment: "context menu action name for opening a url in the system browser"), image: UIImage(systemName: "safari")) { _ in
-                UIApplication.shared.open(url)
-            },
-            UIAction(title: NSLocalizedString("Copy Link", bundle: .module, comment: "context menu action name for copying a URL link"), image: UIImage(systemName: "paperclip.badge.ellipsis")) { _ in
-                UIPasteboard.general.url = url
-            },
-            // randomly doesn't show up … probably need a handle to the actual UIViewController
-//            UIAction(title: NSLocalizedString("Share…", bundle: .module, comment: "context menu action name for sharing a URL"), image: UIImage(systemName: "square.and.arrow.up")) { _ in
-//                let activity = UIActivityViewController(activityItems: [url], applicationActivities: nil)
-//                let controller = webView.findViewController()
-//                logger.info("opening share sheet for \(url) in: \(controller)")
-//                controller?.present(activity, animated: true)
-//            },
-        ])
+        // Bridge the cross-platform `WebContextMenuAction` list from
+        // the host app's configuration into native `UIAction`s. The
+        // same actions list drives Android's `PopupMenu` from
+        // `setOnLongClickListener` below.
+        let actionsProvider = self.config.linkContextMenuActions
+        logger.log("contextMenuConfigurationFor: configuration id=\(ObjectIdentifier(self.config).hashValue) provider set = \(actionsProvider != nil)")
+        guard let actionsProvider else {
+            completionHandler(nil)
+            return
+        }
+        let actions = actionsProvider(url)
+        logger.log("contextMenuConfigurationFor: \(actions.count) actions")
+        guard !actions.isEmpty else {
+            completionHandler(nil)
+            return
+        }
+        let uiActions: [UIAction] = actions.map { action in
+            UIAction(title: action.title) { _ in
+                action.handler(url)
+            }
+        }
+        let menu = UIMenu(title: "", children: uiActions)
         let configuration = UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { _ in
             return menu
         }
