@@ -311,8 +311,15 @@ public struct WebView : View {
 
 /// A controller that can drive a `WebEngine` from a user interface.
 public final class WebViewNavigator: @unchecked Sendable {
-    var initialURL: URL?
-    var initialHTML: String?
+    /// The URL the navigator's `webEngine.didSet` will reload onto a
+    /// freshly-attached engine when it has no existing back/forward
+    /// history. Hosts that need their content to survive engine
+    /// recreation — for example a `TabView` with `PageTabViewStyle`
+    /// that dismantles off-screen `WKWebView`s and reinstantiates them
+    /// on return — should keep this in sync with the user's current
+    /// navigation, not just set it at construction time.
+    public var initialURL: URL?
+    public var initialHTML: String?
     #if SKIP
     @MainActor var androidScrollTracker: AndroidScrollTracker?
     #endif
