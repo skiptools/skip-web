@@ -1813,6 +1813,7 @@ extension WebCookie {
         #else
         let sourceWidth = Int(webView.getWidth())
         let sourceHeight = Int(webView.getHeight())
+        logger.info("[skip-web-snapshot-probe] marker=2026-06-12-local-snapshot-optimization-v1 phase=start sourceWidth=\(sourceWidth) sourceHeight=\(sourceHeight)")
         guard sourceWidth > 0, sourceHeight > 0 else {
             throw WebSnapshotError.viewNotLaidOut
         }
@@ -1878,10 +1879,8 @@ extension WebCookie {
             throw WebSnapshotError.pngEncodingFailed
         }
 
-        let base64 = android.util.Base64.encodeToString(outputStream.toByteArray(), android.util.Base64.NO_WRAP)
-        guard let pngData: Data = Data(base64Encoded: base64, options: []) else {
-            throw WebSnapshotError.pngEncodingFailed
-        }
+        let pngData = Data(platformValue: outputStream.toByteArray())
+        logger.info("[skip-web-snapshot-probe] marker=2026-06-12-local-snapshot-optimization-v1 phase=encoded targetWidth=\(targetWidth) targetHeight=\(targetHeight) bytes=\(pngData.count)")
         return SkipWebSnapshot(
             pngData: pngData,
             pixelWidth: targetWidth,
