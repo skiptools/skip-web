@@ -1869,18 +1869,13 @@ extension WebCookie {
             pixelHeight: pixelHeight
         )
         #else
-        let snapshotProbeMarker = "2026-06-12-local-snapshot-optimization-v4-wrapper-timing"
-        let snapshotStartedAt = java.lang.System.currentTimeMillis()
         let sourceWidth = Int(webView.getWidth())
         let sourceHeight = Int(webView.getHeight())
-        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=start sourceWidth=\(sourceWidth) sourceHeight=\(sourceHeight) afterScreenUpdates=\(config.afterScreenUpdates)")
         guard sourceWidth > 0, sourceHeight > 0 else {
             throw WebSnapshotError.viewNotLaidOut
         }
 
-        var afterScreenUpdatesWaitElapsedMs = -1
         if config.afterScreenUpdates {
-            let afterScreenUpdatesWaitStartedAt = java.lang.System.currentTimeMillis()
             let didScheduleUIUpdateWait: Bool = suspendCancellableCoroutine { continuation in
                 let scheduled = webView.post {
                     continuation.resume(true)
@@ -1893,7 +1888,6 @@ extension WebCookie {
                     continuation.cancel()
                 }
             }
-            afterScreenUpdatesWaitElapsedMs = Int(java.lang.System.currentTimeMillis() - afterScreenUpdatesWaitStartedAt)
             guard didScheduleUIUpdateWait else {
                 throw WebSnapshotError.afterScreenUpdatesUnavailable
             }
@@ -1924,15 +1918,13 @@ extension WebCookie {
         let targetHeight = max(1, Int((Double(captureHeight) * (Double(targetWidth) / Double(captureWidth))).rounded()))
 
         let bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        let captureStartedAt = java.lang.System.currentTimeMillis()
         let didUsePixelCopy = await copyAndroidSnapshotWithPixelCopyIfAvailable(
             into: bitmap,
             minX: minX,
             minY: minY,
             maxX: maxX,
             maxY: maxY,
-            afterScreenUpdates: config.afterScreenUpdates,
-            marker: snapshotProbeMarker
+            afterScreenUpdates: config.afterScreenUpdates
         )
         if !didUsePixelCopy {
             drawAndroidSnapshot(
@@ -1945,26 +1937,17 @@ extension WebCookie {
                 targetHeight: targetHeight
             )
         }
-        let captureFinishedAt = java.lang.System.currentTimeMillis()
-        let capturePath = didUsePixelCopy ? "pixelCopy" : "drawFallback"
-        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=captured path=\(capturePath) targetWidth=\(targetWidth) targetHeight=\(targetHeight) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality) captureElapsedMs=\(captureFinishedAt - captureStartedAt) totalElapsedMs=\(captureFinishedAt - snapshotStartedAt)")
 
         let outputStream = java.io.ByteArrayOutputStream()
-        let encodeStartedAt = java.lang.System.currentTimeMillis()
         let compressFormat = config.imageFormat.isPNG ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG
         let compressionQuality = config.imageFormat.isPNG ? 100 : min(max(Int((config.imageFormat.quality * 100.0).rounded()), 0), 100)
         let encoded = bitmap.compress(compressFormat, compressionQuality, outputStream)
-        let encodeFinishedAt = java.lang.System.currentTimeMillis()
         bitmap.recycle()
         guard encoded else {
             throw WebSnapshotError.imageEncodingFailed
         }
 
-        let dataStartedAt = java.lang.System.currentTimeMillis()
         let imageData = Data(platformValue: outputStream.toByteArray())
-        let dataFinishedAt = java.lang.System.currentTimeMillis()
-        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=encoded path=\(capturePath) targetWidth=\(targetWidth) targetHeight=\(targetHeight) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality) bytes=\(imageData.count) encodeElapsedMs=\(encodeFinishedAt - encodeStartedAt) dataElapsedMs=\(dataFinishedAt - dataStartedAt) totalElapsedMs=\(dataFinishedAt - snapshotStartedAt)")
-        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=timing path=\(capturePath) waitElapsedMs=\(afterScreenUpdatesWaitElapsedMs) setupElapsedMs=\(captureStartedAt - snapshotStartedAt) captureElapsedMs=\(captureFinishedAt - captureStartedAt) encodeElapsedMs=\(encodeFinishedAt - encodeStartedAt) dataElapsedMs=\(dataFinishedAt - dataStartedAt) totalElapsedMs=\(dataFinishedAt - snapshotStartedAt) bytes=\(imageData.count) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality)")
         return SkipWebSnapshot(
             imageData: imageData,
             imageFormat: config.imageFormat,
@@ -2002,43 +1985,25 @@ extension WebCookie {
         minY: Int,
         maxX: Int,
         maxY: Int,
-        afterScreenUpdates: Bool,
-        marker: String
+        afterScreenUpdates: Bool
     ) async -> Bool {
         guard afterScreenUpdates else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=afterScreenUpdatesFalse")
-            return false
-        }
-        guard false else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=pixelCopyTemporarilyDisabled")
             return false
         }
         guard android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=apiTooOld sdk=\(android.os.Build.VERSION.SDK_INT)")
             return false
         }
         guard webView.isAttachedToWindow() else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=webViewDetached")
             return false
         }
         guard webView.getWindowToken() != nil else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingWindowToken")
             return false
         }
         guard let activity = Self.androidActivity(from: webView.getContext()) else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingActivityContext")
             return false
         }
         guard activity.window.peekDecorView() != nil else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingDecorView")
             return false
-        }
-
-        let localVisibleRect = android.graphics.Rect()
-        if webView.getLocalVisibleRect(localVisibleRect) {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision visibleDiagnostic requestedLeft=\(minX) requestedTop=\(minY) requestedRight=\(maxX) requestedBottom=\(maxY) visibleLeft=\(localVisibleRect.left) visibleTop=\(localVisibleRect.top) visibleRight=\(localVisibleRect.right) visibleBottom=\(localVisibleRect.bottom)")
-        } else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision visibleDiagnostic reason=notLocallyVisible")
         }
 
         let locationInWindow = IntArray(2)
@@ -2050,20 +2015,16 @@ extension WebCookie {
             locationInWindow[1] + maxY
         )
         guard sourceRect.width() > 0, sourceRect.height() > 0 else {
-            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=emptyWindowSourceRect sourceLeft=\(sourceRect.left) sourceTop=\(sourceRect.top) sourceRight=\(sourceRect.right) sourceBottom=\(sourceRect.bottom)")
             return false
         }
-        logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=true reason=eligible sourceLeft=\(sourceRect.left) sourceTop=\(sourceRect.top) sourceRight=\(sourceRect.right) sourceBottom=\(sourceRect.bottom)")
 
         return suspendCancellableCoroutine { continuation in
             let handler = android.os.Handler(android.os.Looper.getMainLooper())
             // SKIP INSERT: try {
             android.view.PixelCopy.request(activity.window, sourceRect, bitmap, { result in
-                logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyResult result=\(result) success=\(result == android.view.PixelCopy.SUCCESS)")
                 continuation.resume(result == android.view.PixelCopy.SUCCESS)
             }, handler)
             // SKIP INSERT: } catch (t: Throwable) {
-            // SKIP INSERT:     logger.info("[skip-web-snapshot-probe] marker=${marker} phase=pixelCopyDecision selected=false reason=requestException error=${t.message ?: t}")
             // SKIP INSERT:     continuation.resume(false)
             // SKIP INSERT: }
             continuation.invokeOnCancellation { _ in
