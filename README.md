@@ -607,6 +607,7 @@ using `SkipWebSnapshotConfiguration`, which mirrors the core `WKSnapshotConfigur
 - `rect` (`.null` captures the full visible web view bounds)
 - `snapshotWidth` (output width while preserving aspect ratio)
 - `afterScreenUpdates`
+- `imageFormat` (`.jpeg(quality: 0.85)` by default, or `.png`)
 
 ```swift
 let snapshot = try await navigator.takeSnapshot(
@@ -622,7 +623,7 @@ let imageData = snapshot.imageData
 let mimeType = snapshot.imageFormat.mimeType
 ```
 
-On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.
+On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick, then uses `PixelCopy` when the `WebView` is attached and visible, falling back to drawing the `WebView` into a bitmap when `PixelCopy` is unavailable.
 If that UI-tick wait cannot be scheduled (for example, when the view is detached), `takeSnapshot` throws `WebSnapshotError.afterScreenUpdatesUnavailable`.
 
 ### Link Context Menu (long-press)
