@@ -492,14 +492,28 @@ final class SkipWebTests: XCTestCase {
         XCTAssertTrue(config.rect.isNull)
         XCTAssertNil(config.snapshotWidth)
         XCTAssertTrue(config.afterScreenUpdates)
+        XCTAssertEqual(config.imageFormat.mimeType, "image/jpeg")
+        XCTAssertEqual(config.imageFormat.quality, 0.85)
     }
 
     func testSnapshotConfigurationFieldRoundTrip() {
         let rect = SkipWebSnapshotRect(x: 10, y: 20, width: 120, height: 80)
-        let config = SkipWebSnapshotConfiguration(rect: rect, snapshotWidth: 64, afterScreenUpdates: false)
+        let config = SkipWebSnapshotConfiguration(rect: rect, snapshotWidth: 64, afterScreenUpdates: false, imageFormat: .png)
         XCTAssertEqual(config.rect, rect)
         XCTAssertEqual(config.snapshotWidth, 64)
         XCTAssertFalse(config.afterScreenUpdates)
+        XCTAssertEqual(config.imageFormat, .png)
+    }
+
+    func testSnapshotImageFormatJPEGQualityClamps() {
+        XCTAssertEqual(SkipWebSnapshotImageFormat.jpeg(quality: -1.0).quality, 0.0)
+        XCTAssertEqual(SkipWebSnapshotImageFormat.jpeg(quality: 2.0).quality, 1.0)
+        XCTAssertEqual(SkipWebSnapshotImageFormat.jpeg().mimeType, "image/jpeg")
+    }
+
+    func testSnapshotImageFormatPNG() {
+        XCTAssertEqual(SkipWebSnapshotImageFormat.png.mimeType, "image/png")
+        XCTAssertEqual(SkipWebSnapshotImageFormat.png.quality, 1.0)
     }
 
     @MainActor func testTakeSnapshotDefault() async throws {
@@ -529,7 +543,9 @@ final class SkipWebTests: XCTestCase {
             }
             throw error
         }
-        XCTAssertFalse(snapshot.pngData.isEmpty)
+        XCTAssertFalse(snapshot.imageData.isEmpty)
+        XCTAssertEqual(snapshot.imageFormat.mimeType, "image/jpeg")
+        XCTAssertEqual(snapshot.imageFormat.quality, 0.85)
         XCTAssertGreaterThan(snapshot.pixelWidth, 0)
         XCTAssertGreaterThan(snapshot.pixelHeight, 0)
         #endif
@@ -565,7 +581,8 @@ final class SkipWebTests: XCTestCase {
             }
             throw error
         }
-        XCTAssertFalse(snapshot.pngData.isEmpty)
+        XCTAssertFalse(snapshot.imageData.isEmpty)
+        XCTAssertEqual(snapshot.imageFormat.mimeType, "image/jpeg")
         XCTAssertGreaterThan(snapshot.pixelWidth, 0)
         XCTAssertGreaterThan(snapshot.pixelHeight, 0)
         XCTAssertGreaterThanOrEqual(snapshot.pixelWidth, Int(requestedWidth))
@@ -612,7 +629,7 @@ final class SkipWebTests: XCTestCase {
         let snapshot = try await snapshotEngine.takeSnapshot(
             configuration: SkipWebSnapshotConfiguration(afterScreenUpdates: false)
         )
-        XCTAssertFalse(snapshot.pngData.isEmpty)
+        XCTAssertFalse(snapshot.imageData.isEmpty)
         XCTAssertGreaterThan(snapshot.pixelWidth, 0)
         XCTAssertGreaterThan(snapshot.pixelHeight, 0)
         #endif

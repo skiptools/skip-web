@@ -173,32 +173,83 @@ public struct SkipWebSnapshotRect: Equatable, Sendable {
     }
 }
 
+/// Bridge-safe encoded image format for a web-view snapshot.
+public struct SkipWebSnapshotImageFormat: Equatable, Sendable {
+    /// PNG snapshot encoding.
+    public static let png = SkipWebSnapshotImageFormat(mimeType: "image/png", quality: 1.0)
+
+    /// JPEG snapshot encoding with a clamped quality in the `0.0...1.0` range.
+    public static func jpeg(quality: Double = 0.85) -> SkipWebSnapshotImageFormat {
+        SkipWebSnapshotImageFormat(mimeType: "image/jpeg", quality: quality)
+    }
+
+    /// MIME type for the encoded snapshot image data.
+    public let mimeType: String
+    /// Encoding quality clamped to the `0.0...1.0` range.
+    public let quality: Double
+
+    /// Creates an image format from bridge-safe stored values.
+    ///
+    /// Only JPEG and PNG are currently supported. Unknown MIME types are normalized to JPEG.
+    public init(mimeType: String, quality: Double = 0.85) {
+        if mimeType == "image/png" {
+            self.mimeType = "image/png"
+            self.quality = 1.0
+        } else {
+            self.mimeType = "image/jpeg"
+            self.quality = min(max(quality, 0.0), 1.0)
+        }
+    }
+
+    fileprivate var isPNG: Bool {
+        mimeType == "image/png"
+    }
+}
+
 /// Snapshot configuration for `WebEngine.takeSnapshot(configuration:)`.
 ///
 /// This mirrors the key behavior of `WKSnapshotConfiguration`:
 /// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
 /// - `snapshotWidth`: optional output width while preserving aspect ratio
 /// - `afterScreenUpdates`: capture after pending updates when possible
+/// - `imageFormat`: encoded output format for the returned image bytes
 public struct SkipWebSnapshotConfiguration: Sendable {
+    /// View-coordinate capture region (`.null` means full visible bounds).
     public var rect: SkipWebSnapshotRect
+    /// Optional output width while preserving aspect ratio.
     public var snapshotWidth: Double?
+    /// Capture after pending updates when possible.
     public var afterScreenUpdates: Bool
+    /// Encoded output format for the returned image bytes.
+    public var imageFormat: SkipWebSnapshotImageFormat
 
-    public init(rect: SkipWebSnapshotRect = .null, snapshotWidth: Double? = nil, afterScreenUpdates: Bool = true) {
+    public init(
+        rect: SkipWebSnapshotRect = .null,
+        snapshotWidth: Double? = nil,
+        afterScreenUpdates: Bool = true,
+        imageFormat: SkipWebSnapshotImageFormat = .jpeg(quality: 0.85)
+    ) {
         self.rect = rect
         self.snapshotWidth = snapshotWidth
         self.afterScreenUpdates = afterScreenUpdates
+        self.imageFormat = imageFormat
     }
 }
 
-/// A captured web-view snapshot stored as PNG bytes plus pixel dimensions.
+/// A captured web-view snapshot stored as encoded image bytes plus metadata.
 public struct SkipWebSnapshot: Sendable {
-    public let pngData: Data
+    /// Encoded image bytes for this snapshot.
+    public let imageData: Data
+    /// Format used to encode `imageData`.
+    public let imageFormat: SkipWebSnapshotImageFormat
+    /// Encoded image width in pixels.
     public let pixelWidth: Int
+    /// Encoded image height in pixels.
     public let pixelHeight: Int
 
-    public init(pngData: Data, pixelWidth: Int, pixelHeight: Int) {
-        self.pngData = pngData
+    public init(imageData: Data, imageFormat: SkipWebSnapshotImageFormat, pixelWidth: Int, pixelHeight: Int) {
+        self.imageData = imageData
+        self.imageFormat = imageFormat
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
     }
@@ -209,7 +260,7 @@ public enum WebSnapshotError: Error {
     case afterScreenUpdatesUnavailable
     case invalidRect
     case emptySnapshot
-    case pngEncodingFailed
+    case imageEncodingFailed
 }
 
 /// Portable cookie representation shared by iOS and Android implementations.
@@ -1799,14 +1850,21 @@ extension WebCookie {
         platformConfig.afterScreenUpdates = config.afterScreenUpdates
 
         let snapshotImage = try await webView.takeSnapshot(configuration: platformConfig)
-        guard let pngData = snapshotImage.pngData() else {
-            throw WebSnapshotError.pngEncodingFailed
+        let imageData: Data?
+        if config.imageFormat.isPNG {
+            imageData = snapshotImage.pngData()
+        } else {
+            imageData = snapshotImage.jpegData(compressionQuality: config.imageFormat.quality)
+        }
+        guard let imageData else {
+            throw WebSnapshotError.imageEncodingFailed
         }
 
         let pixelWidth = Int(snapshotImage.size.width * snapshotImage.scale)
         let pixelHeight = Int(snapshotImage.size.height * snapshotImage.scale)
         return SkipWebSnapshot(
-            pngData: pngData,
+            imageData: imageData,
+            imageFormat: config.imageFormat,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight
         )
@@ -1860,6 +1918,55 @@ extension WebCookie {
         let targetHeight = max(1, Int((Double(captureHeight) * (Double(targetWidth) / Double(captureWidth))).rounded()))
 
         let bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        let didUsePixelCopy = await copyAndroidSnapshotWithPixelCopyIfAvailable(
+            into: bitmap,
+            minX: minX,
+            minY: minY,
+            maxX: maxX,
+            maxY: maxY,
+            afterScreenUpdates: config.afterScreenUpdates
+        )
+        if !didUsePixelCopy {
+            drawAndroidSnapshot(
+                into: bitmap,
+                minX: minX,
+                minY: minY,
+                captureWidth: captureWidth,
+                captureHeight: captureHeight,
+                targetWidth: targetWidth,
+                targetHeight: targetHeight
+            )
+        }
+
+        let outputStream = java.io.ByteArrayOutputStream()
+        let compressFormat = config.imageFormat.isPNG ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG
+        let compressionQuality = config.imageFormat.isPNG ? 100 : min(max(Int((config.imageFormat.quality * 100.0).rounded()), 0), 100)
+        let encoded = bitmap.compress(compressFormat, compressionQuality, outputStream)
+        bitmap.recycle()
+        guard encoded else {
+            throw WebSnapshotError.imageEncodingFailed
+        }
+
+        let imageData = Data(platformValue: outputStream.toByteArray())
+        return SkipWebSnapshot(
+            imageData: imageData,
+            imageFormat: config.imageFormat,
+            pixelWidth: targetWidth,
+            pixelHeight: targetHeight
+        )
+        #endif
+    }
+
+    #if SKIP
+    private func drawAndroidSnapshot(
+        into bitmap: Bitmap,
+        minX: Int,
+        minY: Int,
+        captureWidth: Int,
+        captureHeight: Int,
+        targetWidth: Int,
+        targetHeight: Int
+    ) {
         let canvas = Canvas(bitmap)
         let scaleX = Float(Double(targetWidth) / Double(captureWidth))
         let scaleY = Float(Double(targetHeight) / Double(captureHeight))
@@ -1870,25 +1977,76 @@ extension WebCookie {
         // so we must compensate or the snapshot is padded by blank space.
         canvas.translate(-Float(minX + scrollX), -Float(minY + scrollY))
         webView.draw(canvas)
-
-        let outputStream = java.io.ByteArrayOutputStream()
-        let encoded = bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-        bitmap.recycle()
-        guard encoded else {
-            throw WebSnapshotError.pngEncodingFailed
-        }
-
-        let base64 = android.util.Base64.encodeToString(outputStream.toByteArray(), android.util.Base64.NO_WRAP)
-        guard let pngData: Data = Data(base64Encoded: base64, options: []) else {
-            throw WebSnapshotError.pngEncodingFailed
-        }
-        return SkipWebSnapshot(
-            pngData: pngData,
-            pixelWidth: targetWidth,
-            pixelHeight: targetHeight
-        )
-        #endif
     }
+
+    private func copyAndroidSnapshotWithPixelCopyIfAvailable(
+        into bitmap: Bitmap,
+        minX: Int,
+        minY: Int,
+        maxX: Int,
+        maxY: Int,
+        afterScreenUpdates: Bool
+    ) async -> Bool {
+        guard afterScreenUpdates else {
+            return false
+        }
+        guard android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O else {
+            return false
+        }
+        guard webView.isAttachedToWindow() else {
+            return false
+        }
+        guard webView.getWindowToken() != nil else {
+            return false
+        }
+        guard let activity = Self.androidActivity(from: webView.getContext()) else {
+            return false
+        }
+        guard activity.window.peekDecorView() != nil else {
+            return false
+        }
+
+        let locationInWindow = IntArray(2)
+        webView.getLocationInWindow(locationInWindow)
+        let sourceRect = android.graphics.Rect(
+            locationInWindow[0] + minX,
+            locationInWindow[1] + minY,
+            locationInWindow[0] + maxX,
+            locationInWindow[1] + maxY
+        )
+        guard sourceRect.width() > 0, sourceRect.height() > 0 else {
+            return false
+        }
+
+        return suspendCancellableCoroutine { continuation in
+            let handler = android.os.Handler(android.os.Looper.getMainLooper())
+            // SKIP INSERT: try {
+            android.view.PixelCopy.request(activity.window, sourceRect, bitmap, { result in
+                continuation.resume(result == android.view.PixelCopy.SUCCESS)
+            }, handler)
+            // SKIP INSERT: } catch (t: Throwable) {
+            // SKIP INSERT:     continuation.resume(false)
+            // SKIP INSERT: }
+            continuation.invokeOnCancellation { _ in
+                continuation.cancel()
+            }
+        }
+    }
+
+    private static func androidActivity(from context: android.content.Context?) -> android.app.Activity? {
+        var currentContext = context
+        while currentContext != nil {
+            if let activity = currentContext as? android.app.Activity {
+                return activity
+            } else if let wrapper = currentContext as? android.content.ContextWrapper {
+                currentContext = wrapper.baseContext
+            } else {
+                break
+            }
+        }
+        return nil
+    }
+    #endif
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
         if profileSetupError != nil {
