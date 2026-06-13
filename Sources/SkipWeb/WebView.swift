@@ -406,10 +406,23 @@ public final class WebViewNavigator: @unchecked Sendable {
     }
 
     @MainActor public func takeSnapshot(configuration: SkipWebSnapshotConfiguration? = nil) async throws -> SkipWebSnapshot {
+        let wrapperStartedAt = Date()
         guard let webEngine else {
             throw WebSnapshotError.emptySnapshot
         }
-        return try await webEngine.takeSnapshot(configuration: configuration)
+        let beforeEngineAt = Date()
+        let snapshot = try await webEngine.takeSnapshot(configuration: configuration)
+        let afterEngineAt = Date()
+        let dataAccessStartedAt = Date()
+        let snapshotByteCount = snapshot.imageData.count
+        let dataAccessFinishedAt = Date()
+        let beforeEngineElapsedMs = Int(beforeEngineAt.timeIntervalSince(wrapperStartedAt) * 1000)
+        let engineAwaitElapsedMs = Int(afterEngineAt.timeIntervalSince(beforeEngineAt) * 1000)
+        let totalElapsedMs = Int(afterEngineAt.timeIntervalSince(wrapperStartedAt) * 1000)
+        let wrapperDataAccessElapsedMs = Int(dataAccessFinishedAt.timeIntervalSince(dataAccessStartedAt) * 1000)
+        let returnReadyElapsedMs = Int(dataAccessFinishedAt.timeIntervalSince(wrapperStartedAt) * 1000)
+        logger.info("[skip-web-snapshot-probe] marker=2026-06-12-local-snapshot-optimization-v4-wrapper-timing phase=webViewWrapper beforeEngineElapsedMs=\(beforeEngineElapsedMs) engineAwaitElapsedMs=\(engineAwaitElapsedMs) totalElapsedMs=\(totalElapsedMs) wrapperDataAccessElapsedMs=\(wrapperDataAccessElapsedMs) returnReadyElapsedMs=\(returnReadyElapsedMs) bytes=\(snapshotByteCount) format=\(snapshot.imageFormat.mimeType) quality=\(snapshot.imageFormat.quality)")
+        return snapshot
     }
 
     @MainActor public func cookies(for url: URL) async -> [WebCookie] {

@@ -613,11 +613,13 @@ let snapshot = try await navigator.takeSnapshot(
     configuration: SkipWebSnapshotConfiguration(
         rect: .null,
         snapshotWidth: 240,
-        afterScreenUpdates: true
+        afterScreenUpdates: true,
+        imageFormat: .jpeg(quality: 0.85)
     )
 )
 
-let png = snapshot.pngData
+let imageData = snapshot.imageData
+let mimeType = snapshot.imageFormat.mimeType
 ```
 
 On Android, `afterScreenUpdates` is best-effort: SkipWeb captures on the next UI tick before drawing the `WebView` into a bitmap.

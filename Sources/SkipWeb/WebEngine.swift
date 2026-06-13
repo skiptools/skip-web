@@ -173,32 +173,83 @@ public struct SkipWebSnapshotRect: Equatable, Sendable {
     }
 }
 
+/// Bridge-safe encoded image format for a web-view snapshot.
+public struct SkipWebSnapshotImageFormat: Equatable, Sendable {
+    /// PNG snapshot encoding.
+    public static let png = SkipWebSnapshotImageFormat(mimeType: "image/png", quality: 1.0)
+
+    /// JPEG snapshot encoding with a clamped quality in the `0.0...1.0` range.
+    public static func jpeg(quality: Double = 0.85) -> SkipWebSnapshotImageFormat {
+        SkipWebSnapshotImageFormat(mimeType: "image/jpeg", quality: quality)
+    }
+
+    /// MIME type for the encoded snapshot image data.
+    public let mimeType: String
+    /// Encoding quality clamped to the `0.0...1.0` range.
+    public let quality: Double
+
+    /// Creates an image format from bridge-safe stored values.
+    ///
+    /// Only JPEG and PNG are currently supported. Unknown MIME types are normalized to JPEG.
+    public init(mimeType: String, quality: Double = 0.85) {
+        if mimeType == "image/png" {
+            self.mimeType = "image/png"
+            self.quality = 1.0
+        } else {
+            self.mimeType = "image/jpeg"
+            self.quality = min(max(quality, 0.0), 1.0)
+        }
+    }
+
+    fileprivate var isPNG: Bool {
+        mimeType == "image/png"
+    }
+}
+
 /// Snapshot configuration for `WebEngine.takeSnapshot(configuration:)`.
 ///
 /// This mirrors the key behavior of `WKSnapshotConfiguration`:
 /// - `rect`: view-coordinate capture region (`.null` means full visible bounds)
 /// - `snapshotWidth`: optional output width while preserving aspect ratio
 /// - `afterScreenUpdates`: capture after pending updates when possible
+/// - `imageFormat`: encoded output format for the returned image bytes
 public struct SkipWebSnapshotConfiguration: Sendable {
+    /// View-coordinate capture region (`.null` means full visible bounds).
     public var rect: SkipWebSnapshotRect
+    /// Optional output width while preserving aspect ratio.
     public var snapshotWidth: Double?
+    /// Capture after pending updates when possible.
     public var afterScreenUpdates: Bool
+    /// Encoded output format for the returned image bytes.
+    public var imageFormat: SkipWebSnapshotImageFormat
 
-    public init(rect: SkipWebSnapshotRect = .null, snapshotWidth: Double? = nil, afterScreenUpdates: Bool = true) {
+    public init(
+        rect: SkipWebSnapshotRect = .null,
+        snapshotWidth: Double? = nil,
+        afterScreenUpdates: Bool = true,
+        imageFormat: SkipWebSnapshotImageFormat = .jpeg(quality: 0.85)
+    ) {
         self.rect = rect
         self.snapshotWidth = snapshotWidth
         self.afterScreenUpdates = afterScreenUpdates
+        self.imageFormat = imageFormat
     }
 }
 
-/// A captured web-view snapshot stored as PNG bytes plus pixel dimensions.
+/// A captured web-view snapshot stored as encoded image bytes plus metadata.
 public struct SkipWebSnapshot: Sendable {
-    public let pngData: Data
+    /// Encoded image bytes for this snapshot.
+    public let imageData: Data
+    /// Format used to encode `imageData`.
+    public let imageFormat: SkipWebSnapshotImageFormat
+    /// Encoded image width in pixels.
     public let pixelWidth: Int
+    /// Encoded image height in pixels.
     public let pixelHeight: Int
 
-    public init(pngData: Data, pixelWidth: Int, pixelHeight: Int) {
-        self.pngData = pngData
+    public init(imageData: Data, imageFormat: SkipWebSnapshotImageFormat, pixelWidth: Int, pixelHeight: Int) {
+        self.imageData = imageData
+        self.imageFormat = imageFormat
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
     }
@@ -209,7 +260,7 @@ public enum WebSnapshotError: Error {
     case afterScreenUpdatesUnavailable
     case invalidRect
     case emptySnapshot
-    case pngEncodingFailed
+    case imageEncodingFailed
 }
 
 /// Portable cookie representation shared by iOS and Android implementations.
@@ -1799,26 +1850,37 @@ extension WebCookie {
         platformConfig.afterScreenUpdates = config.afterScreenUpdates
 
         let snapshotImage = try await webView.takeSnapshot(configuration: platformConfig)
-        guard let pngData = snapshotImage.pngData() else {
-            throw WebSnapshotError.pngEncodingFailed
+        let imageData: Data?
+        if config.imageFormat.isPNG {
+            imageData = snapshotImage.pngData()
+        } else {
+            imageData = snapshotImage.jpegData(compressionQuality: config.imageFormat.quality)
+        }
+        guard let imageData else {
+            throw WebSnapshotError.imageEncodingFailed
         }
 
         let pixelWidth = Int(snapshotImage.size.width * snapshotImage.scale)
         let pixelHeight = Int(snapshotImage.size.height * snapshotImage.scale)
         return SkipWebSnapshot(
-            pngData: pngData,
+            imageData: imageData,
+            imageFormat: config.imageFormat,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight
         )
         #else
+        let snapshotProbeMarker = "2026-06-12-local-snapshot-optimization-v4-wrapper-timing"
+        let snapshotStartedAt = java.lang.System.currentTimeMillis()
         let sourceWidth = Int(webView.getWidth())
         let sourceHeight = Int(webView.getHeight())
-        logger.info("[skip-web-snapshot-probe] marker=2026-06-12-local-snapshot-optimization-v1 phase=start sourceWidth=\(sourceWidth) sourceHeight=\(sourceHeight)")
+        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=start sourceWidth=\(sourceWidth) sourceHeight=\(sourceHeight) afterScreenUpdates=\(config.afterScreenUpdates)")
         guard sourceWidth > 0, sourceHeight > 0 else {
             throw WebSnapshotError.viewNotLaidOut
         }
 
+        var afterScreenUpdatesWaitElapsedMs = -1
         if config.afterScreenUpdates {
+            let afterScreenUpdatesWaitStartedAt = java.lang.System.currentTimeMillis()
             let didScheduleUIUpdateWait: Bool = suspendCancellableCoroutine { continuation in
                 let scheduled = webView.post {
                     continuation.resume(true)
@@ -1831,6 +1893,7 @@ extension WebCookie {
                     continuation.cancel()
                 }
             }
+            afterScreenUpdatesWaitElapsedMs = Int(java.lang.System.currentTimeMillis() - afterScreenUpdatesWaitStartedAt)
             guard didScheduleUIUpdateWait else {
                 throw WebSnapshotError.afterScreenUpdatesUnavailable
             }
@@ -1861,6 +1924,66 @@ extension WebCookie {
         let targetHeight = max(1, Int((Double(captureHeight) * (Double(targetWidth) / Double(captureWidth))).rounded()))
 
         let bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        let captureStartedAt = java.lang.System.currentTimeMillis()
+        let didUsePixelCopy = await copyAndroidSnapshotWithPixelCopyIfAvailable(
+            into: bitmap,
+            minX: minX,
+            minY: minY,
+            maxX: maxX,
+            maxY: maxY,
+            afterScreenUpdates: config.afterScreenUpdates,
+            marker: snapshotProbeMarker
+        )
+        if !didUsePixelCopy {
+            drawAndroidSnapshot(
+                into: bitmap,
+                minX: minX,
+                minY: minY,
+                captureWidth: captureWidth,
+                captureHeight: captureHeight,
+                targetWidth: targetWidth,
+                targetHeight: targetHeight
+            )
+        }
+        let captureFinishedAt = java.lang.System.currentTimeMillis()
+        let capturePath = didUsePixelCopy ? "pixelCopy" : "drawFallback"
+        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=captured path=\(capturePath) targetWidth=\(targetWidth) targetHeight=\(targetHeight) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality) captureElapsedMs=\(captureFinishedAt - captureStartedAt) totalElapsedMs=\(captureFinishedAt - snapshotStartedAt)")
+
+        let outputStream = java.io.ByteArrayOutputStream()
+        let encodeStartedAt = java.lang.System.currentTimeMillis()
+        let compressFormat = config.imageFormat.isPNG ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG
+        let compressionQuality = config.imageFormat.isPNG ? 100 : min(max(Int((config.imageFormat.quality * 100.0).rounded()), 0), 100)
+        let encoded = bitmap.compress(compressFormat, compressionQuality, outputStream)
+        let encodeFinishedAt = java.lang.System.currentTimeMillis()
+        bitmap.recycle()
+        guard encoded else {
+            throw WebSnapshotError.imageEncodingFailed
+        }
+
+        let dataStartedAt = java.lang.System.currentTimeMillis()
+        let imageData = Data(platformValue: outputStream.toByteArray())
+        let dataFinishedAt = java.lang.System.currentTimeMillis()
+        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=encoded path=\(capturePath) targetWidth=\(targetWidth) targetHeight=\(targetHeight) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality) bytes=\(imageData.count) encodeElapsedMs=\(encodeFinishedAt - encodeStartedAt) dataElapsedMs=\(dataFinishedAt - dataStartedAt) totalElapsedMs=\(dataFinishedAt - snapshotStartedAt)")
+        logger.info("[skip-web-snapshot-probe] marker=\(snapshotProbeMarker) phase=timing path=\(capturePath) waitElapsedMs=\(afterScreenUpdatesWaitElapsedMs) setupElapsedMs=\(captureStartedAt - snapshotStartedAt) captureElapsedMs=\(captureFinishedAt - captureStartedAt) encodeElapsedMs=\(encodeFinishedAt - encodeStartedAt) dataElapsedMs=\(dataFinishedAt - dataStartedAt) totalElapsedMs=\(dataFinishedAt - snapshotStartedAt) bytes=\(imageData.count) format=\(config.imageFormat.mimeType) quality=\(config.imageFormat.quality)")
+        return SkipWebSnapshot(
+            imageData: imageData,
+            imageFormat: config.imageFormat,
+            pixelWidth: targetWidth,
+            pixelHeight: targetHeight
+        )
+        #endif
+    }
+
+    #if SKIP
+    private func drawAndroidSnapshot(
+        into bitmap: Bitmap,
+        minX: Int,
+        minY: Int,
+        captureWidth: Int,
+        captureHeight: Int,
+        targetWidth: Int,
+        targetHeight: Int
+    ) {
         let canvas = Canvas(bitmap)
         let scaleX = Float(Double(targetWidth) / Double(captureWidth))
         let scaleY = Float(Double(targetHeight) / Double(captureHeight))
@@ -1871,23 +1994,98 @@ extension WebCookie {
         // so we must compensate or the snapshot is padded by blank space.
         canvas.translate(-Float(minX + scrollX), -Float(minY + scrollY))
         webView.draw(canvas)
+    }
 
-        let outputStream = java.io.ByteArrayOutputStream()
-        let encoded = bitmap.compress(Bitmap.CompressFormat.PNG, 100, outputStream)
-        bitmap.recycle()
-        guard encoded else {
-            throw WebSnapshotError.pngEncodingFailed
+    private func copyAndroidSnapshotWithPixelCopyIfAvailable(
+        into bitmap: Bitmap,
+        minX: Int,
+        minY: Int,
+        maxX: Int,
+        maxY: Int,
+        afterScreenUpdates: Bool,
+        marker: String
+    ) async -> Bool {
+        guard afterScreenUpdates else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=afterScreenUpdatesFalse")
+            return false
+        }
+        guard false else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=pixelCopyTemporarilyDisabled")
+            return false
+        }
+        guard android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=apiTooOld sdk=\(android.os.Build.VERSION.SDK_INT)")
+            return false
+        }
+        guard webView.isAttachedToWindow() else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=webViewDetached")
+            return false
+        }
+        guard webView.getWindowToken() != nil else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingWindowToken")
+            return false
+        }
+        guard let activity = Self.androidActivity(from: webView.getContext()) else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingActivityContext")
+            return false
+        }
+        guard activity.window.peekDecorView() != nil else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=missingDecorView")
+            return false
         }
 
-        let pngData = Data(platformValue: outputStream.toByteArray())
-        logger.info("[skip-web-snapshot-probe] marker=2026-06-12-local-snapshot-optimization-v1 phase=encoded targetWidth=\(targetWidth) targetHeight=\(targetHeight) bytes=\(pngData.count)")
-        return SkipWebSnapshot(
-            pngData: pngData,
-            pixelWidth: targetWidth,
-            pixelHeight: targetHeight
+        let localVisibleRect = android.graphics.Rect()
+        if webView.getLocalVisibleRect(localVisibleRect) {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision visibleDiagnostic requestedLeft=\(minX) requestedTop=\(minY) requestedRight=\(maxX) requestedBottom=\(maxY) visibleLeft=\(localVisibleRect.left) visibleTop=\(localVisibleRect.top) visibleRight=\(localVisibleRect.right) visibleBottom=\(localVisibleRect.bottom)")
+        } else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision visibleDiagnostic reason=notLocallyVisible")
+        }
+
+        let locationInWindow = IntArray(2)
+        webView.getLocationInWindow(locationInWindow)
+        let sourceRect = android.graphics.Rect(
+            locationInWindow[0] + minX,
+            locationInWindow[1] + minY,
+            locationInWindow[0] + maxX,
+            locationInWindow[1] + maxY
         )
-        #endif
+        guard sourceRect.width() > 0, sourceRect.height() > 0 else {
+            logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=false reason=emptyWindowSourceRect sourceLeft=\(sourceRect.left) sourceTop=\(sourceRect.top) sourceRight=\(sourceRect.right) sourceBottom=\(sourceRect.bottom)")
+            return false
+        }
+        logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyDecision selected=true reason=eligible sourceLeft=\(sourceRect.left) sourceTop=\(sourceRect.top) sourceRight=\(sourceRect.right) sourceBottom=\(sourceRect.bottom)")
+
+        return suspendCancellableCoroutine { continuation in
+            let handler = android.os.Handler(android.os.Looper.getMainLooper())
+            // SKIP INSERT: try {
+            android.view.PixelCopy.request(activity.window, sourceRect, bitmap, { result in
+                logger.info("[skip-web-snapshot-probe] marker=\(marker) phase=pixelCopyResult result=\(result) success=\(result == android.view.PixelCopy.SUCCESS)")
+                continuation.resume(result == android.view.PixelCopy.SUCCESS)
+            }, handler)
+            // SKIP INSERT: } catch (t: Throwable) {
+            // SKIP INSERT:     logger.info("[skip-web-snapshot-probe] marker=${marker} phase=pixelCopyDecision selected=false reason=requestException error=${t.message ?: t}")
+            // SKIP INSERT:     continuation.resume(false)
+            // SKIP INSERT: }
+            continuation.invokeOnCancellation { _ in
+                continuation.cancel()
+            }
+        }
     }
+
+    private static func androidActivity(from context: android.content.Context?) -> android.app.Activity? {
+        var currentContext = context
+        while currentContext != nil {
+            if let activity = currentContext as? android.app.Activity {
+                return activity
+            } else if let wrapper = currentContext as? android.content.ContextWrapper {
+                currentContext = wrapper.baseContext
+            } else {
+                break
+            }
+        }
+        return nil
+    }
+    #endif
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
         if profileSetupError != nil {
