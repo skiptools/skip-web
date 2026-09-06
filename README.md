@@ -19,6 +19,28 @@ SkipWeb provides two ways to display web content in [Skip Lite](https://skip.dev
 
 Use `openWebBrowser` when you want to send the user to a web page with minimal code and maximum platform-native UX. Use `WebView` when you need to embed web content as part of your app's UI with programmatic control.
 
+## Experimental Web/Wasm host
+
+The `SkipWebWasm` product is an experimental browser host for Swift code compiled to WebAssembly.
+It is separate from `SkipWeb`: `SkipWeb` embeds native WebKit/android.webkit.WebView instances,
+while `SkipWebWasm` exposes a small DOM API backed by [JavaScriptKit](https://github.com/swiftwasm/JavaScriptKit).
+
+```swift
+import SkipWebWasm
+
+WebDocument.makeElement(tagName: "button")
+    .text("Hello from Swift")
+    .on("click") {
+        print("clicked")
+    }
+    .append()
+```
+
+The browser page must provide the `#skip-root` mount point. The companion `skip web` command in
+`skipstone` generates an `index.html` host and `skip-web.json` manifest. A Swift Wasm SDK and a
+JavaScript bootstrap module are still required; this target does not yet translate SwiftUI views
+to browser DOM nodes.
+
 ## Requirements
 
 The package currently targets Apple platforms starting at iOS 17, macOS 14, tvOS 17, watchOS 10, and Mac Catalyst 17.
@@ -27,6 +49,7 @@ Current package dependencies are:
 
 - `skip` from `1.8.9`
 - `skip-ui` from `1.54.0`
+- `JavaScriptKit` from `0.58.0` (used by `SkipWebWasm`)
 - when `SKIP_BRIDGE` is enabled, `skip-bridge` in `0.0.0..<2.0.0` and `skip-fuse-ui` from `1.15.2`
 
 ## WebView: Customizable Embedded Web Browser
