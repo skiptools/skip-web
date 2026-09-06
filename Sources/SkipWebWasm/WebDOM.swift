@@ -4,6 +4,108 @@
 
 import JavaScriptKit
 
+/// Supported HTML elements for the typed web component layer.
+public enum WebTag: String, Sendable {
+    case div
+    case main
+    case section
+    case article
+    case header
+    case footer
+    case nav
+    case ul
+    case li
+    case span
+    case p
+    case h1
+    case h2
+    case h3
+    case button
+    case a
+    case img
+    case input
+}
+
+/// Browser events supported by `WebElement`.
+public enum WebEvent: String, Sendable {
+    case click
+    case input
+    case change
+    case submit
+    case focus
+    case blur
+    case keydown
+    case keyup
+}
+
+/// Common HTML attributes supported by the typed component layer.
+public enum WebAttribute: String, Sendable {
+    case id
+    case role
+    case ariaLabel = "aria-label"
+    case href
+    case target
+    case type
+    case placeholder
+    case value
+    case name
+    case alt
+    case src
+    case title
+}
+
+/// Common CSS properties supported by the typed component layer.
+public enum WebStyleProperty: String, Sendable {
+    case display
+    case flexDirection = "flex-direction"
+    case alignItems = "align-items"
+    case justifyContent = "justify-content"
+    case gap
+    case width
+    case maxWidth = "max-width"
+    case minHeight = "min-height"
+    case padding
+    case margin
+    case color
+    case backgroundColor = "background-color"
+    case border
+    case borderRadius = "border-radius"
+    case fontSize = "font-size"
+}
+
+/// Input types supported by `WebInput`.
+public enum WebInputType: String, Sendable {
+    case text
+    case email
+    case password
+    case number
+    case search
+    case url
+}
+
+/// The normalized data delivered to a typed event handler.
+public struct WebEventContext: Sendable {
+    public let value: String?
+
+    fileprivate init(values: [JSValue]) {
+        value = values.first?.object?.target.object?.value.string
+    }
+}
+
+/// Base protocol for reusable browser components.
+public protocol WebComponent {
+    var element: WebElement { get }
+}
+
+public extension WebComponent {
+    /// Mounts the component under an existing DOM element.
+    @discardableResult
+    func mount(in parent: WebElement) -> Self {
+        _ = parent.append(element)
+        return self
+    }
+}
+
 /// A lightweight DOM element wrapper for experimental Skip Web/Wasm applications.
 ///
 /// `SkipWebWasm` is deliberately separate from `SkipWeb`: the existing `SkipWeb` target
@@ -14,8 +116,8 @@ public final class WebElement {
     private var eventListeners: [(event: String, listener: JSClosure)] = []
 
     /// Creates a detached DOM element.
-    public init(tagName: String = "div") {
-        self.init(object: JSObject.global.document.createElement(tagName).object!)
+    public init(tag: WebTag = .div) {
+        self.init(object: JSObject.global.document.createElement(tag.rawValue).object!)
     }
 
     fileprivate init(object: JSObject) {
@@ -38,14 +140,14 @@ public final class WebElement {
 
     /// Sets an HTML attribute.
     @discardableResult
-    public func attribute(_ name: String, _ value: String) -> Self {
-        _ = object.setAttribute!(name, value)
+    public func attribute(_ attribute: WebAttribute, _ value: String) -> Self {
+        _ = object.setAttribute!(attribute.rawValue, value)
         return self
     }
 
     /// Sets one inline CSS property.
     @discardableResult
-    public func style(_ property: String, _ value: String) -> Self {
+    public func style(_ property: WebStyleProperty, _ value: String) -> Self {
         guard let style = object.style.object else {
             preconditionFailure("SkipWebWasm could not access the element style object")
         }
@@ -72,13 +174,19 @@ public final class WebElement {
 
     /// Adds a JavaScript event listener and keeps the closure alive for this element.
     @discardableResult
-    public func on(_ event: String, handler: @escaping @Sendable () -> Void) -> Self {
-        let listener = JSClosure { _ in
-            handler()
+    public func on(_ event: WebEvent, handler: @escaping @Sendable () -> Void) -> Self {
+        on(event) { _ in handler() }
+    }
+
+    /// Adds a typed browser event listener and provides the event target's value when available.
+    @discardableResult
+    public func on(_ event: WebEvent, handler: @escaping @Sendable (WebEventContext) -> Void) -> Self {
+        let listener = JSClosure { values in
+            handler(WebEventContext(values: values))
             return .undefined
         }
-        _ = object.addEventListener!(event, JSValue.object(listener))
-        eventListeners.append((event: event, listener: listener))
+        _ = object.addEventListener!(event.rawValue, JSValue.object(listener))
+        eventListeners.append((event: event.rawValue, listener: listener))
         return self
     }
 
@@ -87,6 +195,78 @@ public final class WebElement {
             _ = object.removeEventListener!(entry.event, JSValue.object(entry.listener))
             entry.listener.release()
         }
+    }
+}
+
+/// A generic container component for composing adaptive DOM trees.
+public struct WebContainer: WebComponent {
+    public let element: WebElement
+
+    public init(tag: WebTag = .div, classes: String? = nil, children: [any WebComponent] = []) {
+        element = WebElement(tag: tag)
+        if let classes {
+            _ = element.classes(classes)
+        }
+        for child in children {
+            _ = element.append(child.element)
+        }
+    }
+}
+
+/// A text component that renders accessible paragraph or heading content.
+public struct WebText: WebComponent {
+    public let element: WebElement
+
+    public init(_ value: String, tag: WebTag = .p) {
+        element = WebElement(tag: tag).text(value)
+    }
+}
+
+/// A button component with typed click handling.
+public struct WebButton: WebComponent {
+    public let element: WebElement
+
+    public init(_ title: String, action: @escaping @Sendable () -> Void) {
+        element = WebElement(tag: .button).text(title)
+        _ = element.attribute(.type, "button").on(.click, handler: action)
+    }
+}
+
+/// A link component with explicit URL and target attributes.
+public struct WebLink: WebComponent {
+    public let element: WebElement
+
+    public init(_ title: String, href: String, target: String? = nil) {
+        element = WebElement(tag: .a).text(title).attribute(.href, href)
+        if let target {
+            _ = element.attribute(.target, target)
+        }
+    }
+}
+
+/// A text-like input component with typed change callbacks.
+public struct WebInput: WebComponent {
+    public let element: WebElement
+
+    public init(type: WebInputType = .text, placeholder: String? = nil, onChange: (@Sendable (String) -> Void)? = nil) {
+        element = WebElement(tag: .input).attribute(.type, type.rawValue)
+        if let placeholder {
+            _ = element.attribute(.placeholder, placeholder)
+        }
+        if let onChange {
+            _ = element.on(.input) { context in
+                onChange(context.value ?? "")
+            }
+        }
+    }
+}
+
+/// An image component that preserves alt text for assistive technologies.
+public struct WebImage: WebComponent {
+    public let element: WebElement
+
+    public init(src: String, alt: String) {
+        element = WebElement(tag: .img).attribute(.src, src).attribute(.alt, alt)
     }
 }
 
@@ -171,8 +351,8 @@ public enum WebDocument {
         return WebElement(object: mount)
     }
 
-    /// Creates a DOM element with the supplied tag name.
-    public static func makeElement(tagName: String = "div") -> WebElement {
-        WebElement(tagName: tagName)
+    /// Creates a DOM element with a supported typed tag.
+    public static func makeElement(tag: WebTag = .div) -> WebElement {
+        WebElement(tag: tag)
     }
 }

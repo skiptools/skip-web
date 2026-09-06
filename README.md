@@ -28,14 +28,29 @@ while `SkipWebWasm` exposes a small DOM API backed by [JavaScriptKit](https://gi
 ```swift
 import SkipWebWasm
 
-WebDocument.makeElement(tagName: "button")
+WebDocument.makeElement(tag: .button)
     .text("Hello from Swift")
-    .style("padding", "12px 20px")
-    .on("click") {
+    .style(.padding, "12px 20px")
+    .on(.click) {
         print("clicked")
     }
     .append()
 ```
+
+Reusable components are built from the same typed base protocol:
+
+```swift
+let screen = WebContainer(tag: .main, classes: "screen", children: [
+    WebText("Welcome", tag: .h1),
+    WebButton("Continue") { print("continue") },
+    WebInput(type: .email, placeholder: "Email") { email in print(email) }
+])
+screen.mount(in: WebDocument.resetMountPoint())
+```
+
+Tags, events, attributes, style properties, input types, and breakpoints are enums rather than
+string-dispatched component names. This keeps component wiring consistent from the base DOM
+layer through higher-level controls and avoids runtime string comparisons for supported values.
 
 Adaptive layouts can use the browser's CSS media-query engine and receive resize updates:
 
