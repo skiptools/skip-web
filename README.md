@@ -30,11 +30,26 @@ import SkipWebWasm
 
 WebDocument.makeElement(tagName: "button")
     .text("Hello from Swift")
+    .style("padding", "12px 20px")
     .on("click") {
         print("clicked")
     }
     .append()
 ```
+
+Adaptive layouts can use the browser's CSS media-query engine and receive resize updates:
+
+```swift
+let viewport = WebViewport.snapshot()
+let observation = WebViewport.observe { viewport in
+    print(viewport.breakpoint) // .compact, .medium, or .expanded
+}
+```
+
+Retain the observation token while the screen is active. The generated host includes a viewport
+meta tag, safe-area insets, dynamic viewport height, reduced-motion handling, and compact/medium/
+expanded CSS breakpoints at 600px and 840px. Components should prefer fluid sizing (`clamp`, `%`,
+and flex/grid) over fixed pixel widths so they remain usable on phones, tablets, and desktop windows.
 
 The browser page must provide the `#skip-root` mount point. The companion `skip web` command in
 `skipstone` generates an `index.html` host and `skip-web.json` manifest. A Swift Wasm SDK and a

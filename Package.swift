@@ -18,6 +18,7 @@ let package = Package(
         .target(name: "SkipWeb", dependencies: [.product(name: "SkipUI", package: "skip-ui")], resources: [.process("Resources")], plugins: [.plugin(name: "skipstone", package: "skip")]),
         .target(name: "SkipWebWasm", dependencies: [.product(name: "JavaScriptKit", package: "JavaScriptKit")]),
         .testTarget(name: "SkipWebTests", dependencies: ["SkipWeb", .product(name: "SkipTest", package: "skip")], resources: [.process("Resources")], plugins: [.plugin(name: "skipstone", package: "skip")]),
+        .testTarget(name: "SkipWebWasmTests", dependencies: ["SkipWebWasm"]),
     ]
 )
 

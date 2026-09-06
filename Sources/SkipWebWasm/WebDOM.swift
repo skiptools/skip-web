@@ -11,7 +11,7 @@ import JavaScriptKit
 /// browser DOM from Swift compiled to WebAssembly.
 public final class WebElement {
     private let object: JSObject
-    private var eventListeners: [JSClosure] = []
+    private var eventListeners: [(event: String, listener: JSClosure)] = []
 
     /// Creates a detached DOM element.
     public init(tagName: String = "div") {
@@ -29,10 +29,34 @@ public final class WebElement {
         return self
     }
 
+    /// Sets the element's CSS class list.
+    @discardableResult
+    public func classes(_ value: String) -> Self {
+        object.className = .string(value)
+        return self
+    }
+
     /// Sets an HTML attribute.
     @discardableResult
     public func attribute(_ name: String, _ value: String) -> Self {
         _ = object.setAttribute!(name, value)
+        return self
+    }
+
+    /// Sets one inline CSS property.
+    @discardableResult
+    public func style(_ property: String, _ value: String) -> Self {
+        guard let style = object.style.object else {
+            preconditionFailure("SkipWebWasm could not access the element style object")
+        }
+        _ = style.setProperty!(property, value)
+        return self
+    }
+
+    /// Appends a child element to this element.
+    @discardableResult
+    public func append(_ child: WebElement) -> Self {
+        _ = object.appendChild!(child.object)
         return self
     }
 
@@ -54,8 +78,84 @@ public final class WebElement {
             return .undefined
         }
         _ = object.addEventListener!(event, JSValue.object(listener))
-        eventListeners.append(listener)
+        eventListeners.append((event: event, listener: listener))
         return self
+    }
+
+    deinit {
+        for entry in eventListeners {
+            _ = object.removeEventListener!(entry.event, JSValue.object(entry.listener))
+            entry.listener.release()
+        }
+    }
+}
+
+/// The responsive size classes used by the experimental browser host.
+public enum WebBreakpoint: String, Sendable {
+    /// Phones and narrow browser windows below 600 CSS pixels.
+    case compact
+    /// Tablets and medium browser windows from 600 through 839 CSS pixels.
+    case medium
+    /// Wide tablets, laptops, and desktop windows from 840 CSS pixels upward.
+    case expanded
+}
+
+/// A snapshot of the browser viewport in CSS pixels.
+public struct WebViewportSnapshot: Equatable, Sendable {
+    public let width: Double
+    public let height: Double
+    public let breakpoint: WebBreakpoint
+
+    public init(width: Double, height: Double) {
+        self.width = width
+        self.height = height
+        if width < 600 {
+            breakpoint = .compact
+        } else if width < 840 {
+            breakpoint = .medium
+        } else {
+            breakpoint = .expanded
+        }
+    }
+}
+
+/// Browser viewport helpers for adaptive layouts.
+public enum WebViewport {
+    /// Returns the current viewport dimensions and responsive breakpoint.
+    public static func snapshot() -> WebViewportSnapshot {
+        let window = JSObject.global
+        return WebViewportSnapshot(
+            width: window.innerWidth.number ?? 0,
+            height: window.innerHeight.number ?? 0)
+    }
+
+    /// Evaluates a CSS media query using the browser's native media-query engine.
+    public static func matches(_ query: String) -> Bool {
+        JSObject.global.matchMedia!(query).matches.boolean ?? false
+    }
+
+    /// Observes browser resize events. Retain the returned token for as long as the observer is needed.
+    @discardableResult
+    public static func observe(_ handler: @escaping @Sendable (WebViewportSnapshot) -> Void) -> WebViewportObservation {
+        WebViewportObservation(handler: handler)
+    }
+}
+
+/// The lifetime token returned by `WebViewport.observe`.
+public final class WebViewportObservation {
+    private let listener: JSClosure
+
+    fileprivate init(handler: @escaping @Sendable (WebViewportSnapshot) -> Void) {
+        listener = JSClosure { _ in
+            handler(WebViewport.snapshot())
+            return .undefined
+        }
+        _ = JSObject.global.addEventListener!("resize", JSValue.object(listener))
+    }
+
+    deinit {
+        _ = JSObject.global.removeEventListener!("resize", JSValue.object(listener))
+        listener.release()
     }
 }
 
