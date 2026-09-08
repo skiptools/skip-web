@@ -1145,7 +1145,7 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".first\"]"))
         XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".second\"]"))
         XCTAssertTrue(script.contains("var compactedCSS = compactHiddenSelectors(collectedSelectors)"))
-        XCTAssertTrue(script.contains("style.textContent = compactedCSS.join"))
+        XCTAssertTrue(script.contains("window.__skipWebCosmeticStyles.replace(styleId, compactedCSS.join"))
         XCTAssertTrue(script.contains("groupedDisplayNoneCSS"))
         XCTAssertTrue(script.contains("compactHiddenSelectors"))
         XCTAssertTrue(script.contains("batched-style"))

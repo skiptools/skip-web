@@ -2133,17 +2133,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
               window.top === window.self
             );
             var styleId = "__skipweb_content_blockers_document_start";
-            var existing = document.getElementById(styleId);
-            if (!css) {
-              if (existing) existing.remove();
-              return;
-            }
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = existing || document.createElement("style");
-            style.id = styleId;
-            style.textContent = css;
-            if (!existing) root.appendChild(style);
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, css || "");
           } catch (_) {}
         })();
         """
@@ -3433,6 +3424,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
         return """
         (function() {
+            if (window.__skipWebCosmeticStyles) {
+                window.__skipWebCosmeticStyles.replace("\(styleIDLiteral)", "");
+                return;
+            }
             var style = document.getElementById("\(styleIDLiteral)");
             if (style) {
                 style.remove();
@@ -3529,15 +3524,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             \(domainGuard)
             var styleId = "\(styleIDLiteral)";
             var css = \(cssLiteral);
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = document.getElementById(styleId);
-            if (!style) {
-                style = document.createElement('style');
-                style.id = styleId;
-                root.appendChild(style);
-            }
-            style.textContent = css;
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, css);
         })();
         """
     }
@@ -3688,19 +3676,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                 }
             }
 
-            if (collectedSelectors.length === 0) { return; }
             var compactedCSS = compactHiddenSelectors(collectedSelectors);
 
             var styleId = "\(styleIDLiteral)";
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = document.getElementById(styleId);
-            if (!style) {
-                style = document.createElement('style');
-                style.id = styleId;
-                root.appendChild(style);
-            }
-            style.textContent = compactedCSS.join("\\n");
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, compactedCSS.join("\\n"));
         })();
         """
     }

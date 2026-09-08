@@ -302,6 +302,44 @@ The shared runtime evaluates `allowedOriginRules`, `urlFilterPattern`, `ifDomain
 longer determines the number of document-start registrations. Older runtimes use lifecycle
 injection as a fallback.
 
+### Android inline display enforcement
+
+Android also derives a small JavaScript fallback from the generated cosmetic CSS. If an
+element matches a `display: none !important` rule but has a conflicting inline important
+display value, SkipWeb sets its inline display to `none !important`. Ordinary matching
+elements remain handled by the stylesheet. Providers supply the same selectors and guards:
+
+```swift
+AndroidCosmeticRule(hiddenSelectors: [".ad-slot", "iframe[style^=\"width: 280px\"]"])
+```
+
+One helper per document coordinates document-start and lifecycle styles. It parses grouped
+selectors through the browser's CSSOM, scans inline styles once when blocking starts, and
+batches later mutations on a 16 ms timer. It scans added subtrees once and rechecks only
+inline-important candidates. Ancestor, sibling, and descendant changes can affect matching,
+so those candidates are rechecked even when the changed node is not itself a candidate.
+SkipWeb's own writes do not schedule further observer work.
+
+Matching uses authored style attributes before applying overrides. Rule replacement,
+element detachment, and removal of the last applicable rule restore owned display values,
+preserving later page edits to other properties. Removing the last stylesheet also stops
+the observer and cancels pending work. A document-start injection waits for the document
+root if necessary; removed or text-edited blocker stylesheets are repaired.
+
+This is a DOM-based fallback, not user-origin CSS priority. Page rewrites can be visible
+until the next batch runs. It handles generated top-level element-hiding rules; pseudo-elements,
+shadow trees, arbitrary declarations, and selector state changes without DOM mutations
+(such as hover or focus alone) retain ordinary CSS behavior. It runs only in frames that
+receive cosmetic CSS through the existing injection paths. Mutation records cannot distinguish
+a page deliberately writing the same `display: none !important` value from an unrelated style
+edit that retains SkipWeb's value; cleanup treats an unchanged display as still owned.
+
+The DOM regression tests use the production script in macOS WKWebView with no extra test
+dependencies. Run `swift test --filter AndroidCosmeticStyleTests`. They cover inline priority,
+late insertion, page rewrites, style-dependent selectors, replacement/cleanup, and operation
+counts for approximately 14,400 selectors and 1,000 elements. Android's existing
+`WebContentBlockerTests` cover rule generation and injection guards.
+
 Think of Android cosmetics as two buckets:
 - `persistentCosmeticRules`: a long-lived baseline captured by the runtime revision
 - `navigationCosmeticRules(for:)`: page-specific CSS evaluated for the current page
