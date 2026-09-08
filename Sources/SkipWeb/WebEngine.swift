@@ -579,6 +579,8 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
     /// Think of it as a runtime frame guard: SkipWeb evaluates it before returning CSS to a
     /// document, so one fixed document-start hook can serve matching subframes and redirected pages.
     public var urlFilterPattern: String?
+    /// Whether URL matching distinguishes case. Defaults to true for existing custom providers.
+    public var urlFilterIsCaseSensitive: Bool
     /// Origin patterns that must match the current frame before the rule applies.
     ///
     /// When Android document-start scripts are supported, SkipWeb installs one fixed hook for all
@@ -605,10 +607,12 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
         ifDomainList: [String] = [],
         unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart,
+        urlFilterIsCaseSensitive: Bool = true
     ) {
         self.hiddenSelectors = Self.normalizedHiddenSelectors(hiddenSelectors)
         self.urlFilterPattern = urlFilterPattern
+        self.urlFilterIsCaseSensitive = urlFilterIsCaseSensitive
         self.allowedOriginRules = allowedOriginRules
         self.ifDomainList = ifDomainList
         self.unlessDomainList = unlessDomainList
@@ -736,6 +740,7 @@ struct AndroidDocumentStartRuleBatchKey: Hashable {
     let frameScope: AndroidCosmeticFrameScope
     let preferredTiming: AndroidCosmeticInjectionTiming
     let urlFilterPattern: String?
+    let urlFilterIsCaseSensitive: Bool
     let allowedOriginRules: [String]
     let ifDomainList: [String]
     let unlessDomainList: [String]
@@ -3159,7 +3164,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                   ),
-                  androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) else {
+                  androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) else {
                 continue
             }
 
@@ -3209,6 +3214,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             }
             return host.count > suffix.count && host.hasSuffix(".\(suffix)")
         }
+        if normalizedRule.hasPrefix("*") {
+            let suffix = String(normalizedRule.dropFirst())
+            guard !suffix.isEmpty else { return false }
+            return host == suffix || host.hasSuffix(".\(suffix)")
+        }
         return host == normalizedRule
     }
 
@@ -3236,18 +3246,18 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         return true
     }
 
-    fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL) -> Bool {
+    fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL, urlFilterIsCaseSensitive: Bool) -> Bool {
         guard let urlFilterPattern, !urlFilterPattern.isEmpty else {
             return true
         }
 
         let pageURLString = pageURL.absoluteString
         #if SKIP
-        // SKIP INSERT: try { return kotlin.text.Regex(urlFilterPattern).containsMatchIn(pageURLString) } catch (t: Throwable) { return false }
+        // SKIP INSERT: try { return (if (urlFilterIsCaseSensitive) kotlin.text.Regex(urlFilterPattern) else kotlin.text.Regex(urlFilterPattern, kotlin.text.RegexOption.IGNORE_CASE)).containsMatchIn(pageURLString) } catch (t: Throwable) { return false }
         return false
         #else
         let range = NSRange(location: 0, length: pageURLString.utf16.count)
-        guard let expression = try? NSRegularExpression(pattern: urlFilterPattern) else {
+        guard let expression = try? NSRegularExpression(pattern: urlFilterPattern, options: urlFilterIsCaseSensitive ? [] : [.caseInsensitive]) else {
             return false
         }
         return expression.firstMatch(in: pageURLString, range: range) != nil
@@ -3263,6 +3273,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             frameScope: rule.frameScope,
             preferredTiming: rule.preferredTiming,
             urlFilterPattern: rule.urlFilterPattern,
+            urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive,
             allowedOriginRules: rule.allowedOriginRules,
             ifDomainList: rule.ifDomainList,
             unlessDomainList: rule.unlessDomainList
@@ -3339,7 +3350,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                    ),
-                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) {
                     lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
@@ -3364,7 +3375,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                    ),
-                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) {
                     lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
@@ -3442,7 +3453,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         frameScope: AndroidCosmeticFrameScope,
         urlFilterPattern: String? = nil,
         ifDomainList: [String] = [],
-        unlessDomainList: [String] = []
+        unlessDomainList: [String] = [],
+        urlFilterIsCaseSensitive: Bool = true
     ) -> String? {
         let css = normalizedAndroidCosmeticCSS(cssRules).joined(separator: "\n")
         guard !css.isEmpty else {
@@ -3467,7 +3479,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             let patternLiteral = String(patternEncoded.dropFirst().dropLast())
             urlFilterGuard = """
             try {
-                if (!(new RegExp(\(patternLiteral))).test(window.location.href)) { return; }
+                if (!(new RegExp(\(patternLiteral), "\(urlFilterIsCaseSensitive ? "" : "i")")).test(window.location.href)) { return; }
             } catch (error) {
                 return;
             }
@@ -3496,6 +3508,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                 if (normalizedRuleDomain.startsWith("*.")) {
                     var suffix = normalizedRuleDomain.slice(2);
                     return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
+                }
+                if (normalizedRuleDomain.startsWith("*")) {
+                    var suffix = normalizedRuleDomain.slice(1);
+                    return !!suffix && (currentHost === suffix || currentHost.endsWith("." + suffix));
                 }
                 return currentHost === normalizedRuleDomain;
             };
@@ -3547,6 +3563,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     "hiddenSelectors": hiddenSelectors,
                     "frameScope": rule.frameScope.rawValue,
                     "urlFilterPattern": rule.urlFilterPattern ?? NSNull(),
+                    "urlFilterIsCaseSensitive": rule.urlFilterIsCaseSensitive,
                     "ifDomainList": rule.ifDomainList,
                     "unlessDomainList": rule.unlessDomainList,
                 ]
@@ -3636,6 +3653,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     var suffix = normalizedRuleDomain.slice(2);
                     return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
                 }
+                if (normalizedRuleDomain.startsWith("*")) {
+                    var suffix = normalizedRuleDomain.slice(1);
+                    return !!suffix && (currentHost === suffix || currentHost.endsWith("." + suffix));
+                }
                 return currentHost === normalizedRuleDomain;
             };
 
@@ -3655,7 +3676,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
                 if (rule.urlFilterPattern) {
                     try {
-                        if (!(new RegExp(rule.urlFilterPattern)).test(locationHref)) { continue; }
+                        if (!(new RegExp(rule.urlFilterPattern, rule.urlFilterIsCaseSensitive ? "" : "i")).test(locationHref)) { continue; }
                     } catch (error) {
                         continue;
                     }

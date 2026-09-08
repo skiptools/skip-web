@@ -264,6 +264,12 @@ let errors = await runtime.reapply(
 The older `contentBlockers` property remains the simpler single-configuration API. After changing
 it on an existing engine—including setting it to `nil`—call `engine.reapplyContentBlockers()`.
 
+Android cosmetic domain guards accept `*example.com` for the root domain and its
+subdomains, `*.example.com` for subdomains only, and `example.com` for an exact host.
+Suffix matching respects domain-label boundaries, so `*example.com` excludes `badexample.com`.
+`urlFilterIsCaseSensitive` defaults to `true` for existing custom providers. Providers
+of WebKit-format lists should pass the source flag explicitly (WebKit defaults to `false`).
+
 On Android, `AndroidCosmeticRule` can now carry current-frame guards directly:
 
 ```swift

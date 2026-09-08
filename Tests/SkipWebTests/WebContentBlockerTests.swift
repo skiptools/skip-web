@@ -1058,7 +1058,57 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(plan.lifecycleCSS, [".main { display: none !important; }"])
     }
 
-    // Verifies main-frame-only scripts bail out when executed inside a subframe.
+    func testAndroidCosmeticCaseSensitivityControlsBothInjectionTimings() throws {
+        let pageURL = try XCTUnwrap(URL(string: "https://example.com/ads"))
+        for timing in [AndroidCosmeticInjectionTiming.documentStart, AndroidCosmeticInjectionTiming.pageLifecycle] {
+            let insensitive = AndroidCosmeticRule(hiddenSelectors: [".insensitive"],
+                urlFilterPattern: "/Ads", preferredTiming: timing, urlFilterIsCaseSensitive: false)
+            let sensitive = AndroidCosmeticRule(hiddenSelectors: [".sensitive"],
+                urlFilterPattern: "/Ads", preferredTiming: timing)
+            XCTAssertFalse(WebEngine.androidCosmeticCSS(rules: [insensitive], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: timing).isEmpty)
+            XCTAssertTrue(WebEngine.androidCosmeticCSS(rules: [sensitive], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: timing).isEmpty)
+        }
+    }
+
+    func testAndroidCosmeticPlanKeepsCaseGuardsSeparateAndFiltersLifecycleFallback() throws {
+        let pageURL = try XCTUnwrap(URL(string: "https://example.com/ads"))
+        let rules = [
+            AndroidCosmeticRule(hiddenSelectors: [".insensitive"], urlFilterPattern: "/Ads",
+                urlFilterIsCaseSensitive: false),
+            AndroidCosmeticRule(hiddenSelectors: [".sensitive"], urlFilterPattern: "/Ads")
+        ]
+        let plan = WebEngine.androidCosmeticInjectionPlan(rules: rules, pageURL: pageURL,
+            isDocumentStartSupported: true)
+        XCTAssertEqual(plan.documentStartRules.count, 2)
+        XCTAssertFalse(plan.documentStartRules[0].urlFilterIsCaseSensitive)
+        XCTAssertTrue(plan.documentStartRules[1].urlFilterIsCaseSensitive)
+        for timing in [AndroidCosmeticInjectionTiming.documentStart, AndroidCosmeticInjectionTiming.pageLifecycle] {
+            var fallbackRules = rules
+            for index in fallbackRules.indices {
+                fallbackRules[index].frameScope = .mainFrameOnly
+                fallbackRules[index].preferredTiming = timing
+            }
+            let fallback = WebEngine.androidCosmeticInjectionPlan(rules: fallbackRules, pageURL: pageURL,
+                isDocumentStartSupported: false)
+            XCTAssertEqual(fallback.lifecycleCSS, [".insensitive { display: none !important; }"])
+        }
+    }
+
+    func testAndroidCosmeticDomainPatternsRespectLabelBoundariesAndExclusions() throws {
+        for host in ["example.com", "www.example.com", "a.b.example.com", "badexample.com", "example.com.evil.test"] {
+            let pageURL = try XCTUnwrap(URL(string: "https://" + host + "/"))
+            let expected = host == "example.com" || host.hasSuffix(".example.com")
+            let included = AndroidCosmeticRule(hiddenSelectors: [".ad"], ifDomainList: ["*example.com"])
+            let excluded = AndroidCosmeticRule(hiddenSelectors: [".ad"], unlessDomainList: ["*example.com"])
+            XCTAssertEqual(!WebEngine.androidCosmeticCSS(rules: [included], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: AndroidCosmeticInjectionTiming.documentStart).isEmpty, expected)
+            XCTAssertEqual(!WebEngine.androidCosmeticCSS(rules: [excluded], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: AndroidCosmeticInjectionTiming.documentStart).isEmpty, !expected)
+        }
+    }
+
     func testAndroidContentBlockerStyleInjectionScriptAddsMainFrameGuard() throws {
         let script = try XCTUnwrap(
             WebEngine.androidContentBlockerStyleInjectionScript(
