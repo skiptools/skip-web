@@ -27,15 +27,18 @@ if Context.environment["SKIP_BRIDGE"] ?? "0" != "0" {
         .package(url: "https://github.com/skiptools/skip-bridge.git", "0.0.0"..<"2.0.0"),
         .package(url: "https://github.com/skiptools/skip-fuse-ui.git", from: "1.15.2")
     ]
-    package.targets.forEach({ target in
+    package.targets.filter({ target in
+        target.name == "SkipWeb" || target.name == "SkipWebTests"
+    }).forEach({ target in
         target.dependencies += [
             .product(name: "SkipBridge", package: "skip-bridge"),
             .product(name: "SkipFuseUI", package: "skip-fuse-ui")
         ]
     })
-    // all library types must be dynamic to support bridging
+    // Only the native SkipWeb product participates in bridge mode. SkipWebWasm is a browser
+    // target and must not acquire Android bridge dependencies or dynamic-library requirements.
     package.products = package.products.map({ product in
-        guard let libraryProduct = product as? Product.Library else { return product }
+        guard let libraryProduct = product as? Product.Library, libraryProduct.name == "SkipWeb" else { return product }
         return .library(name: libraryProduct.name, type: .dynamic, targets: libraryProduct.targets)
     })
 }

@@ -67,9 +67,17 @@ expanded CSS breakpoints at 600px and 840px. Components should prefer fluid sizi
 and flex/grid) over fixed pixel widths so they remain usable on phones, tablets, and desktop windows.
 
 The browser page must provide the `#skip-root` mount point. The companion `skip web` command in
-`skipstone` generates an `index.html` host and `skip-web.json` manifest. A Swift Wasm SDK and a
-JavaScript bootstrap module are still required; this target does not yet translate SwiftUI views
-to browser DOM nodes.
+`skipstone` generates an `index.html` host and `skip-web.json` manifest. By default the host loads
+the `index.js` module produced by JavaScriptKit's existing `PackageToJS` plugin and calls its
+`init()` export; custom modules may export `start(mount)` instead. Build that module with a Swift
+Wasm SDK, for example:
+
+```shell
+swift package --swift-sdk wasm32-unknown-wasi plugin --allow-writing-to-package-directory js --output Web
+```
+
+A Swift Wasm SDK is still required; this target does not yet translate SwiftUI views to browser DOM
+nodes.
 
 ## Requirements
 
