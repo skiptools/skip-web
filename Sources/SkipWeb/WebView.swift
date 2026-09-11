@@ -164,6 +164,10 @@ public struct WebView : View {
     /// Use a stable per-tab identifier, such as a tab UUID string, when each tab should
     /// resume its own history and in-page state after being rebound. Omit
     /// `persistentWebViewID` when the web view does not need cross-mount identity.
+    /// Mounting a cached or navigator-owned engine replaces its script-message delegate
+    /// and window callbacks with this view's configuration, including nil callbacks.
+    /// Provide the current owner's delegate when adopting a prepared or popup engine.
+    /// The existing document, user scripts, and registered channel names are preserved.
     ///
     /// - Important: A non-`nil` `persistentWebViewID` stores the engine in a process-wide,
     ///   strongly held cache. Unmounting this view does not release the engine, and SkipWeb
@@ -178,7 +182,8 @@ public struct WebView : View {
     ///   the navigation targets the main frame. Return `true` to cancel the navigation.
     /// - Parameter persistentWebViewID: A stable cache key for explicit cross-mount engine
     ///   retention. IDs share one process-wide namespace. The same ID resolves to the first
-    ///   cached engine—and its original configuration—until it is removed.
+    ///   cached engine and configuration object until removal; mounting updates callback
+    ///   ownership as described above.
     public init(
         configuration: WebEngineConfiguration = WebEngineConfiguration(),
         navigator: WebViewNavigator = WebViewNavigator(),
@@ -248,11 +253,43 @@ public struct WebView : View {
         )
     }
 
+    /// Prepares a cached engine for navigation without mounting its native view.
+    ///
+    /// Preparation does not load content. Repeated calls return the original engine and
+    /// configuration until `removePersistentWebView(id:)` releases the cache entry.
+    /// Mount a `WebView` with the same persistent ID to adopt its content and history.
+    /// Mounting updates script-message and window callback ownership from that view's
+    /// configuration without replacing the original scripts or channel names.
+    @MainActor
+    public static func preparePersistentEngine(id: String, configuration: WebEngineConfiguration) -> WebEngine {
+        let resolved = resolvePersistentWebEngine(id: id) {
+            #if SKIP
+            // Detached creation still needs the activity's window context when later mounted.
+            if configuration.context == nil {
+                configuration.context = UIApplication.shared.androidActivity
+            }
+            #endif
+            return WebEngine(configuration: configuration)
+        }
+        if !resolved.reused {
+            let owner = WebView(configuration: configuration)
+            owner.configureEngineForLoading(resolved.engine)
+            #if !SKIP
+            let coordinator = owner.makeCoordinator()
+            resolved.engine.preparedUIDelegate = coordinator
+            resolved.engine.webView.uiDelegate = coordinator
+            #endif
+        }
+        return resolved.engine
+    }
+
     /// Removes one cached persistent web view so the next mount recreates its engine.
     ///
     /// Call this after the view using the ID has been unmounted. On Android, removal also
     /// destroys the cached native web view, so removing an engine that is still mounted is
     /// unsupported. The method does nothing when the ID is not cached.
+    /// Removal cancels queued and in-flight navigation and prevents further URL loads
+    /// through the removed engine; prepare the ID again to obtain a usable replacement.
     ///
     /// Removing the cache entry releases SkipWeb's strong reference. It does not force
     /// deallocation while a navigator, mounted view, or application-owned reference still
@@ -263,6 +300,10 @@ public struct WebView : View {
         guard let engine = engineCache.removeValue(forKey: id) else {
             return
         }
+        engine.endPersistentOwnership()
+        #if !SKIP
+        engine.preparedUIDelegate = nil
+        #endif
         #if SKIP
         teardownPersistentWebEngine(engine)
         #endif
@@ -389,7 +430,7 @@ public final class WebViewNavigator: @unchecked Sendable {
             // navigating away and back to the same WebView screen).
             guard oldValue !== self.webEngine else { return }
             guard let webEngine = self.webEngine else { return }
-            let hasExistingContent = webEngine.webView.currentURL != nil
+            let hasExistingContent = webEngine.hasRequestedContent || webEngine.webView.currentURL != nil
                 || !webEngine.webView.backList.isEmpty
                 || !webEngine.webView.forwardList.isEmpty
             guard !hasExistingContent else { return }
@@ -413,14 +454,11 @@ public final class WebViewNavigator: @unchecked Sendable {
         webEngine?.loadHTML(html, baseURL: baseURL, mimeType: mimeType)
     }
 
+    /// Reserves the engine's initial content request synchronously, then schedules loading.
+    /// A subsequent mount preserves this request even before the platform exposes a URL.
+    /// Does nothing without an attached engine; use `loadOrThrow(url:)` to receive errors.
     @MainActor public func load(url: URL) {
-        Task { @MainActor in
-            do {
-                try await loadOrThrow(url: url)
-            } catch {
-                logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
-            }
-        }
+        webEngine?.scheduleLoad(url: url)
     }
 
     /// Loads a URL and throws any profile setup/navigation preflight errors.
@@ -647,6 +685,22 @@ struct WebViewDownloadListener : android.webkit.DownloadListener {
     }
 }
 
+/// Receives the anchor href separately from the image source returned by Android hit testing.
+private final class LinkHrefHandler: android.os.Handler {
+    let present: (String) -> Void
+
+    init(present: @escaping (String) -> Void) {
+        self.present = present
+        super.init(android.os.Looper.getMainLooper())
+    }
+
+    override func handleMessage(message: android.os.Message) {
+        if let url = message.data.getString("url"), !url.isEmpty {
+            present(url)
+        }
+    }
+}
+
 final class SkipWebChromeClient : android.webkit.WebChromeClient {
     let webView: WebView
     let webEngine: WebEngine
@@ -773,7 +827,8 @@ extension WebView : ViewRepresentable {
         WebViewCoordinator(webView: self, navigator: navigator, scriptCaller: scriptCaller, config: config)
     }
 
-    @MainActor private func setupWebView(_ webEngine: WebEngine, coordinator: WebViewCoordinator? = nil) -> WebEngine {
+    /// Applies engine settings and script/window transport before either detached or mounted loading.
+    @MainActor private func configureEngineForLoading(_ webEngine: WebEngine) {
         // configure JavaScript
         #if SKIP
         let settings = webEngine.webView.settings
@@ -793,6 +848,49 @@ extension WebView : ViewRepresentable {
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
         webEngine.installAndroidScriptMessageFacadeIfNeeded()
         webEngine.installAndroidDocumentStartUserScriptsIfNeeded()
+        if config.uiDelegate != nil || config.androidCreateWindowHandler != nil {
+            webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
+        } else {
+            webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
+        }
+        #else
+        let configuration = webEngine.webView.configuration
+        configuration.allowsAirPlayForMediaPlayback = true
+        configuration.suppressesIncrementalRendering = false
+        //configuration.mediaTypesRequiringUserActionForPlayback =
+        //configuration.userContentController =
+        //configuration.allowsInlinePredictions =
+        //configuration.applicationNameForUserAgent =
+        //configuration.limitsNavigationsToAppBoundDomains =
+        //configuration.upgradeKnownHostsToHTTPS =
+
+        let preferences = configuration.defaultWebpagePreferences!
+        preferences.allowsContentJavaScript = config.javaScriptEnabled
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically = config.javaScriptCanOpenWindowsAutomatically
+        preferences.preferredContentMode = .recommended
+        // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
+
+        webEngine.refreshMessageHandlers()
+        webEngine.updateUserScripts()
+
+        if (config.customUserAgent != "" ) {
+            webEngine.webView.customUserAgent = config.customUserAgent
+        }
+        #endif
+    }
+
+    @MainActor private func setupWebView(_ webEngine: WebEngine, coordinator: WebViewCoordinator? = nil) -> WebEngine {
+        webEngine.linkMenuGeneration += 1
+        // Adopt the mounted owner's callbacks when reusing a prepared or popup engine.
+        // In particular, a popup must not retain its parent's script-message delegate.
+        webEngine.configuration.scriptMessageDelegate = config.scriptMessageDelegate
+        webEngine.configuration.uiDelegate = config.uiDelegate
+        #if SKIP
+        webEngine.configuration.androidCreateWindowHandler = config.androidCreateWindowHandler
+        webEngine.configuration.androidCloseWindowHandler = config.androidCloseWindowHandler
+        #endif
+        configureEngineForLoading(webEngine)
+        #if SKIP
         webEngine.webView.setDownloadListener(WebViewDownloadListener(
             state: state,
             onDownloadRequested: onDownloadRequested
@@ -805,11 +903,6 @@ extension WebView : ViewRepresentable {
             onContentRuleBlockedNavigation: onContentRuleBlockedNavigation,
             shouldOverrideUrlLoadingHandler: shouldOverrideUrlLoading
         ))
-        if config.uiDelegate != nil || config.androidCreateWindowHandler != nil {
-            webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
-        } else {
-            webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
-        }
         coordinator?.configureAndroidScrollTracking(webView: webEngine.webView)
 
         // Cross-platform link context menu on Android: when the
@@ -828,27 +921,37 @@ extension WebView : ViewRepresentable {
         webEngine.webView.setOnLongClickListener { view in
             let nativeWebView = view as android.webkit.WebView
             let hitTest = nativeWebView.hitTestResult
-            let type = hitTest.type
-            if type == android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE
-                || type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE {
-                if let urlString = hitTest.extra, let url = URL(string: urlString),
-                   let actionsProvider = configRef.linkContextMenuActions {
-                    let actions = actionsProvider(url)
-                    if !actions.isEmpty {
-                        let titles: kotlin.Array<CharSequence> = kotlin.Array(actions.count) { i in
-                            actions[i].title as CharSequence
-                        }
-                        let builder = android.app.AlertDialog.Builder(view.context)
-                        builder.setTitle(url.absoluteString)
-                        builder.setItems(titles) { _, which in
-                            if which >= 0 && which < actions.count {
-                                actions[which].handler(url)
-                            }
-                        }
-                        builder.create().show()
-                        return true
+            guard configRef.linkContextMenuActions != nil else { return false }
+            let generation = webEngine.linkMenuGeneration
+            let pageURL = nativeWebView.url
+            let present: (String) -> Void = { urlString in
+                guard webEngine.isCurrentLinkMenu(generation: generation, pageURL: pageURL),
+                      let url = URL(string: urlString),
+                      let provider = configRef.linkContextMenuActions else { return }
+                let actions = provider(url)
+                guard !actions.isEmpty else { return }
+                let titles: kotlin.Array<CharSequence> = kotlin.Array(actions.count) { i in
+                    actions[i].title as CharSequence
+                }
+                let builder = android.app.AlertDialog.Builder(UIApplication.shared.androidActivity ?? view.context)
+                builder.setTitle(url.absoluteString)
+                builder.setItems(titles) { _, which in
+                    if webEngine.isCurrentLinkMenu(generation: generation, pageURL: pageURL),
+                       which >= 0 && which < actions.count {
+                        actions[which].handler(url)
                     }
                 }
+                builder.create().show()
+            }
+            if hitTest.type == android.webkit.WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE {
+                let handler = LinkHrefHandler(present: present)
+                nativeWebView.requestFocusNodeHref(handler.obtainMessage())
+                return true
+            }
+            if hitTest.type == android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE,
+               let url = hitTest.extra {
+                present(url)
+                return true
             }
             return false
         }
@@ -902,28 +1005,6 @@ extension WebView : ViewRepresentable {
         //settings.setUseWideViewPort(boolean use)
         //settings.setUserAgentString(String ua)
         #else
-        let configuration = webEngine.webView.configuration
-        configuration.allowsAirPlayForMediaPlayback = true
-        configuration.suppressesIncrementalRendering = false
-        //configuration.mediaTypesRequiringUserActionForPlayback =
-        //configuration.userContentController =
-        //configuration.allowsInlinePredictions =
-        //configuration.applicationNameForUserAgent =
-        //configuration.limitsNavigationsToAppBoundDomains =
-        //configuration.upgradeKnownHostsToHTTPS =
-
-        let preferences = configuration.defaultWebpagePreferences!
-        preferences.allowsContentJavaScript = config.javaScriptEnabled
-        configuration.preferences.javaScriptCanOpenWindowsAutomatically = config.javaScriptCanOpenWindowsAutomatically
-        preferences.preferredContentMode = .recommended
-        // preferences.isLockdownModeEnabled = false // The 'com.apple.developer.web-browser' restricted entitlement is required to disable lockdown mode
-
-        webEngine.refreshMessageHandlers()
-        webEngine.updateUserScripts()
-        
-        if (config.customUserAgent != "" ) {
-            webEngine.webView.customUserAgent = config.customUserAgent
-        }
         #endif
 
         if navigator.webEngine !== webEngine {
@@ -938,7 +1019,7 @@ extension WebView : ViewRepresentable {
         coordinator?.update(from: self)
         #if !SKIP
         if let coordinator, webView.navigationDelegate == nil {
-            webView.navigationDelegate = coordinator
+            WebEngine.bindNavigationDelegate(coordinator, to: webView)
         }
         webView.uiDelegate = coordinator
         webView.scrollView.delegate = coordinator
@@ -1017,6 +1098,14 @@ extension WebView : ViewRepresentable {
             logger.info("created WebEngine noid: \(engine)")
         }
         let web = resolvedEngine.engine
+        if let preparedCoordinator = web.preparedUIDelegate {
+            // Move popup ownership before releasing the detached coordinator.
+            for (id, child) in preparedCoordinator.childEnginesByWebViewID {
+                coordinator.childEnginesByWebViewID[id] = child
+            }
+            preparedCoordinator.childEnginesByWebViewID.removeAll()
+        }
+        web.preparedUIDelegate = nil
 
         if resolvedEngine.reused {
             for messageHandlerName in coordinator.messageHandlerNames {
@@ -1049,7 +1138,7 @@ extension WebView : ViewRepresentable {
         }
 
         webView.allowsLinkPreview = true
-        webView.navigationDelegate = context.coordinator
+        WebEngine.bindNavigationDelegate(context.coordinator, to: webView)
         webView.scrollView.delegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = config.allowsBackForwardNavigationGestures
@@ -1830,7 +1919,7 @@ extension WebViewCoordinator: WebUIDelegate {
     @MainActor public func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
         logger.log("createWebViewWith: \(configuration) \(navigationAction)")
         let request = WebWindowRequest(
-            sourceURL: self.navigator.webEngine?.webView.url,
+            sourceURL: webView.url,
             targetURL: navigationAction.request.url,
             isUserGesture: nil,
             isDialog: nil,
@@ -1896,8 +1985,7 @@ extension WebViewCoordinator: WebUIDelegate {
 
         // Bridge the cross-platform `WebContextMenuAction` list from
         // the host app's configuration into native `UIAction`s. The
-        // same actions list drives Android's `PopupMenu` from
-        // `setOnLongClickListener` below.
+        // same actions list drives Android's long-click dialog.
         let actionsProvider = self.config.linkContextMenuActions
         logger.log("contextMenuConfigurationFor: configuration id=\(ObjectIdentifier(self.config).hashValue) provider set = \(actionsProvider != nil)")
         guard let actionsProvider else {

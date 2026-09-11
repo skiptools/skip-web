@@ -1660,6 +1660,65 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     private var androidContentBlockerScriptBridge: AndroidContentBlockerScriptBridge?
     #endif
 
+    /// Whether this engine has received an initial content request, including a load still in preflight.
+    /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
+    public private(set) var hasRequestedContent = false
+    private var persistentOwnershipEnded = false
+    private var scheduledLoad: Task<Void, Never>?
+
+    /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
+    func scheduleLoad(url: URL) {
+        guard !persistentOwnershipEnded else { return }
+        markContentRequested()
+        if scheduledLoad != nil { stopLoading() }
+        scheduledLoad = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            do {
+                try await self.load(url: url)
+            } catch {
+                if !Task.isCancelled {
+                    logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
+                }
+            }
+        }
+    }
+
+    /// Invalidates queued navigation before explicit persistent-cache removal.
+    func endPersistentOwnership() {
+        persistentOwnershipEnded = true
+        stopLoading()
+    }
+
+    // SKIP @nobridge
+    /// Invalidates deferred link-menu results on navigation, remount, and teardown.
+    var linkMenuGeneration = 0
+
+    #if SKIP
+    /// Rejects delayed menu results and actions after navigation or window detachment.
+    func isCurrentLinkMenu(generation: Int, pageURL: String?) -> Bool {
+        webView.isAttachedToWindow && linkMenuGeneration == generation && webView.url == pageURL
+    }
+    #endif
+
+    #if !SKIP
+    /// Keeps detached window callbacks alive until a mounted coordinator takes ownership.
+    var preparedUIDelegate: WebViewCoordinator?
+
+    /// Changes navigation consumers without abandoning an outstanding load continuation.
+    static func bindNavigationDelegate(_ delegate: WKNavigationDelegate, to webView: WKWebView) {
+        if let loading = webView.navigationDelegate as? PageLoadDelegate {
+            loading.forwardingDelegate = delegate
+        } else {
+            webView.navigationDelegate = delegate
+        }
+    }
+    #endif
+
+    /// Reserves initial navigation synchronously before a caller schedules asynchronous loading.
+    func markContentRequested() {
+        hasRequestedContent = true
+    }
+
     /// Create a WebEngine with the specified configuration.
     /// - Parameters:
     ///   - configuration: the configuration to use
@@ -1705,6 +1764,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         installConfigurationNavigationDelegateIfNeeded()
         scheduleIOSContentBlockerSetupIfNeeded()
         #else
+        self.webView.addOnAttachStateChangeListener(AndroidLinkMenuAttachmentListener(engine: self))
         installAndroidContentBlockerBootstrapIfNeeded()
         #endif
     }
@@ -1741,7 +1801,19 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
+        scheduledLoad?.cancel()
+        scheduledLoad = nil
+        linkMenuGeneration += 1
+        #if SKIP
+        completeAndroidPageLoad(.failure(CancellationError()))
+        #else
+        if let loading = webView.navigationDelegate as? PageLoadDelegate {
+            webView.navigationDelegate = loading.forwardingDelegate as? WKNavigationDelegate
+            loading.cancel()
+        }
+        #endif
         if profileSetupError != nil {
             return
         }
@@ -2744,6 +2816,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
+        markContentRequested()
+        linkMenuGeneration += 1
         if profileSetupError != nil {
             return
         }
@@ -2774,6 +2848,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        markContentRequested()
+        linkMenuGeneration += 1
+        try Task.checkCancellation()
+        if persistentOwnershipEnded { throw CancellationError() }
         try throwProfileSetupErrorIfNeeded()
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
@@ -2782,6 +2860,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #else
         _ = await awaitContentBlockerSetup()
         #endif
+        try Task.checkCancellation()
+        if persistentOwnershipEnded { throw CancellationError() }
         try await awaitPageLoaded {
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
@@ -3727,10 +3807,14 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #else
         let previousNavigationDelegate = webView.navigationDelegate
         let forwardingDelegate = previousNavigationDelegate as? (any PageLoadNavigationForwarding)
-        defer { webView.navigationDelegate = previousNavigationDelegate }
-
-        // need to retain the navigation delegate or else it will drop the continuation
         var loadDelegate: PageLoadDelegate? = nil
+        defer {
+            if webView.navigationDelegate === loadDelegate {
+                webView.navigationDelegate = loadDelegate?.forwardingDelegate as? WKNavigationDelegate
+            }
+        }
+
+        // Retain the delegate until completion, including across view mounting.
 
         let _: Void? = try await withCheckedThrowingContinuation { continuation in
             loadDelegate = PageLoadDelegate(config: configuration, forwardingDelegate: forwardingDelegate) { result in
@@ -3859,6 +3943,22 @@ extension WebEngine {
 
 
 #if SKIP
+/// Invalidates pending link menus even if a cached view detaches and reattaches without navigation.
+private final class AndroidLinkMenuAttachmentListener: android.view.View.OnAttachStateChangeListener {
+    private weak var engine: WebEngine?
+
+    init(engine: WebEngine) {
+        self.engine = engine
+    }
+
+    override func onViewAttachedToWindow(view: android.view.View) {
+    }
+
+    override func onViewDetachedFromWindow(view: android.view.View) {
+        engine?.linkMenuGeneration += 1
+    }
+}
+
 fileprivate struct AndroidDocumentStartPlanRegistration {
     let handlers: [ScriptHandler]
     let styleIDs: [String]
@@ -4221,6 +4321,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        engine?.linkMenuGeneration += 1
         logger.log("onPageStarted: \(url)")
         logViewportProbe(stage: "page-started", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
@@ -4484,7 +4585,7 @@ extension WebEngineConfigurationNavigationDelegate: PageLoadNavigationForwarding
 fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
     #if !SKIP
-    let forwardingDelegate: AnyObject?
+    var forwardingDelegate: AnyObject?
     var suppressNextPolicyCancellationFailure = false
     #endif
     var callbackInvoked = false
@@ -4500,6 +4601,13 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.forwardingDelegate = forwardingDelegate
         #endif
         self.callback = callback
+    }
+
+    /// Resolves a waiting load when its persistent engine is explicitly discarded.
+    func cancel() {
+        guard !callbackInvoked else { return }
+        callbackInvoked = true
+        callback(.failure(CancellationError()))
     }
 
     #if SKIP
@@ -4845,11 +4953,9 @@ public extension SkipWebUIDelegate {
 /// context menu. The host app builds an array of these on demand
 /// via `WebEngineConfiguration.linkContextMenuActions` and skip-web
 /// renders them platform-natively: as `UIAction`s on iOS's WKWebView
-/// preview menu and as `android.widget.PopupMenu` items on Android.
+/// preview menu and as a centered `android.app.AlertDialog` on Android.
 ///
-/// Title-only: per-item icons aren't supported by Android's
-/// `PopupMenu` API, so we don't carry an iOS-only image here either
-/// — the title needs to convey the action's meaning unambiguously.
+/// Entries are title-only on both platforms.
 public struct WebContextMenuAction {
     public let title: String
     public let handler: (URL) -> Void
@@ -4876,6 +4982,9 @@ public struct WebContextMenuAction {
     /// JavaScript message handler names exposed through `window.webkit.messageHandlers`.
     public var scriptMessageHandlerNames: [String]
     /// Delegate that receives bridge-safe JavaScript messages.
+    /// Mounting a `WebView` with this configuration assigns this delegate to the adopted
+    /// engine, replacing its previous owner even when this value is nil. Existing document
+    /// state, user scripts, and registered message-handler names are preserved.
     public var scriptMessageDelegate: (any WebViewScriptMessageDelegate)?
     fileprivate var legacyMessageHandlers: [String: ((WebViewMessage) async -> Void)]
     @available(*, deprecated, message: "Use scriptMessageHandlerNames and scriptMessageDelegate.")
@@ -4895,12 +5004,10 @@ public struct WebContextMenuAction {
     /// On iOS the returned `WebContextMenuAction`s are surfaced as
     /// `UIAction` entries on the WKWebView's native link
     /// `UIContextMenuConfiguration`. On Android the same actions
-    /// are surfaced as `android.widget.PopupMenu` items shown at
-    /// the long-pressed location.
+    /// are surfaced in a centered `android.app.AlertDialog` titled with the link URL.
     ///
-    /// If `nil`, the platform's default link long-press behaviour
-    /// is used (WKWebView's preview menu on iOS; text-selection
-    /// action mode on Android).
+    /// A nil provider suppresses the custom menu on iOS and leaves Android long presses
+    /// to the platform. Returning no actions displays no custom menu.
     public var linkContextMenuActions: ((URL) -> [WebContextMenuAction])? = nil
     public var uiDelegate: (any SkipWebUIDelegate)?
     /// Receives main-frame navigation decisions and lifecycle events on the main actor.
@@ -5021,6 +5128,8 @@ public struct WebContextMenuAction {
     ///
     /// The returned configuration shares this configuration's resolved content-blocker runtime,
     /// so popup children reuse prepared rules and receive later runtime reapplications.
+    /// It initially shares the parent's script-message delegate. When the child is mounted,
+    /// the mounted `WebView` configuration supplies the child's current delegate instead.
     @MainActor
     public func popupChildMirroredConfiguration() -> WebEngineConfiguration {
         let copy = WebEngineConfiguration(
@@ -5046,6 +5155,7 @@ public struct WebContextMenuAction {
             capturesConsoleOutput: capturesConsoleOutput,
             contentBlockerRuntime: resolvedContentBlockerRuntime()
         )
+        copy.linkContextMenuActions = linkContextMenuActions
         #if SKIP
         copy.context = context
         copy.androidResolvedProfile = androidResolvedProfile

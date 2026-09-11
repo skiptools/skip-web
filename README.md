@@ -745,9 +745,38 @@ On Android, capture timing and capture source are independent:
 
 SkipWeb does not switch between these modes automatically. `.visibleWindowPixels` requires the WebView to be attached to a valid window. If PixelCopy is unavailable or fails, `takeSnapshot` throws `WebSnapshotError.visibleWindowPixelsCaptureFailed`.
 
+### Prepare a persistent engine without mounting
+
+```swift
+// Run on the main actor.
+let engine = WebView.preparePersistentEngine(id: tabID, configuration: config)
+if !engine.hasRequestedContent {
+    let navigator = WebViewNavigator()
+    navigator.webEngine = engine
+    navigator.load(url: linkURL)
+}
+// Later, mount WebView(configuration: config, persistentWebViewID: tabID).
+```
+
+Preparation configures JavaScript, scripts, message transport and engine services without
+attaching the native view or navigating. The persistent cache retains the engine; preparing
+an existing ID returns the same engine and original configuration. Mounting that ID adopts
+its page, history and any initial navigation still in progress. On mount, the current configuration's
+script-message delegate and window handlers replace the engine's previous callback owners, including
+when the new callback is nil. This also
+applies to navigator-owned popup engines, which initially inherit their parent's script delegate.
+The original user scripts and registered channel names remain in place; provide the mounted owner's
+`scriptMessageDelegate` when adopting an existing engine. `hasRequestedContent` also
+covers initial navigation awaiting preflight, when the platform URL can still be absent.
+`WebViewNavigator.load(url:)` reserves navigation synchronously before scheduling it, including
+across the native Swift/Android bridge. The engine owns the resulting navigation task.
+Call `removePersistentWebView(id:)` after unmounting when the owner closes or evicts the tab.
+This stops outstanding navigation and releases the cache entry. Cache limits and background
+work policy remain the application's responsibility.
+
 ### Link Context Menu (long-press)
 
-When the user long-presses a link or image-link in a `WebView`, SkipWeb can show a fully customizable native menu populated from an array of `WebContextMenuAction` items. The same closure drives both platforms — on iOS the items become `UIAction`s inside WKWebView's native preview menu, and on Android they become `android.widget.PopupMenu` items shown at the long-pressed location.
+When the user long-presses a link or image-link in a `WebView`, SkipWeb can show a fully customizable native menu populated from an array of `WebContextMenuAction` items. The same closure drives both platforms — on iOS the items become `UIAction`s inside WKWebView's native preview menu, and on Android they become a centered Android `AlertDialog` with the link URL as its title.
 
 Configure the menu by setting `WebEngineConfiguration.linkContextMenuActions` to a closure that receives the long-pressed `URL` and returns the actions to display:
 
@@ -771,9 +800,9 @@ config.linkContextMenuActions = { url in
 }
 ```
 
-`WebContextMenuAction` carries only a `title` (`String`) and a `handler` (`(URL) -> Void`). Per-item icons aren't included because Android's `PopupMenu` API doesn't render them, so the title alone must convey the action.
+`WebContextMenuAction` carries only a `title` (`String`) and a `handler` (`(URL) -> Void`). Items are title-only on both platforms.
 
-Returning an empty array (or leaving `linkContextMenuActions` as `nil`) falls back to each platform's default link long-press behaviour — WKWebView's preview menu on iOS, the text-selection action mode on Android.
+On iOS, an empty array or nil provider suppresses the custom context menu. On Android, a nil provider leaves long presses to the platform; a configured provider returning no actions displays no custom dialog.
 
 The closure is called every time the user long-presses, so dynamic actions (e.g. "Add Bookmark" / "Remove Bookmark" depending on store state) are straightforward — just branch on the URL when assembling the array.
 
