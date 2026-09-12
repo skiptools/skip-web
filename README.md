@@ -29,6 +29,44 @@ Current package dependencies are:
 - `skip-ui` from `1.54.0`
 - when `SKIP_BRIDGE` is enabled, `skip-bridge` in `0.0.0..<2.0.0` and `skip-fuse-ui` from `1.15.2`
 
+## SwiftUI WebAssembly rendering
+
+`SkipWebWasm` is the browser backend for SwiftUI-compatible Skip views. It renders the same
+Swift view tree into DOM nodes, including nested `VStack`/`HStack` composition, `Text`, `Button`,
+`TextField`, `@State`/`Binding`, and layout modifiers such as `padding` and `frame`. Flexbox and
+responsive CSS keep stack layouts usable from compact phones through wide desktop windows.
+
+Keep the normal application source spelling:
+
+```swift
+import SwiftUI
+import SkipWebWasm
+
+struct ContentView: View {
+    var body: some View {
+        VStack(spacing: 16) {
+            Text("Hello World")
+            Button("Tap") { print("tapped") }
+        }
+        .padding()
+    }
+}
+
+@main
+struct WebMain {
+    static func main() {
+        SkipWebWasm.mount { ContentView() }
+    }
+}
+```
+
+For a Wasm target, depend on the `SwiftUI` compatibility product from `skip-ui`, `SkipWebWasm`,
+and JavaScriptKit's `PackageToJS` command plugin. Set `SKIP_WEB=1` so the web view-builder and
+modifier implementations are enabled, then build with the matching Swift Wasm SDK using
+`swift package js`; run `skip web` to generate the adaptive `index.html` shell. The package's
+standard `SkipUI` product remains the Android implementation and is not replaced by the web
+backend.
+
 ## WebView: Customizable Embedded Web Browser
 
 SkipWeb provides an embedded WebView for [Skip Lite](https://skip.dev) transpiled Swift.
