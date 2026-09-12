@@ -1,6 +1,5 @@
-// Copyright (c) 2023 - 2026 Skip
-// Licensed under the GNU Affero General Public License v3.0
-// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright 2023-2026 Skip
+// SPDX-License-Identifier: MPL-2.0
 
 import JavaScriptKit
 
