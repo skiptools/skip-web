@@ -69,8 +69,7 @@ and flex/grid) over fixed pixel widths so they remain usable on phones, tablets,
 The browser page must provide the `#skip-root` mount point. The companion `skip web` command in
 `skipstone` generates an `index.html` host and `skip-web.json` manifest. By default the host loads
 the `index.js` module produced by JavaScriptKit's existing `PackageToJS` plugin and calls its
-`init()` export; custom modules may export `start(mount)` instead. Build that module with a Swift
-Wasm SDK, for example:
+`init()` export. Build that module with a Swift Wasm SDK, for example:
 
 ```shell
 swift package --swift-sdk wasm32-unknown-wasi plugin --allow-writing-to-package-directory js --output Web

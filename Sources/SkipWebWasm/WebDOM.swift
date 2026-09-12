@@ -151,7 +151,7 @@ public final class WebElement {
         guard let style = object.style.object else {
             preconditionFailure("SkipWebWasm could not access the element style object")
         }
-        _ = style.setProperty!(property, value)
+        _ = style.setProperty!(property.rawValue, value)
         return self
     }
 
@@ -271,7 +271,7 @@ public struct WebImage: WebComponent {
 }
 
 /// The responsive size classes used by the experimental browser host.
-public enum WebBreakpoint: String, Sendable {
+public enum WebBreakpoint: String, Equatable, Sendable {
     /// Phones and narrow browser windows below 600 CSS pixels.
     case compact
     /// Tablets and medium browser windows from 600 through 839 CSS pixels.
