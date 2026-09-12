@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.1
 import PackageDescription
 
 let package = Package(
@@ -12,7 +12,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/skiptools/skip.git", from: "1.8.9"),
         .package(url: "https://github.com/skiptools/skip-ui.git", from: "1.54.0"),
-        .package(url: "https://github.com/swiftwasm/JavaScriptKit.git", from: "0.58.0")
+        .package(url: "https://github.com/swiftwasm/JavaScriptKit.git", from: "0.50.0")
     ],
     targets: [
         .target(name: "SkipWeb", dependencies: [.product(name: "SkipUI", package: "skip-ui")], resources: [.process("Resources")], plugins: [.plugin(name: "skipstone", package: "skip")]),
