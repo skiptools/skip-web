@@ -559,6 +559,54 @@ final class WebContentBlockerTests: XCTestCase {
     }
 
     #if SKIP
+    /// Exercises the real navigation callback before a popup has loaded its first page.
+    func testAndroidNavigationWithoutCurrentPagePreservesNilContext() throws {
+        try assertAndroidNavigationPageContext(currentPageURL: nil, expectedURL: nil)
+    }
+
+    /// Empty Android URLs must not reach the native Swift URL bridge.
+    func testAndroidNavigationWithEmptyCurrentPagePreservesNilContext() throws {
+        try assertAndroidNavigationPageContext(currentPageURL: "", expectedURL: nil)
+    }
+
+    /// A loaded page still supplies its URL to content blocking.
+    func testAndroidNavigationWithCurrentPagePreservesContext() throws {
+        let page = "https://publisher.example/article"
+        try assertAndroidNavigationPageContext(currentPageURL: page, expectedURL: URL(string: page))
+    }
+
+    /// Sends an HTTP navigation through the installed WebView client and records the provider input.
+    private func assertAndroidNavigationPageContext(currentPageURL: String?, expectedURL: URL?) throws {
+        let context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        // SKIP INSERT: val webView = object : android.webkit.WebView(context) {
+        // SKIP INSERT:     override fun getUrl(): String? = currentPageURL
+        // SKIP INSERT: }
+        // SKIP INSERT: val request = object : android.webkit.WebResourceRequest {
+        // SKIP INSERT:     override fun getUrl() = android.net.Uri.parse("https://destination.example/page")
+        // SKIP INSERT:     override fun isForMainFrame() = true
+        // SKIP INSERT:     override fun isRedirect() = false
+        // SKIP INSERT:     override fun hasGesture() = true
+        // SKIP INSERT:     override fun getMethod() = "GET"
+        // SKIP INSERT:     override fun getRequestHeaders() = mutableMapOf<String, String>()
+        // SKIP INSERT: }
+        let provider = RecordingContentBlockingProvider(decision: .block)
+        let engine = WebEngine(
+            configuration: WebEngineConfiguration(
+                contentBlockers: WebContentBlockerConfiguration(androidMode: .custom(provider))
+            ),
+            webView: webView
+        )
+        defer { webView.destroy() }
+        let client = try XCTUnwrap(engine.webView.webViewClient as? AndroidEngineWebViewClient)
+
+        XCTAssertTrue(client.shouldOverrideUrlLoading(view: webView, request: request))
+        XCTAssertEqual(provider.requests.count, 1)
+        let recorded = try XCTUnwrap(provider.requests.first)
+        XCTAssertEqual(recorded.mainDocumentURL, expectedURL)
+        XCTAssertEqual(recorded.url.absoluteString, "https://destination.example/page")
+        XCTAssertTrue(recorded.isForMainFrame)
+    }
+
     // Verifies redirect navigation checks preserve the initiating page and Android request facts.
     func testAndroidMainFrameNavigationDecisionUsesCurrentPageContext() throws {
         let currentPageURL = try XCTUnwrap(URL(string: "https://primewire.mov/movie/example"))

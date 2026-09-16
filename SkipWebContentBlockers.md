@@ -214,6 +214,10 @@ Android also evaluates HTTP(S) main-frame navigations through the configured
 the currently displayed page in `mainDocumentURL`, allowing a provider to distinguish the source
 page from the requested destination. Non-HTTP(S) schemes bypass this content-rule check.
 
+Before a new popup has loaded a page, its current URL may be missing or empty. SkipWeb passes
+`mainDocumentURL: nil` in either case, avoiding an empty URL that cannot be converted to native
+Swift. The destination still goes through the provider's normal allow/block decision.
+
 When the provider returns `.block`, SkipWeb cancels the navigation before the destination document
 loads. A `WebView` can observe that cancellation through the Android-only
 `onContentRuleBlockedNavigation` callback:

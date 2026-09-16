@@ -4434,7 +4434,14 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
-        let currentPageURL = URL(string: view.getUrl() ?? "")
+        // A new popup may have no current page. Skip accepts an empty URL, but
+        // native Swift rejects it, so preserve the missing context across the bridge.
+        let currentPageURL: URL?
+        if let currentPage = view.getUrl(), !currentPage.isEmpty {
+            currentPageURL = URL(string: currentPage)
+        } else {
+            currentPageURL = nil
+        }
         let isRedirect = WebEngine.androidRequestIsRedirect(request)
         logger.log(
             "shouldOverrideUrlLoading source=\(currentPageURL?.absoluteString ?? "<nil>") target=\(request.url) mainFrame=\(request.isForMainFrame) redirect=\(String(describing: isRedirect)) gesture=\(request.hasGesture())"
