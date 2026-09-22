@@ -677,9 +677,9 @@ public extension SkipWebNavigationDelegate {
 @MainActor
 private final class WebEngineConfigurationNavigationDelegate: NSObject, WKNavigationDelegate {
     weak var engine: WebEngine?
-    let navigationDelegate: any SkipWebNavigationDelegate
+    let navigationDelegate: (any SkipWebNavigationDelegate)?
 
-    init(engine: WebEngine, navigationDelegate: any SkipWebNavigationDelegate) {
+    init(engine: WebEngine, navigationDelegate: (any SkipWebNavigationDelegate)?) {
         self.engine = engine
         self.navigationDelegate = navigationDelegate
     }
@@ -694,33 +694,37 @@ private final class WebEngineConfigurationNavigationDelegate: NSObject, WKNaviga
               let url = navigationAction.request.url else {
             return (.allow, preferences)
         }
-        let shouldCancel = navigationDelegate.webEngine(engine, shouldOverrideURLLoading: url)
+        let shouldCancel = navigationDelegate?.webEngine(engine, shouldOverrideURLLoading: url) ?? false
+        if !shouldCancel, engine.configuration.desktopWebsiteForURL != nil {
+            engine.prepareWebsiteMode(for: url)
+            preferences.preferredContentMode = engine.isDesktopWebsite ? .desktop : .mobile
+        }
         return (shouldCancel ? .cancel : .allow, preferences)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidStartProvisionalNavigation(engine)
+        navigationDelegate?.webEngineDidStartProvisionalNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidCommitNavigation(engine)
+        navigationDelegate?.webEngineDidCommitNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidFinishNavigation(engine)
+        navigationDelegate?.webEngineDidFinishNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard let engine else { return }
-        navigationDelegate.webEngine(engine, didFailNavigation: error)
+        navigationDelegate?.webEngine(engine, didFailNavigation: error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard let engine else { return }
-        navigationDelegate.webEngine(engine, didFailNavigation: error)
+        navigationDelegate?.webEngine(engine, didFailNavigation: error)
     }
 }
 #endif
@@ -1622,6 +1626,50 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 /// and evaluate JavaScript.
 @MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
+    #if !SKIP && DEBUG
+    private var nativeTraceCounts: [String: Int] = [:]
+    private var nativeTraceTimes: [String: Date] = [:]
+
+    /// Opt-in, bounded native lifecycle diagnostics. Counters never participate in observation.
+    func traceNative(_ event: String, _ detail: @autoclosure () -> String = "", repeated: Bool = false) {
+        guard let log = configuration.nativeDiagnosticLog else { return }
+        let count = (nativeTraceCounts[event] ?? 0) + 1
+        nativeTraceCounts[event] = count
+        let now = Date()
+        if repeated, count > 3, now.timeIntervalSince(nativeTraceTimes[event] ?? .distantPast) < 1 { return }
+        nativeTraceTimes[event] = now
+        let delegate = webView.navigationDelegate.map { String(describing: ObjectIdentifier($0)) } ?? "nil"
+        log("event=\(event) count=\(count) engine=\(ObjectIdentifier(self)) view=\(ObjectIdentifier(webView)) delegate=\(delegate) retired=\(persistentOwnershipEnded) loading=\(webView.isLoading) url=\(webView.url?.absoluteString ?? "nil") \(detail())")
+    }
+    #endif
+    /// Effective presentation of the current main-frame navigation.
+    public private(set) var isDesktopWebsite = false
+    private let websiteModeController = WebWebsiteModeController()
+
+    /// Resolves native user-agent and viewport settings before a main-frame request is dispatched.
+    public func prepareWebsiteMode(for url: URL) {
+        isDesktopWebsite = websiteModeController.apply(url: url, engine: self)
+    }
+
+    #if SKIP
+    /// Changes the agent after the intercepted GET has been cancelled. Changing it inside
+    /// shouldOverrideUrlLoading can restart the old page and send the wrong HTTP identity.
+    fileprivate func replaceAndroidWebsiteModeNavigation(_ request: android.webkit.WebResourceRequest, url: URL) {
+        let headers = java.util.HashMap<String, String>()
+        for (name, value) in request.requestHeaders {
+            let key = name.lowercased()
+            if key != "user-agent" && !key.hasPrefix("sec-ch-ua") { headers.put(name, value) }
+        }
+        webView.post {
+            if !self.persistentOwnershipEnded {
+                self.webView.stopLoading()
+                self.prepareWebsiteMode(for: url)
+                self.webView.loadUrl(url.absoluteString, headers)
+            }
+        }
+    }
+    #endif
+
     public let webView: PlatformWebView
     private let usesCompatibilityContentBlockerRuntime: Bool
     /// The prepared content-blocker runtime used by this engine, when blocking is configured.
@@ -1668,6 +1716,9 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
     func scheduleLoad(url: URL) {
+        #if !SKIP && DEBUG
+        traceNative("schedule-load", "target=\(url) existingTask=\(scheduledLoad != nil)")
+        #endif
         guard !persistentOwnershipEnded else { return }
         markContentRequested()
         if scheduledLoad != nil { stopLoading() }
@@ -1676,6 +1727,9 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             do {
                 try await self.load(url: url)
             } catch {
+                #if !SKIP && DEBUG
+                self.traceNative("scheduled-load-error", "cancelled=\(Task.isCancelled) error=\(error)")
+                #endif
                 if !Task.isCancelled {
                     logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
                 }
@@ -1685,6 +1739,9 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Invalidates queued navigation before explicit persistent-cache removal.
     func endPersistentOwnership() {
+        #if !SKIP && DEBUG
+        traceNative("ownership-ended")
+        #endif
         persistentOwnershipEnded = true
         stopLoading()
     }
@@ -1773,12 +1830,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Installs the configuration delegate before a detached engine begins navigation.
     private func installConfigurationNavigationDelegateIfNeeded() {
         guard webView.navigationDelegate == nil,
-              let navigationDelegate = configuration.navigationDelegate else {
+              configuration.navigationDelegate != nil || configuration.desktopWebsiteForURL != nil else {
             return
         }
         let adapter = WebEngineConfigurationNavigationDelegate(
             engine: self,
-            navigationDelegate: navigationDelegate
+            navigationDelegate: configuration.navigationDelegate
         )
         configurationNavigationDelegate = adapter
         webView.navigationDelegate = adapter
@@ -1786,6 +1843,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func reload() {
+        if let url { prepareWebsiteMode(for: url) }
         if profileSetupError != nil {
             return
         }
@@ -1803,6 +1861,9 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
+        #if !SKIP && DEBUG
+        traceNative("stop-loading")
+        #endif
         scheduledLoad?.cancel()
         scheduledLoad = nil
         linkMenuGeneration += 1
@@ -1846,6 +1907,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             }
         }
         if targetIndex >= 0 && targetIndex != currentIndex {
+            if let url = URL(string: targetURL) { prepareWebsiteMode(for: url) }
             let steps = targetIndex - currentIndex
             if webView.canGoBackOrForward(steps) {
                 webView.goBackOrForward(steps)
@@ -1864,6 +1926,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         }
         #else
         #if SKIP
+        if let targetURL = pendingHistoryNavigationURL(offset: -1) { prepareWebsiteMode(for: targetURL) }
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
         #endif
         webView.goBack()
@@ -1880,6 +1943,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         }
         #else
         #if SKIP
+        if let targetURL = pendingHistoryNavigationURL(offset: 1) { prepareWebsiteMode(for: targetURL) }
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
         #endif
         webView.goForward()
@@ -2848,11 +2912,16 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        #if !SKIP && DEBUG
+        traceNative("async-load-begin", "target=\(url)")
+        defer { traceNative("async-load-exit", "cancelled=\(Task.isCancelled)") }
+        #endif
         markContentRequested()
         linkMenuGeneration += 1
         try Task.checkCancellation()
         if persistentOwnershipEnded { throw CancellationError() }
         try throwProfileSetupErrorIfNeeded()
+        prepareWebsiteMode(for: url)
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
         #if SKIP
@@ -2862,7 +2931,13 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
         try Task.checkCancellation()
         if persistentOwnershipEnded { throw CancellationError() }
+        #if !SKIP && DEBUG
+        traceNative("blockers-ready", "cancelled=\(Task.isCancelled)")
+        #endif
         try await awaitPageLoaded {
+            #if !SKIP && DEBUG
+            self.traceNative("native-load-dispatch", "target=\(url)")
+            #endif
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
             #else
@@ -3821,7 +3896,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                 continuation.resume(with: result)
             }
 
+            loadDelegate?.websiteModeEngine = self
             self.webView.navigationDelegate = loadDelegate
+            #if DEBUG
+            self.traceNative("load-delegate-installed", "forwarding=\(String(describing: previousNavigationDelegate))")
+            #endif
             logger.log("WebEngine: awaitPageLoaded block()")
             block()
         }
@@ -4469,7 +4548,14 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
                 return true
             }
         }
-        return legacyNavigationDelegate?.shouldOverrideUrlLoading(view, request) ?? false
+        if legacyNavigationDelegate?.shouldOverrideUrlLoading(view, request) == true { return true }
+        if let engine, let url = mainFrameURL,
+           let desktop = engine.configuration.desktopWebsiteForURL?(url),
+           desktop != engine.isDesktopWebsite, request.method == "GET" {
+            engine.replaceAndroidWebsiteModeNavigation(request, url: url)
+            return true
+        }
+        return false
     }
 }
 
@@ -4593,6 +4679,7 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
     #if !SKIP
     var forwardingDelegate: AnyObject?
+    weak var websiteModeEngine: WebEngine?
     var suppressNextPolicyCancellationFailure = false
     #endif
     var callbackInvoked = false
@@ -4627,6 +4714,9 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     }
     #else
     @MainActor func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-finish", "forwarding=\(String(describing: forwardingDelegate))")
+        #endif
         (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFinish: navigation)
         logger.info("webView: \(webView) didFinish: \(navigation!)")
         if self.callbackInvoked { return }
@@ -4644,6 +4734,9 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     }
     #else
     @MainActor func webView(_ webView: PlatformWebView, didFail navigation: WebNavigation!, withError error: Error) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-fail", "error=\(error)")
+        #endif
         (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFail: navigation, withError: error)
         logger.info("webView: \(webView) didFail: \(navigation!) error: \(error)")
         if self.callbackInvoked { return }
@@ -4652,14 +4745,23 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     }
 
     @MainActor func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-start", "forwarding=\(String(describing: forwardingDelegate))")
+        #endif
         (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didStartProvisionalNavigation: navigation)
     }
 
     @MainActor func webView(_ webView: PlatformWebView, didCommit navigation: WebNavigation!) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-commit", "forwarding=\(String(describing: forwardingDelegate))")
+        #endif
         (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didCommit: navigation)
     }
 
     @MainActor func webView(_ webView: PlatformWebView, didFailProvisionalNavigation navigation: WebNavigation!, withError error: Error) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-provisional-fail", "error=\(error)")
+        #endif
         if suppressNextPolicyCancellationFailure, Self.isPolicyCancellation(error) {
             suppressNextPolicyCancellationFailure = false
             if !callbackInvoked {
@@ -4677,12 +4779,23 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     }
 
     @MainActor func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-policy-enter", "main=\(navigationAction.targetFrame?.isMainFrame == true) method=\(navigationAction.request.httpMethod ?? "nil") target=\(navigationAction.request.url?.absoluteString ?? "nil") forwarding=\(String(describing: forwardingDelegate))")
+        #endif
+        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url,
+           let engine = websiteModeEngine, engine.configuration.desktopWebsiteForURL != nil {
+            engine.prepareWebsiteMode(for: url)
+            preferences.preferredContentMode = engine.isDesktopWebsite ? .desktop : .mobile
+        }
         guard let decision = await (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, decidePolicyFor: navigationAction, preferences: preferences) else {
             return (.allow, preferences)
         }
         if decision.0 == .cancel {
             suppressNextPolicyCancellationFailure = (forwardingDelegate as? (any PageLoadNavigationForwarding))?.consumePageLoadPolicyCancellationSuppression() ?? false
         }
+        #if DEBUG
+        websiteModeEngine?.traceNative("delegate-policy-result", "decision=\(decision.0)")
+        #endif
         return decision
     }
 
@@ -4984,6 +5097,16 @@ public struct WebContextMenuAction {
     public var pageZoom: CGFloat
     public var isOpaque: Bool
     public var customUserAgent: String?
+    #if !SKIP && DEBUG
+    /// Optional debug-only native lifecycle sink. Nil leaves diagnostics disabled.
+    // SKIP @nobridge
+    public var nativeDiagnosticLog: ((String) -> Void)?
+    #endif
+    /// Optional main-frame presentation policy, called on the UI thread before navigation.
+    /// Desktop uses a Safari identity on iOS and the installed Chromium major on Android.
+    /// Returning false restores mobile settings and customUserAgent when supplied; otherwise
+    /// Android uses a mobile Chrome identity and iOS uses its platform default.
+    public var desktopWebsiteForURL: ((URL) -> Bool)?
     public var profile: WebProfile
     public var userScripts: [WebViewUserScript]
     /// JavaScript message handler names exposed through `window.webkit.messageHandlers`.
@@ -5024,6 +5147,7 @@ public struct WebContextMenuAction {
     /// before that engine is mounted in a ``WebView``. A mounted Apple `WebView` uses its
     /// coordinator, state, and initializer callbacks instead.
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
+
     /// Optional content-blocker configuration applied to engines created from this configuration.
     ///
     /// This compatibility property creates an implicit runtime. After changing the value, call
@@ -5162,6 +5286,10 @@ public struct WebContextMenuAction {
             capturesConsoleOutput: capturesConsoleOutput,
             contentBlockerRuntime: resolvedContentBlockerRuntime()
         )
+        #if !SKIP && DEBUG
+        copy.nativeDiagnosticLog = nativeDiagnosticLog
+        #endif
+        copy.desktopWebsiteForURL = desktopWebsiteForURL
         copy.linkContextMenuActions = linkContextMenuActions
         #if SKIP
         copy.context = context
