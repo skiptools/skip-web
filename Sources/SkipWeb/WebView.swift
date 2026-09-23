@@ -887,6 +887,7 @@ extension WebView : ViewRepresentable {
         // Adopt the mounted owner's callbacks when reusing a prepared or popup engine.
         // In particular, a popup must not retain its parent's script-message delegate.
         webEngine.configuration.scriptMessageDelegate = config.scriptMessageDelegate
+        webEngine.configuration.httpAuthenticationHandler = config.httpAuthenticationHandler
         webEngine.configuration.uiDelegate = config.uiDelegate
         #if SKIP
         webEngine.configuration.androidCreateWindowHandler = config.androidCreateWindowHandler
@@ -1369,6 +1370,7 @@ extension WebView : ViewRepresentable {
             self.scriptCaller = scriptCaller
         }
         self.config = webView.config
+        navigator.webEngine?.configuration.httpAuthenticationHandler = webView.config.httpAuthenticationHandler
         let snapshot = proxySnapshot()
         updateScrollProxy(
             contentOffset: snapshot.contentOffset,
@@ -2067,6 +2069,16 @@ extension WebViewCoordinator: WebUIDelegate {
 @available(macOS 14.0, iOS 17.0, *)
 extension WebViewCoordinator: WebNavigationDelegate {
     @MainActor
+    public func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let engine = navigator.webEngine else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        engine.receiveHTTPAuthentication(challenge, completionHandler: completionHandler)
+    }
+
+    @MainActor
     public func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         logger.log("webView \(webView) didFinish navigation \(webView.url?.absoluteString ?? "nil")")
         
@@ -2131,6 +2143,7 @@ extension WebViewCoordinator: WebNavigationDelegate {
 
     @MainActor
     public func webView(_ webView: PlatformWebView, didStartProvisionalNavigation navigation: WebNavigation!) {
+        navigator.webEngine?.beginHTTPAuthenticationNavigation()
         state.updatePageState(webView: webView)
         self.webView.state.estimatedProgress = 0.0
         self.webView.state.isProvisionallyNavigating = true

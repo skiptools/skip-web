@@ -1108,3 +1108,27 @@ string sink for native lifecycle, navigation, observation and ownership events. 
 and is not exposed in release builds. Repeated update/observation events carry cumulative counts
 and are rate-limited; diagnostic counters are not observable. This is intended for tracing view
 replacement failures without changing navigation policy.
+
+### HTTP authentication
+
+`WebEngineConfiguration.httpAuthenticationHandler` receives an engine and a
+`WebHTTPAuthenticationChallenge`. Present your UI, then call
+`challenge.useCredential(username:password:)` or `challenge.cancel()` on the UI
+thread. The challenge exposes `host`, optional `realm`, `isRetry`, and `id`.
+`onResolved` lets a presenter dismiss UI when navigation invalidates a request;
+`isResolved` and single-use responses make late submissions harmless.
+
+On iOS this handles HTTP Basic challenges through mounted, detached, and async
+loading delegates. Other authentication methods use WebKit's default handling.
+On Android it uses `onReceivedHttpAuthRequest`; that callback does not expose the
+authentication scheme. Missing handlers cancel HTTP authentication requests.
+Popup configurations inherit the handler but pass the actual child engine.
+`httpAuthenticationIdentity` is stable across native bridge projections and can
+be used to select the correct prompt owner.
+
+Requests are cancelled when loading stops, replacement navigation starts, or a
+persistent engine is removed. User cancellation suppresses the same protection
+space until the next navigation. Credentials are supplied to the web engine only:
+iOS uses `URLCredential.Persistence.none`, and Android does not write the HTTP
+authentication password database. Any in-memory reuse is controlled by the web
+engine; this API does not promise cross-tab reuse or persist passwords.

@@ -702,8 +702,18 @@ private final class WebEngineConfigurationNavigationDelegate: NSObject, WKNaviga
         return (shouldCancel ? .cancel : .allow, preferences)
     }
 
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let engine else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        engine.receiveHTTPAuthentication(challenge, completionHandler: completionHandler)
+    }
+
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard let engine else { return }
+        engine.beginHTTPAuthenticationNavigation()
         navigationDelegate?.webEngineDidStartProvisionalNavigation(engine)
     }
 
@@ -1626,6 +1636,56 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 /// and evaluate JavaScript.
 @MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
+    /// Stable identity for associating authentication UI with this engine across bridge projections.
+    public let httpAuthenticationIdentity: String = UUID().uuidString
+    private let httpAuthenticationRequests = WebHTTPAuthenticationRequests()
+
+    /// Cancels pending requests before a new top-level navigation begins.
+    // SKIP @nobridge
+    func beginHTTPAuthenticationNavigation() {
+        httpAuthenticationRequests.beginNavigation()
+    }
+
+    // SKIP @nobridge
+    private func cancelHTTPAuthenticationRequests() {
+        httpAuthenticationRequests.cancelAll()
+    }
+
+    /// Owns a platform response until the browser answers or the engine invalidates it.
+    // SKIP @nobridge
+    func receiveHTTPAuthentication(host: String, realm: String?, protectionSpace: String,
+                                   isRetry: Bool, respond: @escaping (String?, String?) -> Void) {
+        guard !persistentOwnershipEnded,
+              let handler = configuration.httpAuthenticationHandler else {
+            respond(nil, nil)
+            return
+        }
+        if let request = httpAuthenticationRequests.makeRequest(host: host, realm: realm,
+            protectionSpace: protectionSpace, isRetry: isRetry, respond: respond) {
+            handler(self, request)
+        }
+    }
+
+    #if !SKIP
+    /// Handles Basic authentication while leaving other challenge types to WebKit.
+    func receiveHTTPAuthentication(_ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodHTTPBasic else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let key = "\(space.protocol ?? "")|\(space.host)|\(space.port)|\(space.realm ?? "")|\(space.isProxy())"
+        receiveHTTPAuthentication(host: space.host, realm: space.realm, protectionSpace: key,
+                                  isRetry: challenge.previousFailureCount > 0) { username, password in
+            if let username, let password {
+                completionHandler(.useCredential, URLCredential(user: username, password: password, persistence: .none))
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        }
+    }
+    #endif
     #if !SKIP && DEBUG
     private var nativeTraceCounts: [String: Int] = [:]
     private var nativeTraceTimes: [String: Date] = [:]
@@ -1830,7 +1890,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Installs the configuration delegate before a detached engine begins navigation.
     private func installConfigurationNavigationDelegateIfNeeded() {
         guard webView.navigationDelegate == nil,
-              configuration.navigationDelegate != nil || configuration.desktopWebsiteForURL != nil else {
+              configuration.navigationDelegate != nil || configuration.desktopWebsiteForURL != nil || configuration.httpAuthenticationHandler != nil else {
             return
         }
         let adapter = WebEngineConfigurationNavigationDelegate(
@@ -1843,6 +1903,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func reload() {
+        beginHTTPAuthenticationNavigation()
         if let url { prepareWebsiteMode(for: url) }
         if profileSetupError != nil {
             return
@@ -1861,6 +1922,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
+        cancelHTTPAuthenticationRequests()
         #if !SKIP && DEBUG
         traceNative("stop-loading")
         #endif
@@ -1882,6 +1944,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func go(to item: WebHistoryItem) {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -1917,6 +1980,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func goBack() {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -1934,6 +1998,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func goForward() {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -2880,6 +2945,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
+        beginHTTPAuthenticationNavigation()
         markContentRequested()
         linkMenuGeneration += 1
         if profileSetupError != nil {
@@ -2912,6 +2978,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        beginHTTPAuthenticationNavigation()
         #if !SKIP && DEBUG
         traceNative("async-load-begin", "target=\(url)")
         defer { traceNative("async-load-exit", "cancelled=\(Task.isCancelled)") }
@@ -4400,6 +4467,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        engine?.beginHTTPAuthenticationNavigation()
         engine?.linkMenuGeneration += 1
         logger.log("onPageStarted: \(url)")
         logViewportProbe(stage: "page-started", view: view, url: url)
@@ -4444,9 +4512,15 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
-        logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
-        embeddedNavigationClient?.onReceivedHttpAuthRequest(view, handler, host, realm)
-        legacyNavigationDelegate?.onReceivedHttpAuthRequest(view, handler, host, realm)
+        guard let engine else {
+            handler.cancel()
+            return
+        }
+        engine.receiveHTTPAuthentication(host: host, realm: realm,
+            protectionSpace: "\(host)|\(realm)", isRetry: !handler.useHttpAuthUsernamePassword()) { username, password in
+            if let username, let password { handler.proceed(username, password) }
+            else { handler.cancel() }
+        }
     }
 
     override func onReceivedHttpError(view: PlatformWebView, request: android.webkit.WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
@@ -4713,6 +4787,15 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.callback(Result<Void, Error>.success(()))
     }
     #else
+    @MainActor func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let engine = websiteModeEngine else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        engine.receiveHTTPAuthentication(challenge, completionHandler: completionHandler)
+    }
+
     @MainActor func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         #if DEBUG
         websiteModeEngine?.traceNative("delegate-finish", "forwarding=\(String(describing: forwardingDelegate))")
@@ -5148,6 +5231,10 @@ public struct WebContextMenuAction {
     /// coordinator, state, and initializer callbacks instead.
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
 
+    /// Receives HTTP authentication requests. Without a handler, requests are cancelled.
+    /// Retained requests must be answered with credentials or cancellation on the UI thread.
+    public var httpAuthenticationHandler: ((WebEngine, WebHTTPAuthenticationChallenge) -> Void)?
+
     /// Optional content-blocker configuration applied to engines created from this configuration.
     ///
     /// This compatibility property creates an implicit runtime. After changing the value, call
@@ -5289,6 +5376,7 @@ public struct WebContextMenuAction {
         #if !SKIP && DEBUG
         copy.nativeDiagnosticLog = nativeDiagnosticLog
         #endif
+        copy.httpAuthenticationHandler = httpAuthenticationHandler
         copy.desktopWebsiteForURL = desktopWebsiteForURL
         copy.linkContextMenuActions = linkContextMenuActions
         #if SKIP
