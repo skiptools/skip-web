@@ -264,6 +264,7 @@ public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Send
 public struct AndroidCosmeticRule: Equatable, Sendable {
     public var hiddenSelectors: [String]
     public var urlFilterPattern: String?
+    public var urlFilterIsCaseSensitive: Bool
     public var allowedOriginRules: [String]
     public var ifDomainList: [String]
     public var unlessDomainList: [String]
@@ -277,12 +278,22 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
         ifDomainList: [String] = [],
         unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart,
+        urlFilterIsCaseSensitive: Bool = true
     )
 }
 ```
 
 Think of the Android cosmetic API as "selectors plus guards". `SkipWeb` is responsible for turning those selectors into `display: none !important` when a frame actually matches.
+
+`urlFilterIsCaseSensitive` defaults to `true` for compatibility with existing custom
+providers. Set it explicitly when translating a source rule's case-sensitivity setting.
+It applies to both document-start and lifecycle injection.
+
+For `ifDomainList` and `unlessDomainList`, `example.com` matches only that host,
+`*.example.com` matches only its subdomains, and `*example.com` matches both the host
+and its subdomains. Matching respects domain-label boundaries: `*example.com` does
+not match `badexample.com`.
 
 Practical example:
 

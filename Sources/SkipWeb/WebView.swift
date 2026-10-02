@@ -639,9 +639,6 @@ struct WebViewClient : android.webkit.WebViewClient {
         }
         let result = shouldOverrideUrlLoadingHandler?(url, request.isForMainFrame) ?? false
         if result {
-            #if !SKIP && DEBUG
-            traceNative("coordinator-policy-cancel", "reason=host-override target=\(url)")
-            #endif
             logger.log("Override URL loading for \(url)")
         }
         return result
@@ -738,15 +735,18 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
         childEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: childEngine), "skipWebAndroidMessageHandler")
         childEngine.installAndroidScriptMessageFacadeIfNeeded()
         childEngine.installAndroidDocumentStartUserScriptsIfNeeded()
+        // A detached popup must not publish its URL, title, or history into the opener.
+        // setupWebView replaces these listeners with the child's owner when mounted.
+        let childState = WebViewState()
         childEngine.webView.setDownloadListener(WebViewDownloadListener(
-            state: self.webView.state,
+            state: childState,
             onDownloadRequested: self.webView.onDownloadRequested
         ))
         childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
-            state: self.webView.state,
-            onNavigationCommitted: self.webView.onNavigationCommitted,
-            onNavigationFinished: self.webView.onNavigationFinished,
-            onNavigationFailed: self.webView.onNavigationFailed,
+            state: childState,
+            onNavigationCommitted: nil,
+            onNavigationFinished: nil,
+            onNavigationFailed: nil,
             onContentRuleBlockedNavigation: self.webView.onContentRuleBlockedNavigation,
             shouldOverrideUrlLoadingHandler: self.webView.shouldOverrideUrlLoading
         ))
@@ -1020,9 +1020,6 @@ extension WebView : ViewRepresentable {
     }
 
     public func update(webView: PlatformWebView, coordinator: WebViewCoordinator? = nil) {
-        #if !SKIP && DEBUG
-        navigator.webEngine?.traceNative("representable-update", "coordinator=\(String(describing: coordinator.map { ObjectIdentifier($0) })) renderedView=\(ObjectIdentifier(webView)) state=\(ObjectIdentifier(state))", repeated: true)
-        #endif
         coordinator?.update(from: self)
         #if !SKIP
         if let coordinator, webView.navigationDelegate == nil {
@@ -1174,9 +1171,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.title)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] title in
-                #if DEBUG
-                coordinator?.traceNative("kvo-title", "value=\(String(describing: title))", repeated: true)
-                #endif
                 if let title = title, !title.isEmpty {
                     coordinator?.state.pageTitle = title
                 }
@@ -1186,9 +1180,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.url)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] url in
-                #if DEBUG
-                coordinator?.traceNative("kvo-url", "value=\(String(describing: url))", repeated: true)
-                #endif
                 coordinator?.state.url = url
             }
             .store(in: &coordinator.subscriptions)
@@ -1196,9 +1187,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.estimatedProgress)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] progress in
-                #if DEBUG
-                coordinator?.traceNative("kvo-estimatedProgress", "value=\(String(describing: progress))", repeated: true)
-                #endif
                 withAnimation(progress == 0.0 ? .none : .interpolatingSpring) {
                     coordinator?.state.estimatedProgress = progress
                 }
@@ -1208,9 +1196,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.themeColor)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] themeColor in
-                #if DEBUG
-                coordinator?.traceNative("kvo-themeColor", "value=\(String(describing: themeColor))", repeated: true)
-                #endif
                 coordinator?.state.themeColor = themeColor.flatMap(Color.init(uiColor:))
             }
             .store(in: &coordinator.subscriptions)
@@ -1218,9 +1203,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.underPageBackgroundColor)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] backgroundColor in
-                #if DEBUG
-                coordinator?.traceNative("kvo-underPageBackgroundColor", "value=\(String(describing: backgroundColor))", repeated: true)
-                #endif
                 coordinator?.state.backgroundColor = backgroundColor.flatMap(Color.init(uiColor:))
             }
             .store(in: &coordinator.subscriptions)
@@ -1228,9 +1210,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.canGoBack)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] canGoBack in
-                #if DEBUG
-                coordinator?.traceNative("kvo-canGoBack", "value=\(String(describing: canGoBack))", repeated: true)
-                #endif
                 coordinator?.state.canGoBack = canGoBack
             }
             .store(in: &coordinator.subscriptions)
@@ -1238,9 +1217,6 @@ extension WebView : ViewRepresentable {
         webView.publisher(for: \.canGoForward)
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] canGoForward in
-                #if DEBUG
-                coordinator?.traceNative("kvo-canGoForward", "value=\(String(describing: canGoForward))", repeated: true)
-                #endif
                 coordinator?.state.canGoForward = canGoForward
             }
             .store(in: &coordinator.subscriptions)
@@ -1284,19 +1260,7 @@ extension WebView : ViewRepresentable {
     }
 
     #if canImport(UIKit)
-    public func makeUIView(context: Context) -> WKWebView {
-        let engine = create(from: context)
-        #if DEBUG
-        engine.traceNative("representable-create", "coordinator=\(ObjectIdentifier(context.coordinator)) state=\(ObjectIdentifier(state))")
-        #endif
-        return engine.webView
-    }
-
-    public static func dismantleUIView(_ uiView: WKWebView, coordinator: WebViewCoordinator) {
-        #if DEBUG
-        coordinator.traceNative("representable-dispose", "renderedView=\(ObjectIdentifier(uiView))")
-        #endif
-    }
+    public func makeUIView(context: Context) -> WKWebView { create(from: context).webView }
     public func updateUIView(_ uiView: WKWebView, context: Context) { update(webView: uiView, coordinator: context.coordinator) }
     #elseif canImport(AppKit)
     public func makeNSView(context: Context) -> WKWebView { create(from: context).webView }
@@ -1353,24 +1317,20 @@ extension WebView : ViewRepresentable {
 //        }
     }
 
-    #if !SKIP && DEBUG
-    /// Reports the callback/observation source without mutating published view state.
-    func traceNative(_ event: String, _ detail: @autoclosure () -> String = "", repeated: Bool = false) {
-        navigator.webEngine?.traceNative(event, "coordinator=\(ObjectIdentifier(self)) state=\(ObjectIdentifier(state)) \(detail())", repeated: repeated)
-    }
-    #endif
 
     func update(from webView: WebView) {
-        #if !SKIP && DEBUG
-        traceNative("coordinator-update", "nextNavigator=\(ObjectIdentifier(webView.navigator)) nextState=\(ObjectIdentifier(webView.state)) stateRebound=\(state !== webView.state)", repeated: true)
-        #endif
         self.webView = webView
         self.navigator = webView.navigator
         if let scriptCaller = webView.scriptCaller {
             self.scriptCaller = scriptCaller
         }
         self.config = webView.config
-        navigator.webEngine?.configuration.httpAuthenticationHandler = webView.config.httpAuthenticationHandler
+        // A shared configuration already has the current handler. Writing its observed
+        // closure back to itself would schedule another SwiftUI update indefinitely.
+        if let engineConfiguration = navigator.webEngine?.configuration,
+           engineConfiguration !== webView.config {
+            engineConfiguration.httpAuthenticationHandler = webView.config.httpAuthenticationHandler
+        }
         let snapshot = proxySnapshot()
         updateScrollProxy(
             contentOffset: snapshot.contentOffset,
@@ -1470,9 +1430,6 @@ extension WebView : ViewRepresentable {
                            isTracking: Bool,
                            isDragging: Bool,
                            isDecelerating: Bool) {
-        #if !SKIP && DEBUG
-        traceNative("scroll-proxy-write", "offset=\(contentOffset) size=\(contentSize) visible=\(visibleSize) tracking=\(isTracking) dragging=\(isDragging) caller=\(Thread.callStackSymbols.prefix(7).joined(separator: " | "))", repeated: true)
-        #endif
         scrollViewProxy.update(
             contentOffset: WebScrollPoint(x: Double(contentOffset.x), y: Double(contentOffset.y)),
             contentSize: WebScrollSize(width: Double(contentSize.width), height: Double(contentSize.height)),
@@ -2160,18 +2117,12 @@ extension WebViewCoordinator: WebNavigationDelegate {
         }
 
         let isMainFrame = navigationAction.targetFrame?.isMainFrame == true
-        #if !SKIP && DEBUG
-        traceNative("coordinator-policy", "main=\(isMainFrame) method=\(navigationAction.request.httpMethod ?? "nil") target=\(url)")
-        #endif
         if isMainFrame, let engine = navigator.webEngine, engine.configuration.desktopWebsiteForURL != nil {
             engine.prepareWebsiteMode(for: url)
             preferences.preferredContentMode = engine.isDesktopWebsite ? .desktop : .mobile
         }
 
         if (self.webView.shouldOverrideUrlLoading?(url, isMainFrame) ?? false) {
-            #if !SKIP && DEBUG
-            traceNative("coordinator-policy-cancel", "reason=host-override target=\(url)")
-            #endif
             logger.log("Override URL loading for \(url)")
             self.webView.state.isProvisionallyNavigating = false
             self.webView.state.isLoading = false
