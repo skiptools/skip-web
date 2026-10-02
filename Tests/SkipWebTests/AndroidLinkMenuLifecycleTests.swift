@@ -5,6 +5,7 @@ import XCTest
 
 #if SKIP
 /// Exercises real window attachment without requiring a network page or long-press timing.
+// SKIP INSERT: @org.junit.runner.RunWith(androidx.test.ext.junit.runners.AndroidJUnit4::class)
 final class AndroidLinkMenuLifecycleTests: XCTestCase {
     /* SKIP INSERT:
     @get:org.junit.Rule
