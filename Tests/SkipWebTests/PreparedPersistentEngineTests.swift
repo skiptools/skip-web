@@ -47,10 +47,13 @@ final class PreparedPersistentEngineTests: XCTestCase {
     // Skip's generated async XCTest wrapper replaces it with a virtual-time dispatcher.
     // Robolectric cannot execute the page's JavaScript. Skip before runBlocking,
     // which would block its main thread while waiting for work queued on that thread.
+    // This test also requires native document-start scripts; the onPageStarted fallback
+    // cannot guarantee that the script runs in the loaded document on older WebViews.
     /* SKIP INSERT:
     @Test
     fun testPreparedEngineLoadsDocumentStartScriptAndMessageTransport() {
         org.junit.Assume.assumeFalse("Document-start scripts require a real Android WebView on a device or emulator", isRobolectric)
+        org.junit.Assume.assumeTrue("Prepared-engine script test requires WebView DOCUMENT_START_SCRIPT support", WebEngine.isAndroidDocumentStartScriptSupported())
         kotlinx.coroutines.runBlocking {
             kotlinx.coroutines.withTimeout(15_000) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {

@@ -1106,6 +1106,14 @@ or by running the test target for the macOS destination in Xcode,
 which will run the Swift tests as well as the transpiled
 Kotlin JUnit tests in the Robolectric Android simulation environment.
 
+Tests that evaluate JavaScript inside WebView skip Robolectric, which does not execute
+that JavaScript. This includes the prepared-engine script test and `testWebEngine`.
+The separate Apple WebKit tests remain enabled.
+
+The Android prepared-engine document-start script test also requires a WebView that
+supports `WebViewFeature.DOCUMENT_START_SCRIPT`. It skips older WebViews that only
+support best-effort injection through `onPageStarted`.
+
 Parity testing can be performed with `skip test`,
 which will output a table of the test results for both platforms.
 
