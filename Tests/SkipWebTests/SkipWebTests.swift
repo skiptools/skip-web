@@ -718,7 +718,7 @@ final class SkipWebTests: XCTestCase {
         }
 
         if isRobolectric {
-            throw XCTSkip("cannot run WebEngine tests in Robolectric")
+            throw XCTSkip("WebView JavaScript execution requires a device or emulator; Robolectric does not execute it")
         }
 
         if isAndroid {
