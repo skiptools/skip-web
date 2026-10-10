@@ -451,6 +451,19 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(mainFrameFallbackDecision, AndroidRequestBlockDecision.allow)
     }
 
+    // Navigating away from an exempt page must consult the new destination's own domain.
+    func testAndroidMainFrameWhitelistUsesDestinationRatherThanPreviousPage() throws {
+        let configuration = WebContentBlockerConfiguration(whitelistedDomains: ["exempt.test"],
+            androidMode: .custom(StaticContentBlockingProvider(decision: .block)))
+        let provider = try XCTUnwrap(configuration.effectiveAndroidProvider)
+        XCTAssertEqual(provider.requestDecision(for: AndroidBlockableRequest(
+            url: URL(string: "https://blocked.test/page")!, mainDocumentURL: URL(string: "https://exempt.test")!,
+            method: "GET", isForMainFrame: true, hasGesture: true)), AndroidRequestBlockDecision.block)
+        XCTAssertEqual(provider.requestDecision(for: AndroidBlockableRequest(
+            url: URL(string: "https://exempt.test/page")!, mainDocumentURL: URL(string: "https://blocked.test")!,
+            method: "GET", isForMainFrame: true, hasGesture: true)), AndroidRequestBlockDecision.allow)
+    }
+
     // Verifies whitelist wrapping no longer suppresses cosmetics at the provider layer.
     func testAndroidWhitelistedDomainsDoNotSuppressProviderCosmeticRules() {
         let provider = StaticContentBlockingProvider(
@@ -1401,7 +1414,9 @@ final class WebContentBlockerTests: XCTestCase {
 
         XCTAssertEqual(appendedRule["comment"] as? String, "user-injected domain exemptions (whitelisted domains)")
         XCTAssertEqual(trigger["url-filter"] as? String, ".*")
-        XCTAssertEqual(trigger["if-domain"] as? [String], ["*.example.com", "example.com"])
+        XCTAssertNil(trigger["if-domain"])
+        XCTAssertEqual(trigger["if-top-url"] as? [String],
+            [#"^https?://([^/:]+\.)+example\.com[:/]"#, #"^https?://example\.com[:/]"#])
         XCTAssertEqual(action["type"] as? String, "ignore-previous-rules")
     }
 
@@ -1425,10 +1440,7 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(
             trigger["if-top-url"] as? [String],
             [
-                "http://*.example.com/*",
-                "http://example.com/*",
-                "https://*.example.com/*",
-                "https://example.com/*",
+                #"^https?://([^/:]+\.)*example\.com[:/]"#,
             ]
         )
         XCTAssertNil(trigger["if-domain"])

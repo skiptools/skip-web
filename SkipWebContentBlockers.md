@@ -377,7 +377,7 @@ Whitelist opt-out is enforced inside `SkipWeb`'s Android controller. If the curr
 
 ### Whitelist Injection
 
-`whitelistedDomains` accepts WebKit-style host entries such as `example.com` and `*.example.com`. SkipWeb normalizes those entries, then appends an in-memory exemption rule to each compiled iOS rule file when the whitelist is non-empty.
+`whitelistedDomains` accepts exact host entries such as `example.com` and subdomain patterns such as `*.example.com`. SkipWeb converts them to anchored top-page URL expressions before appending an in-memory exemption to each compiled iOS rule file. WebKit’s `if-domain` wildcard syntax differs from these host patterns; passing `*.example.com` through directly does not match subdomains.
 
 Generated rule shape:
 
@@ -386,7 +386,7 @@ Generated rule shape:
   "comment": "user-injected domain exemptions (whitelisted domains)",
   "trigger": {
     "url-filter": ".*",
-    "if-domain": ["example.com", "*.example.org"]
+    "if-top-url": ["^https?://example\\.com[:/]", "^https?://([^/:]+\\.)+example\\.org[:/]"]
   },
   "action": {
     "type": "ignore-previous-rules"
@@ -409,8 +409,7 @@ Generated rule shape:
     "url-filter": ".*",
     "resource-type": ["popup"],
     "if-top-url": [
-      "https://example.com/*",
-      "https://*.example.com/*"
+      "^https?://([^/:]+\\.)*example\\.com[:/]"
     ]
   },
   "action": {

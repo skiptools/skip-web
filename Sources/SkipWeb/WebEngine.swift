@@ -780,13 +780,12 @@ fileprivate struct WhitelistedAndroidContentBlockingProvider: AndroidContentBloc
     }
 
     private func isWhitelisted(request: AndroidBlockableRequest) -> Bool {
-        if WebContentBlockerConfiguration.matchesWhitelistedURL(request.mainDocumentURL, in: whitelistedDomains) {
-            return true
-        }
+        // A top-level navigation starts a different page. Its destination owns the exception,
+        // while subresources inherit the main document's choice.
         if request.isForMainFrame {
             return WebContentBlockerConfiguration.matchesWhitelistedURL(request.url, in: whitelistedDomains)
         }
-        return false
+        return WebContentBlockerConfiguration.matchesWhitelistedURL(request.mainDocumentURL, in: whitelistedDomains)
     }
 }
 
@@ -889,7 +888,7 @@ extension WebContentBlockerConfiguration {
                 "comment": "user-injected domain exemptions (whitelisted domains)",
                 "trigger": [
                     "url-filter": ".*",
-                    "if-domain": whitelistedDomains
+                    "if-top-url": whitelistTopURLs(from: whitelistedDomains, includesBareSubdomains: false)
                 ],
                 "action": [
                     "type": "ignore-previous-rules"
@@ -897,7 +896,7 @@ extension WebContentBlockerConfiguration {
             ])
         }
 
-        let popupTopURLs = popupWhitelistTopURLs(from: popupWhitelistedSourceDomains)
+        let popupTopURLs = whitelistTopURLs(from: popupWhitelistedSourceDomains, includesBareSubdomains: true)
         if !popupTopURLs.isEmpty {
             rules.append([
                 "comment": "user-injected popup exemptions (allowed source domains)",
@@ -921,23 +920,15 @@ extension WebContentBlockerConfiguration {
         return augmentedContent
     }
 
-    static func popupWhitelistTopURLs(from domains: [String]) -> [String] {
-        Array(
-            Set(
-                domains.flatMap { domain in
-                    if domain.hasPrefix("*.") {
-                        return ["http://\(domain)/*", "https://\(domain)/*"]
-                    } else {
-                        return [
-                            "http://\(domain)/*",
-                            "http://*.\(domain)/*",
-                            "https://\(domain)/*",
-                            "https://*.\(domain)/*",
-                        ]
-                    }
-                }
-            )
-        ).sorted()
+    /// WebKit top-URL conditions are regular expressions, not host globs. Keep exact hosts
+    /// and subdomains-only entries consistent with the Android matcher, including label boundaries.
+    static func whitelistTopURLs(from domains: [String], includesBareSubdomains: Bool) -> [String] {
+        Array(Set(domains.map { domain in
+            let subdomainsOnly = domain.hasPrefix("*.")
+            let host = subdomainsOnly ? String(domain.dropFirst(2)) : domain
+            let prefix = subdomainsOnly ? "([^/:]+\\.)+" : (includesBareSubdomains ? "([^/:]+\\.)*" : "")
+            return "^https?://\(prefix)\(NSRegularExpression.escapedPattern(for: host))[:/]"
+        })).sorted()
     }
     #endif
 }
