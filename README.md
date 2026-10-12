@@ -1068,6 +1068,36 @@ Platform behavior:
 - On Android, `removeData` requires `modifiedSince == .distantPast` when `ofTypes` is non-empty; otherwise it throws `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`.
 - Android data removal is bucket-level (cookies/cache/storage), not timestamp-granular, and may clear a broader bucket than an individual requested data type.
 
+
+For user-selected cookie/site-data and cache categories, use the profile-bound engine API:
+
+```swift
+let profile = WebProfile.named("account-a")
+try await WebEngine.retireRuntimes(for: profile)
+let engine = WebEngine(configuration: WebEngineConfiguration(profile: profile))
+let completed = try await engine.removeBrowsingData(
+    cookiesAndStorage: true, cache: true, modifiedSince: .distantPast
+)
+```
+
+Retirement stops page execution and clears per-view session storage; recreate native views when
+browsing resumes. For cache-only removal, use `stopRuntimes(for:)` to preserve the unchecked
+session storage. Logical tabs belong to the caller and need not be closed.
+
+`removeBrowsingData` uses the engine's configured store. On iOS it awaits WebKit completion and
+initializes a fresh view with a blank document before removal, so cache clearing reaches the
+profile's WebContent process. On Android it requires all-time scope and awaits the real cookie
+callback. When both categories are selected and `DELETE_BROWSING_DATA` is supported, it uses
+that profile's comprehensive operation and awaits completion. Individual Android cache/storage
+operations have no completion callback, so the method returns `false` to mean requests were sent;
+`true` means all selected operations reported completion. It never clears an unchecked category
+as a fallback. `supportsIsolatedDataRemoval()` checks named-profile availability.
+
+The instrumented `WebsiteDataRemovalTests` fixture verifies cookies, local/session storage,
+IndexedDB and HTTP cache across two named profiles, including unchecked-category preservation.
+Start `python3 Tests/Fixtures/clear_data_server.py` before running it. Android devices also need
+`adb reverse tcp:18769 tcp:18769`; remove that forwarding after the test.
+
 ## Content Blockers
 
 `SkipWeb` exposes portable content-blocking hooks through `WebEngineConfiguration.contentBlockers`.

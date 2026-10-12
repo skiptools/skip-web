@@ -1747,6 +1747,60 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
     public private(set) var hasRequestedContent = false
     private var persistentOwnershipEnded = false
+    private var nativeViewRetired = false
+    private static var profileEngines: [WeakContentBlockerEngine] = []
+
+    /// Whether this runtime supports the isolated named profiles required for scoped removal.
+    @MainActor
+    public static func supportsIsolatedDataRemoval() -> Bool {
+        #if SKIP
+        return isAndroidMultiProfileSupported()
+        #else
+        return true
+        #endif
+    }
+
+    /// Cancels pending loads while preserving session storage for a cache-only removal.
+    @MainActor
+    public static func stopRuntimes(for profile: WebProfile) {
+        for reference in profileEngines {
+            if let engine = reference.engine, engine.configuration.profile == profile, !engine.nativeViewRetired {
+                engine.stopLoading()
+            }
+        }
+    }
+
+    /// Stops all page execution in one profile before its website data is removed.
+    /// Engines cannot navigate again; callers must recreate their logical tabs' native views.
+    @MainActor
+    public static func retireRuntimes(for profile: WebProfile) async throws {
+        let engines = profileEngines.compactMap { $0.engine }.filter { $0.configuration.profile == profile }
+        for engine in engines {
+            if engine.nativeViewRetired { continue }
+            engine.endPersistentOwnership()
+            #if SKIP
+            engine.destroyNativeView()
+            #else
+            engine.webView.configuration.userContentController.removeAllUserScripts()
+            try await engine.awaitPageLoaded {
+                engine.webView.loadHTMLString("", baseURL: nil)
+            }
+            engine.nativeViewRetired = true
+            #endif
+        }
+    }
+
+    #if SKIP
+    /// Idempotent teardown shared by explicit profile retirement and persistent-cache eviction.
+    func destroyNativeView() {
+        if nativeViewRetired { return }
+        nativeViewRetired = true
+        webView.stopLoading()
+        webView.clearHistory()
+        webView.removeAllViews()
+        webView.destroy()
+    }
+    #endif
     private var scheduledLoad: Task<Void, Never>?
 
     /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
@@ -1840,6 +1894,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
 
         super.init()
+        Self.profileEngines = Self.profileEngines.filter { $0.engine != nil }
+        Self.profileEngines.append(WeakContentBlockerEngine(self))
 
         contentBlockerRuntime?.attach(self)
 
@@ -2661,6 +2717,40 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Removes selected categories from this engine's configured profile. Returns true only when
+    /// every selected platform operation has a completion callback.
+    @MainActor
+    public func removeBrowsingData(cookiesAndStorage: Bool, cache: Bool, modifiedSince: Date) async throws -> Bool {
+        try throwProfileSetupErrorIfNeeded()
+        #if SKIP
+        guard modifiedSince == .distantPast else { throw WebDataRemovalError.unsupportedModifiedSinceOnAndroid }
+        if cookiesAndStorage && cache && WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA) {
+            suspendCoroutine { continuation in
+                WebStorageCompat.deleteBrowsingData(androidWebStorage(), Dispatchers.Default.asExecutor()) {
+                    continuation.resumeWith(kotlin.Result.success(Unit))
+                }
+            }
+            return true
+        }
+        #endif
+        #if !SKIP
+        // A fresh WKWebView has no WebContent process yet. Initialize its profile before
+        // clearing, otherwise a subsequently reused process can retain its memory cache.
+        if webView.url == nil {
+            try await awaitPageLoaded { webView.loadHTMLString("", baseURL: nil) }
+        }
+        #endif
+        var types: Set<WebSiteDataType> = []
+        if cookiesAndStorage { types.formUnion([WebSiteDataType.cookies, WebSiteDataType.localStorage, WebSiteDataType.sessionStorage, WebSiteDataType.webSQLDatabases, WebSiteDataType.indexedDBDatabases]) }
+        if cache { types.formUnion([WebSiteDataType.diskCache, WebSiteDataType.memoryCache, WebSiteDataType.offlineWebApplicationCache]) }
+        try await removeData(ofTypes: types, modifiedSince: modifiedSince)
+        #if SKIP
+        return false
+        #else
+        return true
+        #endif
+    }
+
     @MainActor
     public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
         try throwProfileSetupErrorIfNeeded()
@@ -3039,11 +3129,13 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         try? await Task.sleep(nanoseconds: 50_000_000)
     }
 
-    nonisolated private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
-        cookieManager.removeAllCookies(nil)
-        cookieManager.flush()
-        // Mirror setCookie behavior: allow async cookie-store mutation to settle before reads.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+    @MainActor private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
+        suspendCoroutine { continuation in
+            cookieManager.removeAllCookies { _ in
+                cookieManager.flush()
+                continuation.resumeWith(kotlin.Result.success(Unit))
+            }
+        }
     }
     #endif
 
