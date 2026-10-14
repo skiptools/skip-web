@@ -579,6 +579,8 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
     /// Think of it as a runtime frame guard: SkipWeb evaluates it before returning CSS to a
     /// document, so one fixed document-start hook can serve matching subframes and redirected pages.
     public var urlFilterPattern: String?
+    /// Whether URL matching distinguishes case. Defaults to true for existing custom providers.
+    public var urlFilterIsCaseSensitive: Bool
     /// Origin patterns that must match the current frame before the rule applies.
     ///
     /// When Android document-start scripts are supported, SkipWeb installs one fixed hook for all
@@ -605,10 +607,12 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
         ifDomainList: [String] = [],
         unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart,
+        urlFilterIsCaseSensitive: Bool = true
     ) {
         self.hiddenSelectors = Self.normalizedHiddenSelectors(hiddenSelectors)
         self.urlFilterPattern = urlFilterPattern
+        self.urlFilterIsCaseSensitive = urlFilterIsCaseSensitive
         self.allowedOriginRules = allowedOriginRules
         self.ifDomainList = ifDomainList
         self.unlessDomainList = unlessDomainList
@@ -673,9 +677,9 @@ public extension SkipWebNavigationDelegate {
 @MainActor
 private final class WebEngineConfigurationNavigationDelegate: NSObject, WKNavigationDelegate {
     weak var engine: WebEngine?
-    let navigationDelegate: any SkipWebNavigationDelegate
+    let navigationDelegate: (any SkipWebNavigationDelegate)?
 
-    init(engine: WebEngine, navigationDelegate: any SkipWebNavigationDelegate) {
+    init(engine: WebEngine, navigationDelegate: (any SkipWebNavigationDelegate)?) {
         self.engine = engine
         self.navigationDelegate = navigationDelegate
     }
@@ -690,33 +694,47 @@ private final class WebEngineConfigurationNavigationDelegate: NSObject, WKNaviga
               let url = navigationAction.request.url else {
             return (.allow, preferences)
         }
-        let shouldCancel = navigationDelegate.webEngine(engine, shouldOverrideURLLoading: url)
+        let shouldCancel = navigationDelegate?.webEngine(engine, shouldOverrideURLLoading: url) ?? false
+        if !shouldCancel, engine.configuration.desktopWebsiteForURL != nil {
+            engine.prepareWebsiteMode(for: url)
+            preferences.preferredContentMode = engine.isDesktopWebsite ? .desktop : .mobile
+        }
         return (shouldCancel ? .cancel : .allow, preferences)
+    }
+
+    func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+                 completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let engine else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        engine.receiveHTTPAuthentication(challenge, completionHandler: completionHandler)
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidStartProvisionalNavigation(engine)
+        engine.beginHTTPAuthenticationNavigation()
+        navigationDelegate?.webEngineDidStartProvisionalNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidCommitNavigation(engine)
+        navigationDelegate?.webEngineDidCommitNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard let engine else { return }
-        navigationDelegate.webEngineDidFinishNavigation(engine)
+        navigationDelegate?.webEngineDidFinishNavigation(engine)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         guard let engine else { return }
-        navigationDelegate.webEngine(engine, didFailNavigation: error)
+        navigationDelegate?.webEngine(engine, didFailNavigation: error)
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         guard let engine else { return }
-        navigationDelegate.webEngine(engine, didFailNavigation: error)
+        navigationDelegate?.webEngine(engine, didFailNavigation: error)
     }
 }
 #endif
@@ -736,6 +754,7 @@ struct AndroidDocumentStartRuleBatchKey: Hashable {
     let frameScope: AndroidCosmeticFrameScope
     let preferredTiming: AndroidCosmeticInjectionTiming
     let urlFilterPattern: String?
+    let urlFilterIsCaseSensitive: Bool
     let allowedOriginRules: [String]
     let ifDomainList: [String]
     let unlessDomainList: [String]
@@ -1617,6 +1636,84 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 /// and evaluate JavaScript.
 @MainActor public class WebEngine : WebObjectBase {
     public let configuration: WebEngineConfiguration
+    /// Stable identity for associating authentication UI with this engine across bridge projections.
+    public let httpAuthenticationIdentity: String = UUID().uuidString
+    private let httpAuthenticationRequests = WebHTTPAuthenticationRequests()
+
+    /// Cancels pending requests before a new top-level navigation begins.
+    // SKIP @nobridge
+    func beginHTTPAuthenticationNavigation() {
+        httpAuthenticationRequests.beginNavigation()
+    }
+
+    // SKIP @nobridge
+    private func cancelHTTPAuthenticationRequests() {
+        httpAuthenticationRequests.cancelAll()
+    }
+
+    /// Owns a platform response until the browser answers or the engine invalidates it.
+    // SKIP @nobridge
+    func receiveHTTPAuthentication(host: String, realm: String?, protectionSpace: String,
+                                   isRetry: Bool, respond: @escaping (String?, String?) -> Void) {
+        guard !persistentOwnershipEnded,
+              let handler = configuration.httpAuthenticationHandler else {
+            respond(nil, nil)
+            return
+        }
+        if let request = httpAuthenticationRequests.makeRequest(host: host, realm: realm,
+            protectionSpace: protectionSpace, isRetry: isRetry, respond: respond) {
+            handler(self, request)
+        }
+    }
+
+    #if !SKIP
+    /// Handles Basic authentication while leaving other challenge types to WebKit.
+    func receiveHTTPAuthentication(_ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        let space = challenge.protectionSpace
+        guard space.authenticationMethod == NSURLAuthenticationMethodHTTPBasic else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        let key = "\(space.protocol ?? "")|\(space.host)|\(space.port)|\(space.realm ?? "")|\(space.isProxy())"
+        receiveHTTPAuthentication(host: space.host, realm: space.realm, protectionSpace: key,
+                                  isRetry: challenge.previousFailureCount > 0) { username, password in
+            if let username, let password {
+                completionHandler(.useCredential, URLCredential(user: username, password: password, persistence: .none))
+            } else {
+                completionHandler(.cancelAuthenticationChallenge, nil)
+            }
+        }
+    }
+    #endif
+    /// Effective presentation of the current main-frame navigation.
+    public private(set) var isDesktopWebsite = false
+    private let websiteModeController = WebWebsiteModeController()
+
+    /// Resolves native user-agent and viewport settings before a main-frame request is dispatched.
+    public func prepareWebsiteMode(for url: URL) {
+        isDesktopWebsite = websiteModeController.apply(url: url, engine: self)
+    }
+
+    #if SKIP
+    /// Changes the agent after the intercepted GET has been cancelled. Changing it inside
+    /// shouldOverrideUrlLoading can restart the old page and send the wrong HTTP identity.
+    fileprivate func replaceAndroidWebsiteModeNavigation(_ request: android.webkit.WebResourceRequest, url: URL) {
+        let headers = java.util.HashMap<String, String>()
+        for (name, value) in request.requestHeaders {
+            let key = name.lowercased()
+            if key != "user-agent" && !key.hasPrefix("sec-ch-ua") { headers.put(name, value) }
+        }
+        webView.post {
+            if !self.persistentOwnershipEnded {
+                self.webView.stopLoading()
+                self.prepareWebsiteMode(for: url)
+                self.webView.loadUrl(url.absoluteString, headers)
+            }
+        }
+    }
+    #endif
+
     public let webView: PlatformWebView
     private let usesCompatibilityContentBlockerRuntime: Bool
     /// The prepared content-blocker runtime used by this engine, when blocking is configured.
@@ -1654,6 +1751,65 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     private var androidContentBlockerBootstrapHandler: ScriptHandler?
     private var androidContentBlockerScriptBridge: AndroidContentBlockerScriptBridge?
     #endif
+
+    /// Whether this engine has received an initial content request, including a load still in preflight.
+    /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
+    public private(set) var hasRequestedContent = false
+    private var persistentOwnershipEnded = false
+    private var scheduledLoad: Task<Void, Never>?
+
+    /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
+    func scheduleLoad(url: URL) {
+        guard !persistentOwnershipEnded else { return }
+        markContentRequested()
+        if scheduledLoad != nil { stopLoading() }
+        scheduledLoad = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            do {
+                try await self.load(url: url)
+            } catch {
+                if !Task.isCancelled {
+                    logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
+                }
+            }
+        }
+    }
+
+    /// Invalidates queued navigation before explicit persistent-cache removal.
+    func endPersistentOwnership() {
+        persistentOwnershipEnded = true
+        stopLoading()
+    }
+
+    // SKIP @nobridge
+    /// Invalidates deferred link-menu results on navigation, remount, and teardown.
+    var linkMenuGeneration = 0
+
+    #if SKIP
+    /// Rejects delayed menu results and actions after navigation or window detachment.
+    func isCurrentLinkMenu(generation: Int, pageURL: String?) -> Bool {
+        webView.isAttachedToWindow && linkMenuGeneration == generation && webView.url == pageURL
+    }
+    #endif
+
+    #if !SKIP
+    /// Keeps detached window callbacks alive until a mounted coordinator takes ownership.
+    var preparedUIDelegate: WebViewCoordinator?
+
+    /// Changes navigation consumers without abandoning an outstanding load continuation.
+    static func bindNavigationDelegate(_ delegate: WKNavigationDelegate, to webView: WKWebView) {
+        if let loading = webView.navigationDelegate as? PageLoadDelegate {
+            loading.forwardingDelegate = delegate
+        } else {
+            webView.navigationDelegate = delegate
+        }
+    }
+    #endif
+
+    /// Reserves initial navigation synchronously before a caller schedules asynchronous loading.
+    func markContentRequested() {
+        hasRequestedContent = true
+    }
 
     /// Create a WebEngine with the specified configuration.
     /// - Parameters:
@@ -1700,6 +1856,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         installConfigurationNavigationDelegateIfNeeded()
         scheduleIOSContentBlockerSetupIfNeeded()
         #else
+        self.webView.addOnAttachStateChangeListener(AndroidLinkMenuAttachmentListener(engine: self))
         installAndroidContentBlockerBootstrapIfNeeded()
         #endif
     }
@@ -1708,12 +1865,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Installs the configuration delegate before a detached engine begins navigation.
     private func installConfigurationNavigationDelegateIfNeeded() {
         guard webView.navigationDelegate == nil,
-              let navigationDelegate = configuration.navigationDelegate else {
+              configuration.navigationDelegate != nil || configuration.desktopWebsiteForURL != nil || configuration.httpAuthenticationHandler != nil else {
             return
         }
         let adapter = WebEngineConfigurationNavigationDelegate(
             engine: self,
-            navigationDelegate: navigationDelegate
+            navigationDelegate: configuration.navigationDelegate
         )
         configurationNavigationDelegate = adapter
         webView.navigationDelegate = adapter
@@ -1721,6 +1878,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func reload() {
+        beginHTTPAuthenticationNavigation()
+        if let url { prepareWebsiteMode(for: url) }
         if profileSetupError != nil {
             return
         }
@@ -1736,7 +1895,20 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
+        cancelHTTPAuthenticationRequests()
+        scheduledLoad?.cancel()
+        scheduledLoad = nil
+        linkMenuGeneration += 1
+        #if SKIP
+        completeAndroidPageLoad(.failure(CancellationError()))
+        #else
+        if let loading = webView.navigationDelegate as? PageLoadDelegate {
+            webView.navigationDelegate = loading.forwardingDelegate as? WKNavigationDelegate
+            loading.cancel()
+        }
+        #endif
         if profileSetupError != nil {
             return
         }
@@ -1744,6 +1916,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func go(to item: WebHistoryItem) {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -1769,6 +1942,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             }
         }
         if targetIndex >= 0 && targetIndex != currentIndex {
+            if let url = URL(string: targetURL) { prepareWebsiteMode(for: url) }
             let steps = targetIndex - currentIndex
             if webView.canGoBackOrForward(steps) {
                 webView.goBackOrForward(steps)
@@ -1778,6 +1952,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func goBack() {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -1787,6 +1962,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         }
         #else
         #if SKIP
+        if let targetURL = pendingHistoryNavigationURL(offset: -1) { prepareWebsiteMode(for: targetURL) }
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: -1))
         #endif
         webView.goBack()
@@ -1794,6 +1970,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     public func goForward() {
+        beginHTTPAuthenticationNavigation()
         if profileSetupError != nil {
             return
         }
@@ -1803,6 +1980,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         }
         #else
         #if SKIP
+        if let targetURL = pendingHistoryNavigationURL(offset: 1) { prepareWebsiteMode(for: targetURL) }
         prepareAndroidContentBlockersForPendingMainFrameNavigation(targetURL: pendingHistoryNavigationURL(offset: 1))
         #endif
         webView.goForward()
@@ -2133,17 +2311,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
               window.top === window.self
             );
             var styleId = "__skipweb_content_blockers_document_start";
-            var existing = document.getElementById(styleId);
-            if (!css) {
-              if (existing) existing.remove();
-              return;
-            }
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = existing || document.createElement("style");
-            style.id = styleId;
-            style.textContent = css;
-            if (!existing) root.appendChild(style);
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, css || "");
           } catch (_) {}
         })();
         """
@@ -2748,6 +2917,9 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     public func loadHTML(_ html: String, baseURL: URL? = nil, mimeType: String = "text/html") {
+        beginHTTPAuthenticationNavigation()
+        markContentRequested()
+        linkMenuGeneration += 1
         if profileSetupError != nil {
             return
         }
@@ -2778,7 +2950,13 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        beginHTTPAuthenticationNavigation()
+        markContentRequested()
+        linkMenuGeneration += 1
+        try Task.checkCancellation()
+        if persistentOwnershipEnded { throw CancellationError() }
         try throwProfileSetupErrorIfNeeded()
+        prepareWebsiteMode(for: url)
         let urlString = url.absoluteString
         logger.info("load URL=\(urlString) webView: \(self.description)")
         #if SKIP
@@ -2786,6 +2964,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #else
         _ = await awaitContentBlockerSetup()
         #endif
+        try Task.checkCancellation()
+        if persistentOwnershipEnded { throw CancellationError() }
         try await awaitPageLoaded {
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
@@ -3168,7 +3348,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                   ),
-                  androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) else {
+                  androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) else {
                 continue
             }
 
@@ -3218,6 +3398,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             }
             return host.count > suffix.count && host.hasSuffix(".\(suffix)")
         }
+        if normalizedRule.hasPrefix("*") {
+            let suffix = String(normalizedRule.dropFirst())
+            guard !suffix.isEmpty else { return false }
+            return host == suffix || host.hasSuffix(".\(suffix)")
+        }
         return host == normalizedRule
     }
 
@@ -3245,18 +3430,18 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         return true
     }
 
-    fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL) -> Bool {
+    fileprivate static func androidURLFilterPatternMatchesPage(_ urlFilterPattern: String?, pageURL: URL, urlFilterIsCaseSensitive: Bool) -> Bool {
         guard let urlFilterPattern, !urlFilterPattern.isEmpty else {
             return true
         }
 
         let pageURLString = pageURL.absoluteString
         #if SKIP
-        // SKIP INSERT: try { return kotlin.text.Regex(urlFilterPattern).containsMatchIn(pageURLString) } catch (t: Throwable) { return false }
+        // SKIP INSERT: try { return (if (urlFilterIsCaseSensitive) kotlin.text.Regex(urlFilterPattern) else kotlin.text.Regex(urlFilterPattern, kotlin.text.RegexOption.IGNORE_CASE)).containsMatchIn(pageURLString) } catch (t: Throwable) { return false }
         return false
         #else
         let range = NSRange(location: 0, length: pageURLString.utf16.count)
-        guard let expression = try? NSRegularExpression(pattern: urlFilterPattern) else {
+        guard let expression = try? NSRegularExpression(pattern: urlFilterPattern, options: urlFilterIsCaseSensitive ? [] : [.caseInsensitive]) else {
             return false
         }
         return expression.firstMatch(in: pageURLString, range: range) != nil
@@ -3272,6 +3457,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             frameScope: rule.frameScope,
             preferredTiming: rule.preferredTiming,
             urlFilterPattern: rule.urlFilterPattern,
+            urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive,
             allowedOriginRules: rule.allowedOriginRules,
             ifDomainList: rule.ifDomainList,
             unlessDomainList: rule.unlessDomainList
@@ -3348,7 +3534,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                    ),
-                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) {
                     lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
@@ -3373,7 +3559,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     unlessDomainList: rule.unlessDomainList,
                     pageURL: pageURL
                    ),
-                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL) {
+                   androidURLFilterPatternMatchesPage(rule.urlFilterPattern, pageURL: pageURL, urlFilterIsCaseSensitive: rule.urlFilterIsCaseSensitive) {
                     lifecycleCSS.append(contentsOf: normalizedCSS)
                 } else if rule.frameScope == .mainFrameOnly {
                     if !androidAllowedOriginRulesMatchPage(rule.allowedOriginRules, pageURL: pageURL) {
@@ -3433,6 +3619,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
         return """
         (function() {
+            if (window.__skipWebCosmeticStyles) {
+                window.__skipWebCosmeticStyles.replace("\(styleIDLiteral)", "");
+                return;
+            }
             var style = document.getElementById("\(styleIDLiteral)");
             if (style) {
                 style.remove();
@@ -3447,7 +3637,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         frameScope: AndroidCosmeticFrameScope,
         urlFilterPattern: String? = nil,
         ifDomainList: [String] = [],
-        unlessDomainList: [String] = []
+        unlessDomainList: [String] = [],
+        urlFilterIsCaseSensitive: Bool = true
     ) -> String? {
         let css = normalizedAndroidCosmeticCSS(cssRules).joined(separator: "\n")
         guard !css.isEmpty else {
@@ -3472,7 +3663,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             let patternLiteral = String(patternEncoded.dropFirst().dropLast())
             urlFilterGuard = """
             try {
-                if (!(new RegExp(\(patternLiteral))).test(window.location.href)) { return; }
+                if (!(new RegExp(\(patternLiteral), "\(urlFilterIsCaseSensitive ? "" : "i")")).test(window.location.href)) { return; }
             } catch (error) {
                 return;
             }
@@ -3502,6 +3693,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     var suffix = normalizedRuleDomain.slice(2);
                     return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
                 }
+                if (normalizedRuleDomain.startsWith("*")) {
+                    var suffix = normalizedRuleDomain.slice(1);
+                    return !!suffix && (currentHost === suffix || currentHost.endsWith("." + suffix));
+                }
                 return currentHost === normalizedRuleDomain;
             };
             if (ifDomainList.length > 0) {
@@ -3529,15 +3724,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             \(domainGuard)
             var styleId = "\(styleIDLiteral)";
             var css = \(cssLiteral);
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = document.getElementById(styleId);
-            if (!style) {
-                style = document.createElement('style');
-                style.id = styleId;
-                root.appendChild(style);
-            }
-            style.textContent = css;
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, css);
         })();
         """
     }
@@ -3559,6 +3747,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     "hiddenSelectors": hiddenSelectors,
                     "frameScope": rule.frameScope.rawValue,
                     "urlFilterPattern": rule.urlFilterPattern ?? NSNull(),
+                    "urlFilterIsCaseSensitive": rule.urlFilterIsCaseSensitive,
                     "ifDomainList": rule.ifDomainList,
                     "unlessDomainList": rule.unlessDomainList,
                 ]
@@ -3648,6 +3837,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                     var suffix = normalizedRuleDomain.slice(2);
                     return !!suffix && currentHost.length > suffix.length && currentHost.endsWith("." + suffix);
                 }
+                if (normalizedRuleDomain.startsWith("*")) {
+                    var suffix = normalizedRuleDomain.slice(1);
+                    return !!suffix && (currentHost === suffix || currentHost.endsWith("." + suffix));
+                }
                 return currentHost === normalizedRuleDomain;
             };
 
@@ -3667,7 +3860,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
                 if (rule.urlFilterPattern) {
                     try {
-                        if (!(new RegExp(rule.urlFilterPattern)).test(locationHref)) { continue; }
+                        if (!(new RegExp(rule.urlFilterPattern, rule.urlFilterIsCaseSensitive ? "" : "i")).test(locationHref)) { continue; }
                     } catch (error) {
                         continue;
                     }
@@ -3688,19 +3881,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
                 }
             }
 
-            if (collectedSelectors.length === 0) { return; }
             var compactedCSS = compactHiddenSelectors(collectedSelectors);
 
             var styleId = "\(styleIDLiteral)";
-            var root = document.head || document.documentElement;
-            if (!root) { return; }
-            var style = document.getElementById(styleId);
-            if (!style) {
-                style = document.createElement('style');
-                style.id = styleId;
-                root.appendChild(style);
-            }
-            style.textContent = compactedCSS.join("\\n");
+            \(AndroidCosmeticStyleScript.source)
+            window.__skipWebCosmeticStyles.replace(styleId, compactedCSS.join("\\n"));
         })();
         """
     }
@@ -3726,16 +3911,21 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #else
         let previousNavigationDelegate = webView.navigationDelegate
         let forwardingDelegate = previousNavigationDelegate as? (any PageLoadNavigationForwarding)
-        defer { webView.navigationDelegate = previousNavigationDelegate }
-
-        // need to retain the navigation delegate or else it will drop the continuation
         var loadDelegate: PageLoadDelegate? = nil
+        defer {
+            if webView.navigationDelegate === loadDelegate {
+                webView.navigationDelegate = loadDelegate?.forwardingDelegate as? WKNavigationDelegate
+            }
+        }
+
+        // Retain the delegate until completion, including across view mounting.
 
         let _: Void? = try await withCheckedThrowingContinuation { continuation in
             loadDelegate = PageLoadDelegate(config: configuration, forwardingDelegate: forwardingDelegate) { result in
                 continuation.resume(with: result)
             }
 
+            loadDelegate?.websiteModeEngine = self
             self.webView.navigationDelegate = loadDelegate
             logger.log("WebEngine: awaitPageLoaded block()")
             block()
@@ -3858,6 +4048,22 @@ extension WebEngine {
 
 
 #if SKIP
+/// Invalidates pending link menus even if a cached view detaches and reattaches without navigation.
+private final class AndroidLinkMenuAttachmentListener: android.view.View.OnAttachStateChangeListener {
+    private weak var engine: WebEngine?
+
+    init(engine: WebEngine) {
+        self.engine = engine
+    }
+
+    override func onViewAttachedToWindow(view: android.view.View) {
+    }
+
+    override func onViewDetachedFromWindow(view: android.view.View) {
+        engine?.linkMenuGeneration += 1
+    }
+}
+
 fileprivate struct AndroidDocumentStartPlanRegistration {
     let handlers: [ScriptHandler]
     let styleIDs: [String]
@@ -4220,6 +4426,8 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func onPageStarted(view: PlatformWebView, url: String, favicon: android.graphics.Bitmap?) {
+        engine?.beginHTTPAuthenticationNavigation()
+        engine?.linkMenuGeneration += 1
         logger.log("onPageStarted: \(url)")
         logViewportProbe(stage: "page-started", view: view, url: url)
         engine?.androidContentBlockerController.recoverIfNeeded(for: url, in: view)
@@ -4263,9 +4471,15 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func onReceivedHttpAuthRequest(view: PlatformWebView, handler: android.webkit.HttpAuthHandler, host: String, realm: String) {
-        logger.log("onReceivedHttpAuthRequest: \(handler) \(host) \(realm)")
-        embeddedNavigationClient?.onReceivedHttpAuthRequest(view, handler, host, realm)
-        legacyNavigationDelegate?.onReceivedHttpAuthRequest(view, handler, host, realm)
+        guard let engine else {
+            handler.cancel()
+            return
+        }
+        engine.receiveHTTPAuthentication(host: host, realm: realm,
+            protectionSpace: "\(host)|\(realm)", isRetry: !handler.useHttpAuthUsernamePassword()) { username, password in
+            if let username, let password { handler.proceed(username, password) }
+            else { handler.cancel() }
+        }
     }
 
     override func onReceivedHttpError(view: PlatformWebView, request: android.webkit.WebResourceRequest, errorResponse: android.webkit.WebResourceResponse) {
@@ -4332,7 +4546,14 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
     }
 
     override func shouldOverrideUrlLoading(view: PlatformWebView, request: android.webkit.WebResourceRequest) -> Bool {
-        let currentPageURL = URL(string: view.getUrl() ?? "")
+        // A new popup may have no current page. Skip accepts an empty URL, but
+        // native Swift rejects it, so preserve the missing context across the bridge.
+        let currentPageURL: URL?
+        if let currentPage = view.getUrl(), !currentPage.isEmpty {
+            currentPageURL = URL(string: currentPage)
+        } else {
+            currentPageURL = nil
+        }
         let isRedirect = WebEngine.androidRequestIsRedirect(request)
         logger.log(
             "shouldOverrideUrlLoading source=\(currentPageURL?.absoluteString ?? "<nil>") target=\(request.url) mainFrame=\(request.isForMainFrame) redirect=\(String(describing: isRedirect)) gesture=\(request.hasGesture())"
@@ -4360,7 +4581,14 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
                 return true
             }
         }
-        return legacyNavigationDelegate?.shouldOverrideUrlLoading(view, request) ?? false
+        if legacyNavigationDelegate?.shouldOverrideUrlLoading(view, request) == true { return true }
+        if let engine, let url = mainFrameURL,
+           let desktop = engine.configuration.desktopWebsiteForURL?(url),
+           desktop != engine.isDesktopWebsite, request.method == "GET" {
+            engine.replaceAndroidWebsiteModeNavigation(request, url: url)
+            return true
+        }
+        return false
     }
 }
 
@@ -4483,7 +4711,8 @@ extension WebEngineConfigurationNavigationDelegate: PageLoadNavigationForwarding
 fileprivate class PageLoadDelegate : WebEngineDelegate {
     let callback: (Result<Void, Error>) -> ()
     #if !SKIP
-    let forwardingDelegate: AnyObject?
+    var forwardingDelegate: AnyObject?
+    weak var websiteModeEngine: WebEngine?
     var suppressNextPolicyCancellationFailure = false
     #endif
     var callbackInvoked = false
@@ -4501,6 +4730,13 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.callback = callback
     }
 
+    /// Resolves a waiting load when its persistent engine is explicitly discarded.
+    func cancel() {
+        guard !callbackInvoked else { return }
+        callbackInvoked = true
+        callback(.failure(CancellationError()))
+    }
+
     #if SKIP
     override func onPageFinished(view: PlatformWebView, url: String) {
         super.onPageFinished(view: view, url: url)
@@ -4510,6 +4746,15 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         self.callback(Result<Void, Error>.success(()))
     }
     #else
+    @MainActor func webView(_ webView: WKWebView, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping @MainActor @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        guard let engine = websiteModeEngine else {
+            completionHandler(.cancelAuthenticationChallenge, nil)
+            return
+        }
+        engine.receiveHTTPAuthentication(challenge, completionHandler: completionHandler)
+    }
+
     @MainActor func webView(_ webView: PlatformWebView, didFinish navigation: WebNavigation!) {
         (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, didFinish: navigation)
         logger.info("webView: \(webView) didFinish: \(navigation!)")
@@ -4561,6 +4806,11 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
     }
 
     @MainActor func webView(_ webView: PlatformWebView, decidePolicyFor navigationAction: WebNavigationAction, preferences: WebpagePreferences) async -> (NavigationActionPolicy, WebpagePreferences) {
+        if navigationAction.targetFrame?.isMainFrame == true, let url = navigationAction.request.url,
+           let engine = websiteModeEngine, engine.configuration.desktopWebsiteForURL != nil {
+            engine.prepareWebsiteMode(for: url)
+            preferences.preferredContentMode = engine.isDesktopWebsite ? .desktop : .mobile
+        }
         guard let decision = await (forwardingDelegate as? (any PageLoadNavigationForwarding))?.webView(webView, decidePolicyFor: navigationAction, preferences: preferences) else {
             return (.allow, preferences)
         }
@@ -4844,11 +5094,9 @@ public extension SkipWebUIDelegate {
 /// context menu. The host app builds an array of these on demand
 /// via `WebEngineConfiguration.linkContextMenuActions` and skip-web
 /// renders them platform-natively: as `UIAction`s on iOS's WKWebView
-/// preview menu and as `android.widget.PopupMenu` items on Android.
+/// preview menu and as a centered `android.app.AlertDialog` on Android.
 ///
-/// Title-only: per-item icons aren't supported by Android's
-/// `PopupMenu` API, so we don't carry an iOS-only image here either
-/// — the title needs to convey the action's meaning unambiguously.
+/// Entries are title-only on both platforms.
 public struct WebContextMenuAction {
     public let title: String
     public let handler: (URL) -> Void
@@ -4870,11 +5118,19 @@ public struct WebContextMenuAction {
     public var pageZoom: CGFloat
     public var isOpaque: Bool
     public var customUserAgent: String?
+    /// Optional main-frame presentation policy, called on the UI thread before navigation.
+    /// Desktop uses a Safari identity on iOS and the installed Chromium major on Android.
+    /// Returning false restores mobile settings and customUserAgent when supplied; otherwise
+    /// Android uses a mobile Chrome identity and iOS uses its platform default.
+    public var desktopWebsiteForURL: ((URL) -> Bool)?
     public var profile: WebProfile
     public var userScripts: [WebViewUserScript]
     /// JavaScript message handler names exposed through `window.webkit.messageHandlers`.
     public var scriptMessageHandlerNames: [String]
     /// Delegate that receives bridge-safe JavaScript messages.
+    /// Mounting a `WebView` with this configuration assigns this delegate to the adopted
+    /// engine, replacing its previous owner even when this value is nil. Existing document
+    /// state, user scripts, and registered message-handler names are preserved.
     public var scriptMessageDelegate: (any WebViewScriptMessageDelegate)?
     fileprivate var legacyMessageHandlers: [String: ((WebViewMessage) async -> Void)]
     @available(*, deprecated, message: "Use scriptMessageHandlerNames and scriptMessageDelegate.")
@@ -4894,12 +5150,10 @@ public struct WebContextMenuAction {
     /// On iOS the returned `WebContextMenuAction`s are surfaced as
     /// `UIAction` entries on the WKWebView's native link
     /// `UIContextMenuConfiguration`. On Android the same actions
-    /// are surfaced as `android.widget.PopupMenu` items shown at
-    /// the long-pressed location.
+    /// are surfaced in a centered `android.app.AlertDialog` titled with the link URL.
     ///
-    /// If `nil`, the platform's default link long-press behaviour
-    /// is used (WKWebView's preview menu on iOS; text-selection
-    /// action mode on Android).
+    /// A nil provider suppresses the custom menu on iOS and leaves Android long presses
+    /// to the platform. Returning no actions displays no custom menu.
     public var linkContextMenuActions: ((URL) -> [WebContextMenuAction])? = nil
     public var uiDelegate: (any SkipWebUIDelegate)?
     /// Receives main-frame navigation decisions and lifecycle events on the main actor.
@@ -4909,6 +5163,11 @@ public struct WebContextMenuAction {
     /// before that engine is mounted in a ``WebView``. A mounted Apple `WebView` uses its
     /// coordinator, state, and initializer callbacks instead.
     public var navigationDelegate: (any SkipWebNavigationDelegate)?
+
+    /// Receives HTTP authentication requests. Without a handler, requests are cancelled.
+    /// Retained requests must be answered with credentials or cancellation on the UI thread.
+    public var httpAuthenticationHandler: ((WebEngine, WebHTTPAuthenticationChallenge) -> Void)?
+
     /// Optional content-blocker configuration applied to engines created from this configuration.
     ///
     /// This compatibility property creates an implicit runtime. After changing the value, call
@@ -5020,6 +5279,8 @@ public struct WebContextMenuAction {
     ///
     /// The returned configuration shares this configuration's resolved content-blocker runtime,
     /// so popup children reuse prepared rules and receive later runtime reapplications.
+    /// It initially shares the parent's script-message delegate. When the child is mounted,
+    /// the mounted `WebView` configuration supplies the child's current delegate instead.
     @MainActor
     public func popupChildMirroredConfiguration() -> WebEngineConfiguration {
         let copy = WebEngineConfiguration(
@@ -5045,6 +5306,9 @@ public struct WebContextMenuAction {
             capturesConsoleOutput: capturesConsoleOutput,
             contentBlockerRuntime: resolvedContentBlockerRuntime()
         )
+        copy.httpAuthenticationHandler = httpAuthenticationHandler
+        copy.desktopWebsiteForURL = desktopWebsiteForURL
+        copy.linkContextMenuActions = linkContextMenuActions
         #if SKIP
         copy.context = context
         copy.androidResolvedProfile = androidResolvedProfile

@@ -214,6 +214,10 @@ Android also evaluates HTTP(S) main-frame navigations through the configured
 the currently displayed page in `mainDocumentURL`, allowing a provider to distinguish the source
 page from the requested destination. Non-HTTP(S) schemes bypass this content-rule check.
 
+Before a new popup has loaded a page, its current URL may be missing or empty. SkipWeb passes
+`mainDocumentURL: nil` in either case, avoiding an empty URL that cannot be converted to native
+Swift. The destination still goes through the provider's normal allow/block decision.
+
 When the provider returns `.block`, SkipWeb cancels the navigation before the destination document
 loads. A `WebView` can observe that cancellation through the Android-only
 `onContentRuleBlockedNavigation` callback:
@@ -260,6 +264,7 @@ public enum AndroidCosmeticInjectionTiming: String, CaseIterable, Hashable, Send
 public struct AndroidCosmeticRule: Equatable, Sendable {
     public var hiddenSelectors: [String]
     public var urlFilterPattern: String?
+    public var urlFilterIsCaseSensitive: Bool
     public var allowedOriginRules: [String]
     public var ifDomainList: [String]
     public var unlessDomainList: [String]
@@ -273,12 +278,22 @@ public struct AndroidCosmeticRule: Equatable, Sendable {
         ifDomainList: [String] = [],
         unlessDomainList: [String] = [],
         frameScope: AndroidCosmeticFrameScope = .mainFrameOnly,
-        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart
+        preferredTiming: AndroidCosmeticInjectionTiming = .documentStart,
+        urlFilterIsCaseSensitive: Bool = true
     )
 }
 ```
 
 Think of the Android cosmetic API as "selectors plus guards". `SkipWeb` is responsible for turning those selectors into `display: none !important` when a frame actually matches.
+
+`urlFilterIsCaseSensitive` defaults to `true` for compatibility with existing custom
+providers. Set it explicitly when translating a source rule's case-sensitivity setting.
+It applies to both document-start and lifecycle injection.
+
+For `ifDomainList` and `unlessDomainList`, `example.com` matches only that host,
+`*.example.com` matches only its subdomains, and `*example.com` matches both the host
+and its subdomains. Matching respects domain-label boundaries: `*example.com` does
+not match `badexample.com`.
 
 Practical example:
 
@@ -301,6 +316,44 @@ The shared runtime evaluates `allowedOriginRules`, `urlFilterPattern`, `ifDomain
 `unlessDomainList`, and `frameScope` against the current frame before returning CSS. Rule count no
 longer determines the number of document-start registrations. Older runtimes use lifecycle
 injection as a fallback.
+
+### Android inline display enforcement
+
+Android also derives a small JavaScript fallback from the generated cosmetic CSS. If an
+element matches a `display: none !important` rule but has a conflicting inline important
+display value, SkipWeb sets its inline display to `none !important`. Ordinary matching
+elements remain handled by the stylesheet. Providers supply the same selectors and guards:
+
+```swift
+AndroidCosmeticRule(hiddenSelectors: [".ad-slot", "iframe[style^=\"width: 280px\"]"])
+```
+
+One helper per document coordinates document-start and lifecycle styles. It parses grouped
+selectors through the browser's CSSOM, scans inline styles once when blocking starts, and
+batches later mutations on a 16 ms timer. It scans added subtrees once and rechecks only
+inline-important candidates. Ancestor, sibling, and descendant changes can affect matching,
+so those candidates are rechecked even when the changed node is not itself a candidate.
+SkipWeb's own writes do not schedule further observer work.
+
+Matching uses authored style attributes before applying overrides. Rule replacement,
+element detachment, and removal of the last applicable rule restore owned display values,
+preserving later page edits to other properties. Removing the last stylesheet also stops
+the observer and cancels pending work. A document-start injection waits for the document
+root if necessary; removed or text-edited blocker stylesheets are repaired.
+
+This is a DOM-based fallback, not user-origin CSS priority. Page rewrites can be visible
+until the next batch runs. It handles generated top-level element-hiding rules; pseudo-elements,
+shadow trees, arbitrary declarations, and selector state changes without DOM mutations
+(such as hover or focus alone) retain ordinary CSS behavior. It runs only in frames that
+receive cosmetic CSS through the existing injection paths. Mutation records cannot distinguish
+a page deliberately writing the same `display: none !important` value from an unrelated style
+edit that retains SkipWeb's value; cleanup treats an unchanged display as still owned.
+
+The DOM regression tests use the production script in macOS WKWebView with no extra test
+dependencies. Run `swift test --filter AndroidCosmeticStyleTests`. They cover inline priority,
+late insertion, page rewrites, style-dependent selectors, replacement/cleanup, and operation
+counts for approximately 14,400 selectors and 1,000 elements. Android's existing
+`WebContentBlockerTests` cover rule generation and injection guards.
 
 Think of Android cosmetics as two buckets:
 - `persistentCosmeticRules`: a long-lived baseline captured by the runtime revision

@@ -559,6 +559,54 @@ final class WebContentBlockerTests: XCTestCase {
     }
 
     #if SKIP
+    /// Exercises the real navigation callback before a popup has loaded its first page.
+    func testAndroidNavigationWithoutCurrentPagePreservesNilContext() throws {
+        try assertAndroidNavigationPageContext(currentPageURL: nil, expectedURL: nil)
+    }
+
+    /// Empty Android URLs must not reach the native Swift URL bridge.
+    func testAndroidNavigationWithEmptyCurrentPagePreservesNilContext() throws {
+        try assertAndroidNavigationPageContext(currentPageURL: "", expectedURL: nil)
+    }
+
+    /// A loaded page still supplies its URL to content blocking.
+    func testAndroidNavigationWithCurrentPagePreservesContext() throws {
+        let page = "https://publisher.example/article"
+        try assertAndroidNavigationPageContext(currentPageURL: page, expectedURL: URL(string: page))
+    }
+
+    /// Sends an HTTP navigation through the installed WebView client and records the provider input.
+    private func assertAndroidNavigationPageContext(currentPageURL: String?, expectedURL: URL?) throws {
+        let context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
+        // SKIP INSERT: val webView = object : android.webkit.WebView(context) {
+        // SKIP INSERT:     override fun getUrl(): String? = currentPageURL
+        // SKIP INSERT: }
+        // SKIP INSERT: val request = object : android.webkit.WebResourceRequest {
+        // SKIP INSERT:     override fun getUrl() = android.net.Uri.parse("https://destination.example/page")
+        // SKIP INSERT:     override fun isForMainFrame() = true
+        // SKIP INSERT:     override fun isRedirect() = false
+        // SKIP INSERT:     override fun hasGesture() = true
+        // SKIP INSERT:     override fun getMethod() = "GET"
+        // SKIP INSERT:     override fun getRequestHeaders() = mutableMapOf<String, String>()
+        // SKIP INSERT: }
+        let provider = RecordingContentBlockingProvider(decision: .block)
+        let engine = WebEngine(
+            configuration: WebEngineConfiguration(
+                contentBlockers: WebContentBlockerConfiguration(androidMode: .custom(provider))
+            ),
+            webView: webView
+        )
+        defer { webView.destroy() }
+        let client = try XCTUnwrap(engine.webView.webViewClient as? AndroidEngineWebViewClient)
+
+        XCTAssertTrue(client.shouldOverrideUrlLoading(view: webView, request: request))
+        XCTAssertEqual(provider.requests.count, 1)
+        let recorded = try XCTUnwrap(provider.requests.first)
+        XCTAssertEqual(recorded.mainDocumentURL, expectedURL)
+        XCTAssertEqual(recorded.url.absoluteString, "https://destination.example/page")
+        XCTAssertTrue(recorded.isForMainFrame)
+    }
+
     // Verifies redirect navigation checks preserve the initiating page and Android request facts.
     func testAndroidMainFrameNavigationDecisionUsesCurrentPageContext() throws {
         let currentPageURL = try XCTUnwrap(URL(string: "https://primewire.mov/movie/example"))
@@ -1058,7 +1106,57 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(plan.lifecycleCSS, [".main { display: none !important; }"])
     }
 
-    // Verifies main-frame-only scripts bail out when executed inside a subframe.
+    func testAndroidCosmeticCaseSensitivityControlsBothInjectionTimings() throws {
+        let pageURL = try XCTUnwrap(URL(string: "https://example.com/ads"))
+        for timing in [AndroidCosmeticInjectionTiming.documentStart, AndroidCosmeticInjectionTiming.pageLifecycle] {
+            let insensitive = AndroidCosmeticRule(hiddenSelectors: [".insensitive"],
+                urlFilterPattern: "/Ads", preferredTiming: timing, urlFilterIsCaseSensitive: false)
+            let sensitive = AndroidCosmeticRule(hiddenSelectors: [".sensitive"],
+                urlFilterPattern: "/Ads", preferredTiming: timing)
+            XCTAssertFalse(WebEngine.androidCosmeticCSS(rules: [insensitive], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: timing).isEmpty)
+            XCTAssertTrue(WebEngine.androidCosmeticCSS(rules: [sensitive], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: timing).isEmpty)
+        }
+    }
+
+    func testAndroidCosmeticPlanKeepsCaseGuardsSeparateAndFiltersLifecycleFallback() throws {
+        let pageURL = try XCTUnwrap(URL(string: "https://example.com/ads"))
+        let rules = [
+            AndroidCosmeticRule(hiddenSelectors: [".insensitive"], urlFilterPattern: "/Ads",
+                urlFilterIsCaseSensitive: false),
+            AndroidCosmeticRule(hiddenSelectors: [".sensitive"], urlFilterPattern: "/Ads")
+        ]
+        let plan = WebEngine.androidCosmeticInjectionPlan(rules: rules, pageURL: pageURL,
+            isDocumentStartSupported: true)
+        XCTAssertEqual(plan.documentStartRules.count, 2)
+        XCTAssertFalse(plan.documentStartRules[0].urlFilterIsCaseSensitive)
+        XCTAssertTrue(plan.documentStartRules[1].urlFilterIsCaseSensitive)
+        for timing in [AndroidCosmeticInjectionTiming.documentStart, AndroidCosmeticInjectionTiming.pageLifecycle] {
+            var fallbackRules = rules
+            for index in fallbackRules.indices {
+                fallbackRules[index].frameScope = .mainFrameOnly
+                fallbackRules[index].preferredTiming = timing
+            }
+            let fallback = WebEngine.androidCosmeticInjectionPlan(rules: fallbackRules, pageURL: pageURL,
+                isDocumentStartSupported: false)
+            XCTAssertEqual(fallback.lifecycleCSS, [".insensitive { display: none !important; }"])
+        }
+    }
+
+    func testAndroidCosmeticDomainPatternsRespectLabelBoundariesAndExclusions() throws {
+        for host in ["example.com", "www.example.com", "a.b.example.com", "badexample.com", "example.com.evil.test"] {
+            let pageURL = try XCTUnwrap(URL(string: "https://" + host + "/"))
+            let expected = host == "example.com" || host.hasSuffix(".example.com")
+            let included = AndroidCosmeticRule(hiddenSelectors: [".ad"], ifDomainList: ["*example.com"])
+            let excluded = AndroidCosmeticRule(hiddenSelectors: [".ad"], unlessDomainList: ["*example.com"])
+            XCTAssertEqual(!WebEngine.androidCosmeticCSS(rules: [included], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: AndroidCosmeticInjectionTiming.documentStart).isEmpty, expected)
+            XCTAssertEqual(!WebEngine.androidCosmeticCSS(rules: [excluded], pageURL: pageURL,
+                isMainFrame: true, preferredTiming: AndroidCosmeticInjectionTiming.documentStart).isEmpty, !expected)
+        }
+    }
+
     func testAndroidContentBlockerStyleInjectionScriptAddsMainFrameGuard() throws {
         let script = try XCTUnwrap(
             WebEngine.androidContentBlockerStyleInjectionScript(
@@ -1145,7 +1243,7 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".first\"]"))
         XCTAssertTrue(script.contains("\"hiddenSelectors\":[\".second\"]"))
         XCTAssertTrue(script.contains("var compactedCSS = compactHiddenSelectors(collectedSelectors)"))
-        XCTAssertTrue(script.contains("style.textContent = compactedCSS.join"))
+        XCTAssertTrue(script.contains("window.__skipWebCosmeticStyles.replace(styleId, compactedCSS.join"))
         XCTAssertTrue(script.contains("groupedDisplayNoneCSS"))
         XCTAssertTrue(script.contains("compactHiddenSelectors"))
         XCTAssertTrue(script.contains("batched-style"))
