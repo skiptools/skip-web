@@ -1746,6 +1746,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Whether this engine has received an initial content request, including a load still in preflight.
     /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
     public private(set) var hasRequestedContent = false
+    /// Whether a URL load is queued, preparing content blockers, or awaiting navigation completion.
+    /// Unlike `hasRequestedContent`, this becomes false after completion, failure, or cancellation.
+    public var hasPendingURLLoad: Bool { pendingURLLoadID != nil }
+    private var pendingURLLoadID: UUID?
     private var persistentOwnershipEnded = false
     private var nativeViewRetired = false
     private static var profileEngines: [WeakContentBlockerEngine] = []
@@ -1806,12 +1810,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
     func scheduleLoad(url: URL) {
         guard !persistentOwnershipEnded else { return }
-        markContentRequested()
         if scheduledLoad != nil { stopLoading() }
+        let requestID = reserveURLLoad()
         scheduledLoad = Task { @MainActor [weak self] in
             guard let self, !Task.isCancelled else { return }
             do {
-                try await self.load(url: url)
+                try await self.load(url: url, requestID: requestID)
             } catch {
                 if !Task.isCancelled {
                     logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
@@ -1854,6 +1858,14 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Reserves initial navigation synchronously before a caller schedules asynchronous loading.
     func markContentRequested() {
         hasRequestedContent = true
+    }
+
+    /// Reserves queued navigation synchronously and identifies its eventual completion.
+    private func reserveURLLoad() -> UUID {
+        markContentRequested()
+        let requestID = UUID()
+        pendingURLLoadID = requestID
+        return requestID
     }
 
     /// Create a WebEngine with the specified configuration.
@@ -1945,6 +1957,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
         cancelHTTPAuthenticationRequests()
+        pendingURLLoadID = nil
         scheduledLoad?.cancel()
         scheduledLoad = nil
         linkMenuGeneration += 1
@@ -3031,11 +3044,18 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        try await load(url: url, requestID: reserveURLLoad())
+    }
+
+    /// Completes only its own reservation; an older load must not clear a replacement's state.
+    private func load(url: URL, requestID: UUID) async throws {
+        defer {
+            if pendingURLLoadID == requestID { pendingURLLoadID = nil }
+        }
         beginHTTPAuthenticationNavigation()
-        markContentRequested()
         linkMenuGeneration += 1
         try Task.checkCancellation()
-        if persistentOwnershipEnded { throw CancellationError() }
+        if persistentOwnershipEnded || pendingURLLoadID != requestID { throw CancellationError() }
         try throwProfileSetupErrorIfNeeded()
         prepareWebsiteMode(for: url)
         let urlString = url.absoluteString
@@ -3046,7 +3066,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         _ = await awaitContentBlockerSetup()
         #endif
         try Task.checkCancellation()
-        if persistentOwnershipEnded { throw CancellationError() }
+        if persistentOwnershipEnded || pendingURLLoadID != requestID { throw CancellationError() }
         try await awaitPageLoaded {
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
@@ -4847,6 +4867,14 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         if self.callbackInvoked { return }
         callbackInvoked = true
         self.callback(.success(()))
+    }
+
+    /// A terminated content process cannot finish the outstanding URL load.
+    @MainActor func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        (forwardingDelegate as? WKNavigationDelegate)?.webViewWebContentProcessDidTerminate?(webView)
+        guard !callbackInvoked else { return }
+        callbackInvoked = true
+        callback(.failure(NSError(domain: WKErrorDomain, code: WKError.webContentProcessTerminated.rawValue)))
     }
     #endif
 
