@@ -427,6 +427,7 @@ This is source-site based, not popup-target based. Think of it as "allow popups 
 - Exact entries like `example.com` match only that host.
 - Wildcard entries like `*.example.com` match subdomains of `example.com`.
 - Exact entries do not implicitly match subdomains.
+- Android main-frame requests check the destination URL. Subresources check `mainDocumentURL`, so an exemption applies to resources owned by that page. Navigating from an exempt page to a different site checks the new site's own exemption.
 - On Android, matching whitelisted page domains bypass request blocking and suppress cosmetic rules for the current page while leaving the caller's custom provider unchanged for non-whitelisted domains.
 - `popupWhitelistedSourceDomains` uses site-level matching instead of exact-host matching: a bare entry like `example.com` covers both `example.com` and common subdomains such as `www.example.com`, while `*.example.com` remains subdomains-only.
 - On Android, matching popup source domains bypass popup blocking only; normal request and cosmetic blocking still use `whitelistedDomains`.

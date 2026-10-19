@@ -410,7 +410,9 @@ public struct WebContentBlockerConfiguration {
     public var iOSRuleListPaths: [String]
     /// Domain allowlist entries that bypass SkipWeb-managed blocking on matching pages.
     ///
-    /// Entries use WebKit-style host matching such as `example.com` and `*.example.com`.
+    /// Exact entries such as `example.com` match only that host; `*.example.com` matches
+    /// subdomains only. Android main-frame requests check the destination URL, while
+    /// subresources check their owning page's URL.
     public var whitelistedDomains: [String]
     /// Popup source-site allowlist entries that bypass popup blocking only.
     ///
@@ -1748,6 +1750,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     public private(set) var hasRequestedContent = false
     /// Whether a URL load is queued, preparing content blockers, or awaiting navigation completion.
     /// Unlike `hasRequestedContent`, this becomes false after completion, failure, or cancellation.
+    /// Tracks explicit engine and navigator URL loads, not every page-initiated navigation.
     public var hasPendingURLLoad: Bool { pendingURLLoadID != nil }
     private var pendingURLLoadID: UUID?
     private var persistentOwnershipEnded = false
@@ -1755,6 +1758,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     private static var profileEngines: [WeakContentBlockerEngine] = []
 
     /// Whether this runtime supports the isolated named profiles required for scoped removal.
+    /// Returns true on Apple platforms and checks Android multi-profile support at runtime.
+    /// This does not guarantee completion callbacks for individual removal categories.
     @MainActor
     public static func supportsIsolatedDataRemoval() -> Bool {
         #if SKIP
@@ -1765,6 +1770,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     /// Cancels pending loads while preserving session storage for a cache-only removal.
+    /// Applies to all live engines whose configured profile equals `profile`.
+    /// Existing pages and their scripts remain alive; this does not retire their native views.
     @MainActor
     public static func stopRuntimes(for profile: WebProfile) {
         for reference in profileEngines {
@@ -1776,6 +1783,11 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Stops all page execution in one profile before its website data is removed.
     /// Engines cannot navigate again; callers must recreate their logical tabs' native views.
+    /// Unmount affected views before retirement. This does not remove persistent cache entries:
+    /// remove those IDs with `WebView.removePersistentWebViews(ids:)` before recreating views,
+    /// and replace any navigator references to retired engines. Logical tabs may remain open.
+    /// Applies to all live engines whose configured profile equals `profile`.
+    /// On Apple platforms, errors while replacing a page with a blank document are propagated.
     @MainActor
     public static func retireRuntimes(for profile: WebProfile) async throws {
         let engines = profileEngines.compactMap { $0.engine }.filter { $0.configuration.profile == profile }
@@ -2730,8 +2742,20 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
-    /// Removes selected categories from this engine's configured profile. Returns true only when
-    /// every selected platform operation has a completion callback.
+    /// Removes selected categories from this engine's configured profile.
+    ///
+    /// This does not stop other engines. Before clearing site data, retire matching runtimes
+    /// and create a replacement engine for removal. For cache-only clearing, stop their loads
+    /// with `stopRuntimes(for:)` to preserve session storage.
+    ///
+    /// - Parameters:
+    ///   - cookiesAndStorage: Remove cookies, local/session storage, WebSQL, and IndexedDB data.
+    ///   - cache: Remove disk, memory, and offline web application caches.
+    ///   - modifiedSince: The lower date bound on Apple platforms; must be `.distantPast` on Android.
+    /// - Returns: True when the platform reported completion. Android fallback operations return
+    ///   false because cache/storage APIs have no completion callback; false does not mean failure.
+    /// - Throws: Profile setup errors or `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`
+    ///   for a non-all-time Android request. Apple page-initialization errors are also propagated.
     @MainActor
     public func removeBrowsingData(cookiesAndStorage: Bool, cache: Bool, modifiedSince: Date) async throws -> Bool {
         try throwProfileSetupErrorIfNeeded()

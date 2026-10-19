@@ -296,6 +296,10 @@ main-frame navigation. On Apple platforms, the configuration delegate is active 
 is detached, which lets it classify a popup engine that has been created but not mounted yet.
 After an Apple engine is mounted in `WebView`, use the view's state and initializer callbacks.
 
+On iOS, allowed navigations use WebKit's public `.allow` policy, including mounted
+views and detached popup engines. WebKit may open universal links in their associated
+apps. Hosts can handle navigation explicitly through their navigation callbacks.
+
 For example, you can use `shouldOverrideURLLoading` to hand `mailto:` links or app deep links to native code before the `WebView` navigates:
 
 ```swift
@@ -829,6 +833,13 @@ Call `removePersistentWebView(id:)` after unmounting when the owner closes or ev
 This stops outstanding navigation and releases the cache entry. Cache limits and background
 work policy remain the application's responsibility.
 
+`hasRequestedContent` records whether content has ever been requested; it remains true after
+cancellation or failure. Use `hasPendingURLLoad` to check whether an explicit URL load is queued,
+preparing content blockers, or awaiting completion. It becomes false after completion, failure,
+or cancellation, including iOS content-process termination. An older load cannot clear a newer
+load's pending state. This property tracks `WebEngine.load(url:)` and `WebViewNavigator.load(url:)`,
+not every navigation initiated by a page, and is not a general page-loading indicator.
+
 ### Link Context Menu (long-press)
 
 When the user long-presses a link or image-link in a `WebView`, SkipWeb can show a fully customizable native menu populated from an array of `WebContextMenuAction` items. The same closure drives both platforms — on iOS the items become `UIAction`s inside WKWebView's native preview menu, and on Android they become a centered Android `AlertDialog` with the link URL as its title.
@@ -1064,14 +1075,27 @@ Platform behavior:
 - On Android, always check profile support at runtime before using `.named("id")`, `.ephemeral`, or `.ephemeralSession("id")`. You can use `WebEngine.isAndroidMultiProfileSupported()` (or the underlying `WebViewFeature.isFeatureSupported(WebViewFeature.MULTI_PROFILE)` check directly).
 - `cookies(for:)` returns URL-matching cookies; on Android this is best-effort because `CookieManager` reads as a cookie-header string (limited metadata).
 - `setCookie(_:requestURL:)` requires either `cookie.domain` or a `requestURL` host; otherwise it throws `WebCookieError.missingCookieDomain`.
+- Android cookie removal through `clearCookies()` or `removeData` awaits the cookie manager's completion callback before returning.
 - `removeData(ofTypes:modifiedSince:)` maps to iOS `WKWebsiteDataStore.removeData`.
 - On Android, `removeData` requires `modifiedSince == .distantPast` when `ofTypes` is non-empty; otherwise it throws `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`.
 - Android data removal is bucket-level (cookies/cache/storage), not timestamp-granular, and may clear a broader bucket than an individual requested data type.
 
+### Clearing selected categories within a profile
 
-For user-selected cookie/site-data and cache categories, use the profile-bound engine API:
+These APIs are additions to `WebEngine`; existing cookie and `removeData` calls remain available.
+The new operations are main-actor isolated and are not forwarded by `WebViewNavigator`.
+
+| API | Purpose |
+| --- | --- |
+| `WebEngine.supportsIsolatedDataRemoval() -> Bool` | Checks named-profile support. It does not promise completion callbacks for every removal category. |
+| `WebEngine.stopRuntimes(for: WebProfile)` | Cancels loads in matching live engines while preserving their views and session storage. Use for cache-only clearing. |
+| `WebEngine.retireRuntimes(for: WebProfile) async throws` | Stops page execution in matching live engines and makes them unusable for further URL loads. Use before clearing site data. |
+| `engine.removeBrowsingData(cookiesAndStorage: Bool, cache: Bool, modifiedSince: Date) async throws -> Bool` | Removes the selected categories from the engine's configured data store. |
+
+For user-selected cookie/site-data and cache categories:
 
 ```swift
+// Run on the main actor.
 let profile = WebProfile.named("account-a")
 try await WebEngine.retireRuntimes(for: profile)
 let engine = WebEngine(configuration: WebEngineConfiguration(profile: profile))
@@ -1084,6 +1108,12 @@ Retirement stops page execution and clears per-view session storage; recreate na
 browsing resumes. For cache-only removal, use `stopRuntimes(for:)` to preserve the unchecked
 session storage. Logical tabs belong to the caller and need not be closed.
 
+Retirement does not remove entries from the persistent engine cache. Unmount affected views,
+retire their runtimes, then remove their cached IDs with `WebView.removePersistentWebViews(ids:)`
+before preparing or mounting replacements. Release or replace navigator references to retired
+engines too. Cache-only clearing does not require this teardown. `stopRuntimes` cancels navigation;
+it does not stop scripts in an already-loaded page.
+
 `removeBrowsingData` uses the engine's configured store. On iOS it awaits WebKit completion and
 initializes a fresh view with a blank document before removal, so cache clearing reaches the
 profile's WebContent process. On Android it requires all-time scope and awaits the real cookie
@@ -1092,6 +1122,11 @@ that profile's comprehensive operation and awaits completion. Individual Android
 operations have no completion callback, so the method returns `false` to mean requests were sent;
 `true` means all selected operations reported completion. It never clears an unchecked category
 as a fallback. `supportsIsolatedDataRemoval()` checks named-profile availability.
+
+Profile setup errors are propagated. On Android, any `modifiedSince` value other than
+`.distantPast` throws `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`. A `false` completion
+result is not a removal failure; it means the caller cannot confirm completion through the
+platform API. `removeBrowsingData` does not stop or retire other engines automatically.
 
 The instrumented `WebsiteDataRemovalTests` fixture verifies cookies, local/session storage,
 IndexedDB and HTTP cache across two named profiles, including unchecked-category preservation.
@@ -1107,7 +1142,7 @@ For a fuller guide with a quick integration example, whitelist behavior, and up-
 Quick summary:
 
 - `iOSRuleListPaths` points to WebKit content-blocker JSON files that are compiled into `WKContentRuleList` values and attached by SkipWeb.
-- `whitelistedDomains` accepts WebKit-style entries such as `example.com` and `*.example.com`, normalizes them, and disables blocking for matching page domains across both platforms.
+- `whitelistedDomains` accepts exact hosts such as `example.com` and subdomain-only patterns such as `*.example.com`, normalizes them, and disables blocking for matching page domains across both platforms. On Android, main-frame requests use the destination URL; subresources use their owning page. Navigating away from an exempt site does not exempt the next site.
 - `popupWhitelistedSourceDomains` is the popup-only override. A bare entry like `example.com` means "this site", so it covers both `example.com` and common subdomains such as `www.example.com`; `*.example.com` remains subdomains-only.
 - `androidMode: .custom(...)` is the Android content-blocking entry point.
 - `WebEngineConfiguration.iOSClearContentBlockerCache()` explicitly removes the persisted iOS compiled rule-list cache so the next install recompiles from source.
