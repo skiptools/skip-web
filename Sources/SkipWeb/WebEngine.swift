@@ -3057,9 +3057,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     #if SKIP
+    /// Copies request headers, treating an absent Android header map as empty.
     fileprivate static func androidRequestHeaders(from request: android.webkit.WebResourceRequest) -> [String: String] {
+        // Older WebView providers return null headers in shouldOverrideUrlLoading.
+        guard let requestHeaders = request.requestHeaders else { return [:] }
         var headers: [String: String] = [:]
-        for (key, value) in request.requestHeaders {
+        for (key, value) in requestHeaders {
             headers[String(describing: key)] = String(describing: value)
         }
         return headers
