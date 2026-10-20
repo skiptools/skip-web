@@ -1,4 +1,4 @@
-// Copyright 2026 Skip
+// Copyright 2026-2026 Skip
 // SPDX-License-Identifier: MPL-2.0
 #if os(iOS) && !SKIP
 import Network
