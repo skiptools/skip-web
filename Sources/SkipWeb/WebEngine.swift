@@ -1746,9 +1746,13 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     /// Whether this engine has received an initial content request, including a load still in preflight.
-    /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
+    /// Coordinates content loading across preparation, mounting, and remounting by preventing
+    /// initial content from being requested again, even before a native URL is available.
+    /// Remains true after completion, failure, or cancellation.
     public private(set) var hasRequestedContent = false
     /// Whether a URL load is queued, preparing content blockers, or awaiting navigation completion.
+    /// Coordinates content loading across preparation, mounting, and remounting so callers can
+    /// avoid issuing a duplicate URL load while an earlier request is still pending.
     /// Unlike `hasRequestedContent`, this becomes false after completion, failure, or cancellation.
     /// Tracks explicit engine and navigator URL loads, not every page-initiated navigation.
     public var hasPendingURLLoad: Bool { pendingURLLoadID != nil }
@@ -2609,9 +2613,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     private func runAfterIOSContentBlockerSetupIfNeeded(_ operation: @escaping @MainActor () -> Void) {
+        guard !persistentOwnershipEnded else { return }
         if let iosContentBlockerSetupTask {
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 _ = await iosContentBlockerSetupTask.value
+                // Retirement or cache eviction may have happened while rules were preparing.
+                guard let self, !self.persistentOwnershipEnded else { return }
                 operation()
             }
         } else {
@@ -2726,6 +2733,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Removes cookies from this engine's configured profile, awaiting the platform's completion callback.
+    /// On Android, flushes the cookie store before returning. Does nothing if profile setup failed.
     public func clearCookies() async {
         if profileSetupError != nil {
             return
@@ -2749,7 +2758,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// with `stopRuntimes(for:)` to preserve session storage.
     ///
     /// - Parameters:
-    ///   - cookiesAndStorage: Remove cookies, local/session storage, WebSQL, and IndexedDB data.
+    ///   - cookiesAndStorage: Remove cookies, local/session storage, WebSQL, and IndexedDB data,
+    ///     plus Cache API entries and service-worker registrations on Apple platforms.
     ///   - cache: Remove disk, memory, and offline web application caches.
     ///   - modifiedSince: The lower date bound on Apple platforms; must be `.distantPast` on Android.
     /// - Returns: True when the platform reported completion. Android fallback operations return
@@ -2780,14 +2790,32 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         var types: Set<WebSiteDataType> = []
         if cookiesAndStorage { types.formUnion([WebSiteDataType.cookies, WebSiteDataType.localStorage, WebSiteDataType.sessionStorage, WebSiteDataType.webSQLDatabases, WebSiteDataType.indexedDBDatabases]) }
         if cache { types.formUnion([WebSiteDataType.diskCache, WebSiteDataType.memoryCache, WebSiteDataType.offlineWebApplicationCache]) }
-        try await removeData(ofTypes: types, modifiedSince: modifiedSince)
         #if SKIP
+        try await removeData(ofTypes: types, modifiedSince: modifiedSince)
         return false
         #else
+        // WebKit also unregisters service workers when deleting fetch caches. Treat both as
+        // site storage so cache-only removal preserves the unchecked site's registrations.
+        var webKitTypes = Self.webKitDataTypes(for: types)
+        if cookiesAndStorage {
+            webKitTypes.formUnion([WKWebsiteDataTypeFetchCache, WKWebsiteDataTypeServiceWorkerRegistrations])
+        }
+        if !webKitTypes.isEmpty {
+            await removeData(
+                from: webView.configuration.websiteDataStore,
+                ofTypes: webKitTypes,
+                modifiedSince: modifiedSince
+            )
+        }
         return true
         #endif
     }
 
+    /// Removes the requested website data types from this engine's configured profile.
+    /// Apple platforms await removal completion. Android awaits cookie removal, but cache and
+    /// storage APIs only submit requests and may clear a broader bucket than the requested types.
+    /// - Throws: Profile setup errors, or `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`
+    ///   when Android receives nonempty types with a date other than `.distantPast`.
     @MainActor
     public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
         try throwProfileSetupErrorIfNeeded()

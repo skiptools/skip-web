@@ -833,6 +833,11 @@ Call `removePersistentWebView(id:)` after unmounting when the owner closes or ev
 This stops outstanding navigation and releases the cache entry. Cache limits and background
 work policy remain the application's responsibility.
 
+`hasRequestedContent` and `hasPendingURLLoad` help coordinate content loading across preparation,
+mounting, and remounting. They let callers avoid duplicate initial loads while preserving an
+existing request, even before the native view exposes a URL. They do not create a sequential
+load queue.
+
 `hasRequestedContent` records whether content has ever been requested; it remains true after
 cancellation or failure. Use `hasPendingURLLoad` to check whether an explicit URL load is queued,
 preparing content blockers, or awaiting completion. It becomes false after completion, failure,
@@ -1107,6 +1112,8 @@ let completed = try await engine.removeBrowsingData(
 Retirement stops page execution and clears per-view session storage; recreate native views when
 browsing resumes. For cache-only removal, use `stopRuntimes(for:)` to preserve the unchecked
 session storage. Logical tabs belong to the caller and need not be closed.
+On iOS, retirement also rejects HTML loads, reloads, and back/forward requests that are waiting
+for content-blocker preparation.
 
 Retirement does not remove entries from the persistent engine cache. Unmount affected views,
 retire their runtimes, then remove their cached IDs with `WebView.removePersistentWebViews(ids:)`
@@ -1116,8 +1123,11 @@ it does not stop scripts in an already-loaded page.
 
 `removeBrowsingData` uses the engine's configured store. On iOS it awaits WebKit completion and
 initializes a fresh view with a blank document before removal, so cache clearing reaches the
-profile's WebContent process. On Android it requires all-time scope and awaits the real cookie
-callback. When both categories are selected and `DELETE_BROWSING_DATA` is supported, it uses
+profile's WebContent process. On iOS, cookie/site data includes Cache API entries and service-worker
+registrations. WebKit removes registrations when deleting fetch caches, so both belong to site
+data and are preserved by cache-only removal. On Android it requires all-time
+scope and awaits the real cookie callback. When both categories are selected and
+`DELETE_BROWSING_DATA` is supported, it uses
 that profile's comprehensive operation and awaits completion. Individual Android cache/storage
 operations have no completion callback, so the method returns `false` to mean requests were sent;
 `true` means all selected operations reported completion. It never clears an unchecked category
@@ -1132,6 +1142,8 @@ The instrumented `WebsiteDataRemovalTests` fixture verifies cookies, local/sessi
 IndexedDB and HTTP cache across two named profiles, including unchecked-category preservation.
 Start `python3 Tests/Fixtures/clear_data_server.py` before running it. Android devices also need
 `adb reverse tcp:18769 tcp:18769`; remove that forwarding after the test.
+The iOS `ModernWebsiteDataRemovalTests` additionally verifies Cache API entries and service-worker
+registrations using an in-process loopback server; it requires no external fixture setup.
 
 ## Content Blockers
 
