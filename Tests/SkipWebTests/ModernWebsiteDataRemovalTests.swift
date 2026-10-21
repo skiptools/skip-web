@@ -39,6 +39,11 @@ final class ModernWebsiteDataRemovalTests: XCTestCase {
         XCTAssertEqual(beforeB.cache, "B")
         XCTAssertEqual(beforeB.workers, 1)
 
+        // Fetch completion can precede WebKit's delayed disk-cache write. Wait for the
+        // seeded entries so this test measures removal of data already stored on disk.
+        try await waitForDiskCacheEntry(in: a)
+        try await waitForDiskCacheEntry(in: b)
+
         if cookiesAndStorage {
             try await WebEngine.retireRuntimes(for: profileA)
             a = await makeEngine(profile: profileA)
@@ -73,6 +78,17 @@ final class ModernWebsiteDataRemovalTests: XCTestCase {
                 ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast
             )
         }
+    }
+
+    private func waitForDiskCacheEntry(in engine: WebEngine) async throws {
+        let store = engine.webView.configuration.websiteDataStore
+        let deadline = Date().addingTimeInterval(10)
+        var records = await store.dataRecords(ofTypes: [WKWebsiteDataTypeDiskCache])
+        while records.isEmpty && Date() < deadline {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            records = await store.dataRecords(ofTypes: [WKWebsiteDataTypeDiskCache])
+        }
+        _ = try XCTUnwrap(records.first, "Timed out waiting for the HTTP cache fixture to reach disk")
     }
 
     private func makeEngine(profile: WebProfile) async -> WebEngine {
