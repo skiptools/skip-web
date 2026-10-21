@@ -1140,10 +1140,11 @@ platform API. `removeBrowsingData` does not stop or retire other engines automat
 
 The instrumented `WebsiteDataRemovalTests` fixture verifies cookies, local/session storage,
 IndexedDB and HTTP cache across two named profiles, including unchecked-category preservation.
-Start `python3 Tests/Fixtures/clear_data_server.py` before running it. Android devices also need
-`adb reverse tcp:18769 tcp:18769`; remove that forwarding after the test.
 The iOS `ModernWebsiteDataRemovalTests` additionally verifies Cache API entries and service-worker
-registrations using an in-process loopback server; it requires no external fixture setup.
+registrations. Both suites start and stop their own on-device loopback HTTP server on an
+automatically assigned port. No external process or Android port forwarding is required.
+Cache assertions include per-URL server request counts to distinguish a cached response from
+a new network request.
 
 ## Content Blockers
 

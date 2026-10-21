@@ -5,7 +5,7 @@ import XCTest
 @testable import SkipWeb
 
 #if SKIP || os(iOS)
-/// Requires Tests/Fixtures/clear_data_server.py; Android uses adb reverse for port 18769.
+/// Exercises website-data removal with an HTTP fixture running inside the test process.
 final class WebsiteDataRemovalTests: XCTestCase {
     @MainActor
     func testNamedProfileRemovalPreservesUncheckedCategoriesAndOtherProfile() async throws {
@@ -15,6 +15,9 @@ final class WebsiteDataRemovalTests: XCTestCase {
         // Native WebViews need the real main looper, not the generated XCTest test dispatcher.
         // SKIP INSERT: Dispatchers.resetMain()
         #endif
+        let server = try WebsiteDataTestServer()
+        let url = try await server.start()
+        defer { server.stop() }
         let suffix = UUID().uuidString
         let profileA = WebProfile.named("clear-a-\(suffix)")
         let profileB = WebProfile.named("clear-b-\(suffix)")
@@ -22,7 +25,6 @@ final class WebsiteDataRemovalTests: XCTestCase {
         let keyB = "b-\(suffix)"
         var a = await makeFixtureEngine(profile: profileA)
         let b = await makeFixtureEngine(profile: profileB)
-        let url = URL(string: "http://127.0.0.1:18769/fixture")!
         try await a.load(url: url)
         try await b.load(url: url)
         _ = try await script("await seed('A', '\(keyA)'); return true", engine: a)
