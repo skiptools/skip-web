@@ -193,38 +193,67 @@ final class WebsiteDataTestServer: @unchecked Sendable {
 
     private static let document = """
     <!doctype html><html><body>Clear Data fixture<script>
+    function fixtureEvent(message) {
+      window.fixtureEvents.push(Math.round(performance.now() - window.fixtureStarted) + 'ms ' + message);
+    }
+    async function fixtureAwait(stage, action) {
+      fixtureEvent('BEGIN ' + stage);
+      try {
+        const result = await action();
+        fixtureEvent('END ' + stage);
+        return result;
+      } catch (error) {
+        fixtureEvent('ERROR ' + stage + ': ' + String(error));
+        throw error;
+      }
+    }
     function database() {
       return new Promise((resolve, reject) => {
         const request = indexedDB.open('clear-data-fixture', 1);
-        request.onupgradeneeded = () => request.result.createObjectStore('values');
+        request.onupgradeneeded = () => {
+          fixtureEvent('database upgrade needed');
+          request.result.createObjectStore('values');
+        };
+        request.onblocked = () => fixtureEvent('database open blocked');
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
     }
     async function seed(value, key) {
+      fixtureEvent('seed cookie/localStorage/sessionStorage');
       document.cookie = 'fixture=' + value + '; path=/';
       localStorage.setItem('fixture', value);
       sessionStorage.setItem('fixture', value);
-      const db = await database();
-      await new Promise((resolve, reject) => {
+      const db = await fixtureAwait('database open', () => database());
+      await fixtureAwait('seed transaction complete', () => new Promise((resolve, reject) => {
         const tx = db.transaction('values', 'readwrite');
         tx.objectStore('values').put(value, 'fixture');
         tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-      });
+        tx.onabort = () => fixtureEvent('seed transaction aborted: ' + String(tx.error));
+      }));
       db.close();
-      await fetch('/cache?key=' + key).then(r => r.text());
+      fixtureEvent('database close');
+      await cachedValue(key);
+    }
+    async function cachedValue(key) {
+      const response = await fixtureAwait('cache fetch headers', () => fetch('/cache?key=' + key));
+      fixtureEvent('cache HTTP status=' + response.status);
+      return await fixtureAwait('cache response text', () => response.text());
     }
     async function read(key) {
-      const db = await database();
-      const indexed = await new Promise((resolve, reject) => {
-        const request = db.transaction('values').objectStore('values').get('fixture');
+      const db = await fixtureAwait('database open', () => database());
+      const indexed = await fixtureAwait('read indexed value', () => new Promise((resolve, reject) => {
+        const tx = db.transaction('values');
+        tx.onabort = () => fixtureEvent('read transaction aborted: ' + String(tx.error));
+        const request = tx.objectStore('values').get('fixture');
         request.onsuccess = () => resolve(request.result || '');
         request.onerror = () => reject(request.error);
-      });
+      }));
       db.close();
+      fixtureEvent('database close; read cookie/localStorage/sessionStorage');
       return { cookie: document.cookie, local: localStorage.getItem('fixture') || '',
         session: sessionStorage.getItem('fixture') || '', indexed: indexed,
-        cache: await fetch('/cache?key=' + key).then(r => r.text()) };
+        cache: await cachedValue(key) };
     }
     </script></body></html>
     """
