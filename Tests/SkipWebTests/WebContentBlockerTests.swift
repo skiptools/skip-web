@@ -89,6 +89,29 @@ final class WebContentBlockerTests: XCTestCase {
 
     #if !SKIP
     @MainActor
+    func testDeferredHTMLLoadStillRunsForLiveEngine() async throws {
+        let path = "/live-engine-test-rules.json"
+        let preparer = ControlledIOSContentBlockerPreparer()
+        let runtime = WebContentBlockerRuntime(
+            configuration: WebContentBlockerConfiguration(iOSRuleListPaths: [path]),
+            iosRuleListPreparer: { sourcePaths, _, _ in
+                await preparer.prepare(sourcePaths: sourcePaths)
+            }
+        )
+        let engine = WebEngine(configuration: WebEngineConfiguration(contentBlockerRuntime: runtime))
+        let load = Task { @MainActor in
+            try await engine.awaitPageLoaded {
+                engine.loadHTML("<html><body>live page</body></html>")
+            }
+        }
+        await preparer.waitUntilInvoked(path)
+        preparer.complete(path, errors: [])
+        try await load.value
+        let body = try await engine.evaluate(js: "document.body.textContent")
+        XCTAssertEqual(body, "\"live page\"")
+    }
+
+    @MainActor
     final class ControlledIOSContentBlockerPreparer {
         private var continuations: [String: CheckedContinuation<PreparedContentBlockerRuleLists, Never>] = [:]
         private var invocationWaiters: [String: CheckedContinuation<Void, Never>] = [:]
@@ -255,6 +278,50 @@ final class WebContentBlockerTests: XCTestCase {
     }
 
     #if !SKIP
+    @MainActor
+    func testDeferredHTMLLoadCannotRestartRetiredEngine() async throws {
+        let path = "/retirement-test-rules.json"
+        let preparer = ControlledIOSContentBlockerPreparer()
+        let runtime = WebContentBlockerRuntime(
+            configuration: WebContentBlockerConfiguration(iOSRuleListPaths: [path]),
+            iosRuleListPreparer: { sourcePaths, _, _ in
+                await preparer.prepare(sourcePaths: sourcePaths)
+            }
+        )
+        let profile = WebProfile.named("retirement-\(UUID().uuidString)")
+        let delegate = RetirementNavigationDelegate()
+        let engine = WebEngine(configuration: WebEngineConfiguration(
+            profile: profile, navigationDelegate: delegate, contentBlockerRuntime: runtime
+        ))
+        engine.loadHTML("<html><body>queued page<script>window.restarted = true</script></body></html>")
+        await preparer.waitUntilInvoked(path)
+        defer { preparer.complete(path, errors: []) }
+        try await WebEngine.retireRuntimes(for: profile)
+
+        let restarted = expectation(description: "Retired engine must not start another navigation")
+        restarted.isInverted = true
+        delegate.onStart = { restarted.fulfill() }
+        preparer.complete(path, errors: [])
+        _ = await engine.awaitContentBlockerSetup()
+        // Also reject new navigation requests made through a retained engine reference.
+        engine.loadHTML("<html><body>new page</body></html>")
+        engine.reload()
+        engine.goBack()
+        engine.goForward()
+        await fulfillment(of: [restarted], timeout: 1)
+        let body = try await engine.evaluate(js: "document.body.textContent")
+        XCTAssertEqual(body, "\"\"")
+    }
+
+    @MainActor
+    private final class RetirementNavigationDelegate: SkipWebNavigationDelegate {
+        var onStart: (() -> Void)?
+
+        func webEngineDidStartProvisionalNavigation(_ engine: WebEngine) {
+            onStart?()
+        }
+    }
+
     // Verifies a superseded preparation cannot replace or return an older rule snapshot.
     @MainActor
     func testContentBlockerRuntimeDiscardsStaleIOSPreparationResult() async {
@@ -449,6 +516,19 @@ final class WebContentBlockerTests: XCTestCase {
             )
         )
         XCTAssertEqual(mainFrameFallbackDecision, AndroidRequestBlockDecision.allow)
+    }
+
+    // Navigating away from an exempt page must consult the new destination's own domain.
+    func testAndroidMainFrameWhitelistUsesDestinationRatherThanPreviousPage() throws {
+        let configuration = WebContentBlockerConfiguration(whitelistedDomains: ["exempt.test"],
+            androidMode: .custom(StaticContentBlockingProvider(decision: .block)))
+        let provider = try XCTUnwrap(configuration.effectiveAndroidProvider)
+        XCTAssertEqual(provider.requestDecision(for: AndroidBlockableRequest(
+            url: URL(string: "https://blocked.test/page")!, mainDocumentURL: URL(string: "https://exempt.test")!,
+            method: "GET", isForMainFrame: true, hasGesture: true)), AndroidRequestBlockDecision.block)
+        XCTAssertEqual(provider.requestDecision(for: AndroidBlockableRequest(
+            url: URL(string: "https://exempt.test/page")!, mainDocumentURL: URL(string: "https://blocked.test")!,
+            method: "GET", isForMainFrame: true, hasGesture: true)), AndroidRequestBlockDecision.allow)
     }
 
     // Verifies whitelist wrapping no longer suppresses cosmetics at the provider layer.
@@ -1401,7 +1481,9 @@ final class WebContentBlockerTests: XCTestCase {
 
         XCTAssertEqual(appendedRule["comment"] as? String, "user-injected domain exemptions (whitelisted domains)")
         XCTAssertEqual(trigger["url-filter"] as? String, ".*")
-        XCTAssertEqual(trigger["if-domain"] as? [String], ["*.example.com", "example.com"])
+        XCTAssertNil(trigger["if-domain"])
+        XCTAssertEqual(trigger["if-top-url"] as? [String],
+            [#"^https?://([^/:]+\.)+example\.com[:/]"#, #"^https?://example\.com[:/]"#])
         XCTAssertEqual(action["type"] as? String, "ignore-previous-rules")
     }
 
@@ -1425,10 +1507,7 @@ final class WebContentBlockerTests: XCTestCase {
         XCTAssertEqual(
             trigger["if-top-url"] as? [String],
             [
-                "http://*.example.com/*",
-                "http://example.com/*",
-                "https://*.example.com/*",
-                "https://example.com/*",
+                #"^https?://([^/:]+\.)*example\.com[:/]"#,
             ]
         )
         XCTAssertNil(trigger["if-domain"])

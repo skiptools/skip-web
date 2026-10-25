@@ -39,8 +39,27 @@ final class PreparedPersistentEngineTests: XCTestCase {
         navigator.webEngine = engine
         navigator.load(url: URL(string: "about:blank")!)
         XCTAssertTrue(engine.hasRequestedContent)
+        XCTAssertTrue(engine.hasPendingURLLoad)
         WebView.removePersistentWebView(id: id)
+        XCTAssertFalse(engine.hasPendingURLLoad)
         XCTAssertNil(WebView.cachedPersistentWebEngine(id: id))
+    }
+
+    // SKIP INSERT: @androidx.test.annotation.UiThreadTest
+    @MainActor
+    func testCancelledQueuedLoadLeavesEmptyEngineAvailableForRecovery() {
+        let engine = WebEngine()
+        let navigator = WebViewNavigator()
+        navigator.webEngine = engine
+        navigator.load(url: URL(string: "about:blank")!)
+        XCTAssertTrue(engine.hasPendingURLLoad)
+        engine.stopLoading()
+        XCTAssertTrue(engine.hasRequestedContent)
+        XCTAssertNil(engine.url)
+        XCTAssertFalse(engine.hasPendingURLLoad)
+        navigator.load(url: URL(string: "about:blank")!)
+        XCTAssertTrue(engine.hasPendingURLLoad)
+        engine.stopLoading()
     }
 
     // Keep Android's real UI dispatcher available while WebView delivers callbacks.

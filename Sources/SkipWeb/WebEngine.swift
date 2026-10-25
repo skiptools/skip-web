@@ -410,7 +410,9 @@ public struct WebContentBlockerConfiguration {
     public var iOSRuleListPaths: [String]
     /// Domain allowlist entries that bypass SkipWeb-managed blocking on matching pages.
     ///
-    /// Entries use WebKit-style host matching such as `example.com` and `*.example.com`.
+    /// Exact entries such as `example.com` match only that host; `*.example.com` matches
+    /// subdomains only. Android main-frame requests check the destination URL, while
+    /// subresources check their owning page's URL.
     public var whitelistedDomains: [String]
     /// Popup source-site allowlist entries that bypass popup blocking only.
     ///
@@ -780,13 +782,12 @@ fileprivate struct WhitelistedAndroidContentBlockingProvider: AndroidContentBloc
     }
 
     private func isWhitelisted(request: AndroidBlockableRequest) -> Bool {
-        if WebContentBlockerConfiguration.matchesWhitelistedURL(request.mainDocumentURL, in: whitelistedDomains) {
-            return true
-        }
+        // A top-level navigation starts a different page. Its destination owns the exception,
+        // while subresources inherit the main document's choice.
         if request.isForMainFrame {
             return WebContentBlockerConfiguration.matchesWhitelistedURL(request.url, in: whitelistedDomains)
         }
-        return false
+        return WebContentBlockerConfiguration.matchesWhitelistedURL(request.mainDocumentURL, in: whitelistedDomains)
     }
 }
 
@@ -889,7 +890,7 @@ extension WebContentBlockerConfiguration {
                 "comment": "user-injected domain exemptions (whitelisted domains)",
                 "trigger": [
                     "url-filter": ".*",
-                    "if-domain": whitelistedDomains
+                    "if-top-url": whitelistTopURLs(from: whitelistedDomains, includesBareSubdomains: false)
                 ],
                 "action": [
                     "type": "ignore-previous-rules"
@@ -897,7 +898,7 @@ extension WebContentBlockerConfiguration {
             ])
         }
 
-        let popupTopURLs = popupWhitelistTopURLs(from: popupWhitelistedSourceDomains)
+        let popupTopURLs = whitelistTopURLs(from: popupWhitelistedSourceDomains, includesBareSubdomains: true)
         if !popupTopURLs.isEmpty {
             rules.append([
                 "comment": "user-injected popup exemptions (allowed source domains)",
@@ -921,23 +922,15 @@ extension WebContentBlockerConfiguration {
         return augmentedContent
     }
 
-    static func popupWhitelistTopURLs(from domains: [String]) -> [String] {
-        Array(
-            Set(
-                domains.flatMap { domain in
-                    if domain.hasPrefix("*.") {
-                        return ["http://\(domain)/*", "https://\(domain)/*"]
-                    } else {
-                        return [
-                            "http://\(domain)/*",
-                            "http://*.\(domain)/*",
-                            "https://\(domain)/*",
-                            "https://*.\(domain)/*",
-                        ]
-                    }
-                }
-            )
-        ).sorted()
+    /// WebKit top-URL conditions are regular expressions, not host globs. Keep exact hosts
+    /// and subdomains-only entries consistent with the Android matcher, including label boundaries.
+    static func whitelistTopURLs(from domains: [String], includesBareSubdomains: Bool) -> [String] {
+        Array(Set(domains.map { domain in
+            let subdomainsOnly = domain.hasPrefix("*.")
+            let host = subdomainsOnly ? String(domain.dropFirst(2)) : domain
+            let prefix = subdomainsOnly ? "([^/:]+\\.)+" : (includesBareSubdomains ? "([^/:]+\\.)*" : "")
+            return "^https?://\(prefix)\(NSRegularExpression.escapedPattern(for: host))[:/]"
+        })).sorted()
     }
     #endif
 }
@@ -1753,20 +1746,92 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     #endif
 
     /// Whether this engine has received an initial content request, including a load still in preflight.
-    /// Mounting code uses this to preserve in-flight navigation even before a URL is available.
+    /// Coordinates content loading across preparation, mounting, and remounting by preventing
+    /// initial content from being requested again, even before a native URL is available.
+    /// Remains true after completion, failure, or cancellation.
     public private(set) var hasRequestedContent = false
+    /// Whether a URL load is queued, preparing content blockers, or awaiting navigation completion.
+    /// Coordinates content loading across preparation, mounting, and remounting so callers can
+    /// avoid issuing a duplicate URL load while an earlier request is still pending.
+    /// Unlike `hasRequestedContent`, this becomes false after completion, failure, or cancellation.
+    /// Tracks explicit engine and navigator URL loads, not every page-initiated navigation.
+    public var hasPendingURLLoad: Bool { pendingURLLoadID != nil }
+    private var pendingURLLoadID: UUID?
     private var persistentOwnershipEnded = false
+    private var nativeViewRetired = false
+    private static var profileEngines: [WeakContentBlockerEngine] = []
+
+    /// Whether this runtime supports the isolated named profiles required for scoped removal.
+    /// Returns true on Apple platforms and checks Android multi-profile support at runtime.
+    /// This does not guarantee completion callbacks for individual removal categories.
+    @MainActor
+    public static func supportsIsolatedDataRemoval() -> Bool {
+        #if SKIP
+        return isAndroidMultiProfileSupported()
+        #else
+        return true
+        #endif
+    }
+
+    /// Cancels pending loads while preserving session storage for a cache-only removal.
+    /// Applies to all live engines whose configured profile equals `profile`.
+    /// Existing pages and their scripts remain alive; this does not retire their native views.
+    @MainActor
+    public static func stopRuntimes(for profile: WebProfile) {
+        for reference in profileEngines {
+            if let engine = reference.engine, engine.configuration.profile == profile, !engine.nativeViewRetired {
+                engine.stopLoading()
+            }
+        }
+    }
+
+    /// Stops all page execution in one profile before its website data is removed.
+    /// Engines cannot navigate again; callers must recreate their logical tabs' native views.
+    /// Unmount affected views before retirement. This does not remove persistent cache entries:
+    /// remove those IDs with `WebView.removePersistentWebViews(ids:)` before recreating views,
+    /// and replace any navigator references to retired engines. Logical tabs may remain open.
+    /// Applies to all live engines whose configured profile equals `profile`.
+    /// On Apple platforms, errors while replacing a page with a blank document are propagated.
+    @MainActor
+    public static func retireRuntimes(for profile: WebProfile) async throws {
+        let engines = profileEngines.compactMap { $0.engine }.filter { $0.configuration.profile == profile }
+        for engine in engines {
+            if engine.nativeViewRetired { continue }
+            engine.endPersistentOwnership()
+            #if SKIP
+            engine.destroyNativeView()
+            #else
+            engine.webView.configuration.userContentController.removeAllUserScripts()
+            try await engine.awaitPageLoaded {
+                engine.webView.loadHTMLString("", baseURL: nil)
+            }
+            engine.nativeViewRetired = true
+            #endif
+        }
+    }
+
+    #if SKIP
+    /// Idempotent teardown shared by explicit profile retirement and persistent-cache eviction.
+    func destroyNativeView() {
+        if nativeViewRetired { return }
+        nativeViewRetired = true
+        webView.stopLoading()
+        webView.clearHistory()
+        webView.removeAllViews()
+        webView.destroy()
+    }
+    #endif
     private var scheduledLoad: Task<Void, Never>?
 
     /// Reserves navigation before scheduling, including before a synchronous bridge call returns.
     func scheduleLoad(url: URL) {
         guard !persistentOwnershipEnded else { return }
-        markContentRequested()
         if scheduledLoad != nil { stopLoading() }
+        let requestID = reserveURLLoad()
         scheduledLoad = Task { @MainActor [weak self] in
             guard let self, !Task.isCancelled else { return }
             do {
-                try await self.load(url: url)
+                try await self.load(url: url, requestID: requestID)
             } catch {
                 if !Task.isCancelled {
                     logger.error("load URL failed: \(url.absoluteString), error: \(String(describing: error))")
@@ -1811,6 +1876,14 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         hasRequestedContent = true
     }
 
+    /// Reserves queued navigation synchronously and identifies its eventual completion.
+    private func reserveURLLoad() -> UUID {
+        markContentRequested()
+        let requestID = UUID()
+        pendingURLLoadID = requestID
+        return requestID
+    }
+
     /// Create a WebEngine with the specified configuration.
     /// - Parameters:
     ///   - configuration: the configuration to use
@@ -1849,6 +1922,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
 
         super.init()
+        Self.profileEngines = Self.profileEngines.filter { $0.engine != nil }
+        Self.profileEngines.append(WeakContentBlockerEngine(self))
 
         contentBlockerRuntime?.attach(self)
 
@@ -1898,6 +1973,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Cancels scheduled and in-flight navigation, resolving a waiting load with cancellation.
     public func stopLoading() {
         cancelHTTPAuthenticationRequests()
+        pendingURLLoadID = nil
         scheduledLoad?.cancel()
         scheduledLoad = nil
         linkMenuGeneration += 1
@@ -2537,9 +2613,12 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     private func runAfterIOSContentBlockerSetupIfNeeded(_ operation: @escaping @MainActor () -> Void) {
+        guard !persistentOwnershipEnded else { return }
         if let iosContentBlockerSetupTask {
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 _ = await iosContentBlockerSetupTask.value
+                // Retirement or cache eviction may have happened while rules were preparing.
+                guard let self, !self.persistentOwnershipEnded else { return }
                 operation()
             }
         } else {
@@ -2654,6 +2733,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Removes cookies from this engine's configured profile, awaiting the platform's completion callback.
+    /// On Android, flushes the cookie store before returning. Does nothing if profile setup failed.
     public func clearCookies() async {
         if profileSetupError != nil {
             return
@@ -2670,6 +2751,71 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         #endif
     }
 
+    /// Removes selected categories from this engine's configured profile.
+    ///
+    /// This does not stop other engines. Before clearing site data, retire matching runtimes
+    /// and create a replacement engine for removal. For cache-only clearing, stop their loads
+    /// with `stopRuntimes(for:)` to preserve session storage.
+    ///
+    /// - Parameters:
+    ///   - cookiesAndStorage: Remove cookies, local/session storage, WebSQL, and IndexedDB data,
+    ///     plus Cache API entries and service-worker registrations on Apple platforms.
+    ///   - cache: Remove disk, memory, and offline web application caches.
+    ///   - modifiedSince: The lower date bound on Apple platforms; must be `.distantPast` on Android.
+    /// - Returns: True when the platform reported completion. Android fallback operations return
+    ///   false because cache/storage APIs have no completion callback; false does not mean failure.
+    /// - Throws: Profile setup errors or `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`
+    ///   for a non-all-time Android request. Apple page-initialization errors are also propagated.
+    @MainActor
+    public func removeBrowsingData(cookiesAndStorage: Bool, cache: Bool, modifiedSince: Date) async throws -> Bool {
+        try throwProfileSetupErrorIfNeeded()
+        #if SKIP
+        guard modifiedSince == .distantPast else { throw WebDataRemovalError.unsupportedModifiedSinceOnAndroid }
+        if cookiesAndStorage && cache && WebViewFeature.isFeatureSupported(WebViewFeature.DELETE_BROWSING_DATA) {
+            suspendCoroutine { continuation in
+                WebStorageCompat.deleteBrowsingData(androidWebStorage(), Dispatchers.Default.asExecutor()) {
+                    continuation.resumeWith(kotlin.Result.success(Unit))
+                }
+            }
+            return true
+        }
+        #endif
+        #if !SKIP
+        // A fresh WKWebView has no WebContent process yet. Initialize its profile before
+        // clearing, otherwise a subsequently reused process can retain its memory cache.
+        if webView.url == nil {
+            try await awaitPageLoaded { webView.loadHTMLString("", baseURL: nil) }
+        }
+        #endif
+        var types: Set<WebSiteDataType> = []
+        if cookiesAndStorage { types.formUnion([WebSiteDataType.cookies, WebSiteDataType.localStorage, WebSiteDataType.sessionStorage, WebSiteDataType.webSQLDatabases, WebSiteDataType.indexedDBDatabases]) }
+        if cache { types.formUnion([WebSiteDataType.diskCache, WebSiteDataType.memoryCache, WebSiteDataType.offlineWebApplicationCache]) }
+        #if SKIP
+        try await removeData(ofTypes: types, modifiedSince: modifiedSince)
+        return false
+        #else
+        // WebKit also unregisters service workers when deleting fetch caches. Treat both as
+        // site storage so cache-only removal preserves the unchecked site's registrations.
+        var webKitTypes = Self.webKitDataTypes(for: types)
+        if cookiesAndStorage {
+            webKitTypes.formUnion([WKWebsiteDataTypeFetchCache, WKWebsiteDataTypeServiceWorkerRegistrations])
+        }
+        if !webKitTypes.isEmpty {
+            await removeData(
+                from: webView.configuration.websiteDataStore,
+                ofTypes: webKitTypes,
+                modifiedSince: modifiedSince
+            )
+        }
+        return true
+        #endif
+    }
+
+    /// Removes the requested website data types from this engine's configured profile.
+    /// Apple platforms await removal completion. Android awaits cookie removal, but cache and
+    /// storage APIs only submit requests and may clear a broader bucket than the requested types.
+    /// - Throws: Profile setup errors, or `WebDataRemovalError.unsupportedModifiedSinceOnAndroid`
+    ///   when Android receives nonempty types with a date other than `.distantPast`.
     @MainActor
     public func removeData(ofTypes types: Set<WebSiteDataType>, modifiedSince: Date) async throws {
         try throwProfileSetupErrorIfNeeded()
@@ -2950,11 +3096,18 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
 
     /// Asyncronously load the given URL, returning once the page has been loaded or an error has occurred
     public func load(url: URL) async throws {
+        try await load(url: url, requestID: reserveURLLoad())
+    }
+
+    /// Completes only its own reservation; an older load must not clear a replacement's state.
+    private func load(url: URL, requestID: UUID) async throws {
+        defer {
+            if pendingURLLoadID == requestID { pendingURLLoadID = nil }
+        }
         beginHTTPAuthenticationNavigation()
-        markContentRequested()
         linkMenuGeneration += 1
         try Task.checkCancellation()
-        if persistentOwnershipEnded { throw CancellationError() }
+        if persistentOwnershipEnded || pendingURLLoadID != requestID { throw CancellationError() }
         try throwProfileSetupErrorIfNeeded()
         prepareWebsiteMode(for: url)
         let urlString = url.absoluteString
@@ -2965,7 +3118,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         _ = await awaitContentBlockerSetup()
         #endif
         try Task.checkCancellation()
-        if persistentOwnershipEnded { throw CancellationError() }
+        if persistentOwnershipEnded || pendingURLLoadID != requestID { throw CancellationError() }
         try await awaitPageLoaded {
             #if SKIP
             webView.loadUrl(urlString ?? "about:blank")
@@ -3048,18 +3201,23 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         try? await Task.sleep(nanoseconds: 50_000_000)
     }
 
-    nonisolated private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
-        cookieManager.removeAllCookies(nil)
-        cookieManager.flush()
-        // Mirror setCookie behavior: allow async cookie-store mutation to settle before reads.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+    @MainActor private func removeAllAndroidCookies(_ cookieManager: android.webkit.CookieManager) async {
+        suspendCoroutine { continuation in
+            cookieManager.removeAllCookies { _ in
+                cookieManager.flush()
+                continuation.resumeWith(kotlin.Result.success(Unit))
+            }
+        }
     }
     #endif
 
     #if SKIP
+    /// Copies request headers, treating an absent Android header map as empty.
     fileprivate static func androidRequestHeaders(from request: android.webkit.WebResourceRequest) -> [String: String] {
+        // Older WebView providers return null headers in shouldOverrideUrlLoading.
+        guard let requestHeaders = request.requestHeaders else { return [:] }
         var headers: [String: String] = [:]
-        for (key, value) in request.requestHeaders {
+        for (key, value) in requestHeaders {
             headers[String(describing: key)] = String(describing: value)
         }
         return headers
@@ -4761,6 +4919,14 @@ fileprivate class PageLoadDelegate : WebEngineDelegate {
         if self.callbackInvoked { return }
         callbackInvoked = true
         self.callback(.success(()))
+    }
+
+    /// A terminated content process cannot finish the outstanding URL load.
+    @MainActor func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        (forwardingDelegate as? WKNavigationDelegate)?.webViewWebContentProcessDidTerminate?(webView)
+        guard !callbackInvoked else { return }
+        callbackInvoked = true
+        callback(.failure(NSError(domain: WKErrorDomain, code: WKError.webContentProcessTerminated.rawValue)))
     }
     #endif
 

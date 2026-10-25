@@ -346,11 +346,7 @@ public struct WebView : View {
     #if SKIP
     @MainActor
     private static func teardownPersistentWebEngine(_ engine: WebEngine) {
-        engine.webView.stopLoading()
-        engine.webView.loadUrl("about:blank")
-        engine.webView.clearHistory()
-        engine.webView.removeAllViews()
-        engine.webView.destroy()
+        engine.destroyNativeView()
     }
     #endif
 }
