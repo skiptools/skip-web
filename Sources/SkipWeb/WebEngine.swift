@@ -3802,6 +3802,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         guard !css.isEmpty else {
             return nil
         }
+        #if SKIP
+        // Avoid Skip JSONSerialization's per-character UTF-8 allocations during navigation.
+        let cssLiteral = org.json.JSONObject.quote(css)
+        #else
         guard
             let data = try? JSONSerialization.data(withJSONObject: [css], options: []),
             let encoded = String(data: data, encoding: .utf8)
@@ -3809,6 +3813,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
             return nil
         }
         let cssLiteral = String(encoded.dropFirst().dropLast())
+        #endif
         let styleIDLiteral = styleID.replacingOccurrences(of: "\"", with: "\\\"")
         let urlFilterGuard: String
         if let urlFilterPattern, !urlFilterPattern.isEmpty {
