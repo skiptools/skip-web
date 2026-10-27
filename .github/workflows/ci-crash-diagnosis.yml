@@ -1,8 +1,7 @@
 name: CI crash diagnosis
 
 on:
-  push:
-    branches: [ci-crash-diagnosis]
+  pull_request:
   workflow_dispatch:
     inputs:
       scope:
@@ -24,6 +23,7 @@ defaults:
 
 jobs:
   android:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'ci-crash-diagnosis'
     runs-on: macos-26-intel
     timeout-minutes: 90
     strategy:
