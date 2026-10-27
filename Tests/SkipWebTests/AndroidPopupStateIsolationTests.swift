@@ -11,6 +11,19 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
     @get:org.junit.Rule
     val composeRule = androidx.compose.ui.test.junit4.createComposeRule()
 
+    @get:org.junit.Rule
+    val diagnosticRule = object : org.junit.rules.TestWatcher() {
+        override fun starting(description: org.junit.runner.Description) {
+            android.util.Log.i("SkipWebPopup", "BEGIN ${description.methodName}")
+        }
+        override fun failed(error: Throwable, description: org.junit.runner.Description) {
+            android.util.Log.e("SkipWebPopup", "FAILED ${description.methodName}", error)
+        }
+        override fun finished(description: org.junit.runner.Description) {
+            android.util.Log.i("SkipWebPopup", "END ${description.methodName}")
+        }
+    }
+
     @Test
     fun testBlankPopupNavigationDoesNotOverwriteParentStateOrNotifyParent() {
         composeRule.runOnIdle {
@@ -68,6 +81,7 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
                 }
             }
             composeRule.runOnIdle {
+                popup.trace("mounted callbacks begin")
                 org.junit.Assert.assertTrue(popup.childView.isAttachedToWindow)
                 mountedEvents.clear()
                 popup.childView.documentURL = "https://example.test/allowed-popup"
@@ -80,6 +94,7 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
                 org.junit.Assert.assertEquals(listOf("committed", "finished"), mountedEvents)
                 popup.assertParentUnchanged()
                 org.junit.Assert.assertEquals(emptyList<String>(), popup.parentEvents)
+                popup.trace("mounted callbacks end")
             }
         } finally {
             composeRule.runOnIdle { visible.value = false }
@@ -93,10 +108,12 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
             val popup = PopupFixture()
             try {
                 val client = popup.childView.webViewClient
+                popup.trace("navigation policy callbacks begin")
                 org.junit.Assert.assertTrue(client.shouldOverrideUrlLoading(popup.childView, Request("https://example.test/blocked")))
                 org.junit.Assert.assertFalse(client.shouldOverrideUrlLoading(popup.childView, Request("https://example.test/allowed")))
                 org.junit.Assert.assertEquals(listOf("https://example.test/blocked", "https://example.test/allowed"), popup.policyURLs)
                 popup.assertParentUnchanged()
+                popup.trace("navigation policy callbacks end")
             } finally {
                 popup.close()
             }
@@ -125,14 +142,15 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
     }
 
     private class PopupFixture {
+        private val diagnosticID = System.identityHashCode(this)
         val parentState = WebViewState()
         val parentEvents = mutableListOf<String>()
         val childEvents = mutableListOf<String>()
         val downloads = mutableListOf<WebDownloadRequest>()
         val policyURLs = mutableListOf<String>()
         val parentURL = skip.foundation.URL(string = "https://example.test/article")
-        val parentEngine = WebEngine()
-        val childView = PopupPlatformView(parentEngine.webView.context)
+        val parentEngine = WebEngine().also { trace("parent engine created") }
+        val childView = PopupPlatformView(parentEngine.webView.context).also { trace("child view created") }
         val childDelegate = object: SkipWebNavigationDelegate {
             override fun webEngineDidStartProvisionalNavigation(engine: WebEngine) { childEvents.add("started") }
             override fun webEngineDidCommitNavigation(engine: WebEngine) { childEvents.add("committed") }
@@ -142,6 +160,8 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         val owner: WebView
 
         init {
+            val provider = android.webkit.WebView.getCurrentWebViewPackage()
+            trace("provider=${provider?.packageName} version=${provider?.versionName} api=${android.os.Build.VERSION.SDK_INT}")
             parentState.url = parentURL
             parentState.pageTitle = "Parent article"
             parentState.canGoBack = true
@@ -166,8 +186,10 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
             val transport = parentEngine.webView.WebViewTransport()
             val message = android.os.Message.obtain(android.os.Handler(android.os.Looper.getMainLooper()))
             message.obj = transport
+            trace("onCreateWindow begin")
             org.junit.Assert.assertTrue(chrome.onCreateWindow(parentEngine.webView, false, true, message))
             org.junit.Assert.assertSame(childView, transport.webView)
+            trace("onCreateWindow end")
         }
 
         fun assertParentUnchanged() {
@@ -181,8 +203,15 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         }
 
         fun close() {
+            trace("child destroy begin attached=${childView.isAttachedToWindow}")
             childView.destroy()
+            trace("child destroy end; parent destroy begin attached=${parentEngine.webView.isAttachedToWindow}")
             parentEngine.webView.destroy()
+            trace("parent destroy end")
+        }
+
+        fun trace(stage: String) {
+            android.util.Log.i("SkipWebPopup", "fixture=$diagnosticID uptimeMs=${android.os.SystemClock.uptimeMillis()} thread=${Thread.currentThread().name} $stage")
         }
     }
     */
