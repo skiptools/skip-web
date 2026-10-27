@@ -225,14 +225,17 @@ final class WebsiteDataTestServer: @unchecked Sendable {
       localStorage.setItem('fixture', value);
       sessionStorage.setItem('fixture', value);
       const db = await fixtureAwait('database open', () => database());
-      await fixtureAwait('seed transaction complete', () => new Promise((resolve, reject) => {
-        const tx = db.transaction('values', 'readwrite');
-        tx.objectStore('values').put(value, 'fixture');
-        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-        tx.onabort = () => fixtureEvent('seed transaction aborted: ' + String(tx.error));
-      }));
-      db.close();
-      fixtureEvent('database close');
+      try {
+        await fixtureAwait('seed transaction complete', () => new Promise((resolve, reject) => {
+          const tx = db.transaction('values', 'readwrite');
+          tx.objectStore('values').put(value, 'fixture');
+          tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('seed transaction aborted without an error'));
+        }));
+      } finally {
+        db.close();
+        fixtureEvent('database close');
+      }
       await cachedValue(key);
     }
     async function cachedValue(key) {
@@ -242,14 +245,18 @@ final class WebsiteDataTestServer: @unchecked Sendable {
     }
     async function read(key) {
       const db = await fixtureAwait('database open', () => database());
-      const indexed = await fixtureAwait('read indexed value', () => new Promise((resolve, reject) => {
-        const tx = db.transaction('values');
-        tx.onabort = () => fixtureEvent('read transaction aborted: ' + String(tx.error));
-        const request = tx.objectStore('values').get('fixture');
-        request.onsuccess = () => resolve(request.result || '');
-        request.onerror = () => reject(request.error);
-      }));
-      db.close();
+      let indexed;
+      try {
+        indexed = await fixtureAwait('read indexed value', () => new Promise((resolve, reject) => {
+          const tx = db.transaction('values');
+          tx.onabort = () => reject(tx.error || new Error('read transaction aborted without an error'));
+          const request = tx.objectStore('values').get('fixture');
+          request.onsuccess = () => resolve(request.result || '');
+          request.onerror = () => reject(request.error);
+        }));
+      } finally {
+        db.close();
+      }
       fixtureEvent('database close; read cookie/localStorage/sessionStorage');
       return { cookie: document.cookie, local: localStorage.getItem('fixture') || '',
         session: sessionStorage.getItem('fixture') || '', indexed: indexed,

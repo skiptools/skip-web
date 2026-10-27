@@ -1,0 +1,113 @@
+name: CI crash diagnosis
+
+on:
+  push:
+    branches: [ci-crash-diagnosis]
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Run the full suite or only the popup tests
+        type: choice
+        options: [suite, popup]
+        default: suite
+      repetitions:
+        description: Number of runs per compiler version (1–10)
+        type: string
+        default: '3'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  android:
+    runs-on: macos-26-intel
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        skip: ['1.9.19', '1.9.20']
+    env:
+      SKIP_BRIDGE: '0'
+      ANDROID_SERIAL: emulator-5554
+      DIAGNOSTIC_SCOPE: ${{ inputs.scope || 'suite' }}
+      DIAGNOSTIC_REPETITIONS: ${{ inputs.repetitions || '3' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set diagnostic output directory
+        run: echo "DIAGNOSTIC_DIR=$RUNNER_TEMP/ci-crash-diagnosis" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '9.8.2'
+
+      # SwiftPM downloads the compiler bundled with the selected Skip package.
+      # No separately installed Skip CLI can override this comparison.
+      - name: Pin the diagnostic dependency graph
+        env:
+          DIAGNOSTIC_SKIP_VERSION: ${{ matrix.skip }}
+        run: |
+          mkdir -p "$DIAGNOSTIC_DIR"
+          git rev-parse HEAD > "$DIAGNOSTIC_DIR/commit.txt"
+          cp Package.swift "$DIAGNOSTIC_DIR/Package.original.swift"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path('Package.swift')
+          source = path.read_text()
+          versions = {'skip': os.environ['DIAGNOSTIC_SKIP_VERSION'], 'skip-ui': '1.65.0'}
+          minimums = {'skip': '1.8.9', 'skip-ui': '1.54.0'}
+          for package, version in versions.items():
+              old = f'.package(url: "https://github.com/skiptools/{package}.git", from: "{minimums[package]}")'
+              new = f'.package(url: "https://github.com/skiptools/{package}.git", exact: "{version}")'
+              assert source.count(old) == 1, f'Unexpected manifest entry for {package}'
+              source = source.replace(old, new)
+          # Keep the remaining transpiled dependencies at the failing run's versions.
+          pins = {'skip-lib': '1.4.4', 'skip-foundation': '1.4.8', 'skip-model': '1.8.1', 'skip-unit': '1.7.2'}
+          extra = ''.join(f'        .package(url: "https://github.com/skiptools/{name}.git", exact: "{version}"),\n' for name, version in pins.items())
+          source = source.replace('    dependencies: [\n', '    dependencies: [\n' + extra, 1)
+          path.write_text(source)
+          PY
+          swift --version | tee "$DIAGNOSTIC_DIR/swift-version.txt"
+          java -version 2> "$DIAGNOSTIC_DIR/java-version.txt"
+          gradle --version > "$DIAGNOSTIC_DIR/gradle-version.txt"
+
+      - name: Generate and build the test sources
+        run: swift build --build-tests 2>&1 | tee "$DIAGNOSTIC_DIR/swift-build.log"
+
+      - name: Repeat Android tests with native crash capture
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2, same as the failed run
+        with:
+          api-level: 28
+          target: default
+          arch: x86_64
+          profile: Nexus 4
+          disk-size: 4096M
+          disable-animations: true
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash .github/scripts/ci-crash-diagnosis.sh
+
+      - name: Retain compiler inputs and generated sources
+        if: always()
+        run: |
+          mkdir -p "$DIAGNOSTIC_DIR"
+          cp Package.swift "$DIAGNOSTIC_DIR/Package.diagnostic.swift"
+          if [ -f Package.resolved ]; then cp Package.resolved "$DIAGNOSTIC_DIR/"; fi
+          project=.build/plugins/outputs/skip-web/SkipWebTests/destination/skipstone
+          if [ -d "$project/SkipWeb/src" ]; then
+            cp -R "$project/SkipWeb/src" "$DIAGNOSTIC_DIR/generated-sources"
+            cp "$project/settings.gradle.kts" "$DIAGNOSTIC_DIR/"
+            cp "$project/SkipWeb/build.gradle.kts" "$DIAGNOSTIC_DIR/"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-crash-skip-${{ matrix.skip }}
+          path: ${{ runner.temp }}/ci-crash-diagnosis
+          retention-days: 14
