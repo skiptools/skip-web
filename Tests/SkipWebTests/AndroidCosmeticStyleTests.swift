@@ -1,5 +1,4 @@
 // Copyright 2024–2026 Skip
-// SPDX-License-Identifier: MPL-2.0
 #if os(macOS) && !SKIP
 import WebKit
 import XCTest
