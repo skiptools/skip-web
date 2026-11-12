@@ -21,14 +21,16 @@ final class AndroidFileChooserTests: XCTestCase {
 
     private val ownAuthority = "dev.test.ownapp.fileprovider"
 
-    private fun registerOwnProvider() {
-        val info = android.content.pm.ProviderInfo()
-        info.authority = ownAuthority
-        info.packageName = appContext.packageName
-        info.name = "androidx.core.content.FileProvider"
-        info.applicationInfo = appContext.applicationInfo
-        org.robolectric.Shadows.shadowOf(appContext.packageManager).addOrUpdateProvider(info)
+    private val ownPackage = "dev.test.ownapp"
+
+    private fun lookup(authority: String): String? = when (authority) {
+        ownAuthority -> ownPackage
+        "com.other.provider" -> "com.other.app"
+        else -> null
     }
+
+    private fun isSafe(value: String): Boolean =
+        WebEngine.isSafeFileChooserUri(android.net.Uri.parse(value), ownPackage) { authority -> lookup(authority) }
 
     private fun clipResult(vararg items: android.content.ClipData.Item): android.content.Intent {
         val clip = android.content.ClipData("files", kotlin.arrayOf("application/octet-stream"), items[0])
@@ -73,16 +75,37 @@ final class AndroidFileChooserTests: XCTestCase {
     }
 
     @Test
-    fun testUrisFromTheAppsOwnProvidersAreDropped() {
-        registerOwnProvider()
-        val other = android.net.Uri.parse("content://test/2")
-        val result = parse(clipResult(
-            uriItem("content://" + ownAuthority + "/files/secret.db"),
-            android.content.ClipData.Item(other),
-            uriItem("content://0@" + ownAuthority + "/files/secret.db")
-        ))
-        org.junit.Assert.assertEquals(listOf(other), result!!.toList())
-        org.junit.Assert.assertNull(parse(android.content.Intent().setData(android.net.Uri.parse("content://" + ownAuthority + "/files/secret.db"))))
+    fun testUrisFromTheAppsOwnProvidersAreRejected() {
+        org.junit.Assert.assertFalse(isSafe("content://" + ownAuthority + "/files/secret.db"))
+        org.junit.Assert.assertFalse(isSafe("content://0@" + ownAuthority + "/files/secret.db"))
+    }
+
+    @Test
+    fun testUrisFromOtherAppsAreAccepted() {
+        org.junit.Assert.assertTrue(isSafe("content://com.other.provider/doc/1"))
+        org.junit.Assert.assertTrue(isSafe("content://unknown.authority/doc/1"))
+        org.junit.Assert.assertTrue(isSafe("CONTENT://com.other.provider/doc/1"))
+    }
+
+    @Test
+    fun testNonContentSchemesAndMissingAuthoritiesAreRejected() {
+        org.junit.Assert.assertFalse(isSafe("file:///data/data/x/shared_prefs/a.xml"))
+        org.junit.Assert.assertFalse(isSafe("http://example.com/a.txt"))
+        org.junit.Assert.assertFalse(isSafe("content:///no-authority"))
+        org.junit.Assert.assertFalse(isSafe("relative/path"))
+    }
+
+    @Test
+    fun testUriIsRejectedWhenTheProviderLookupFails() {
+        val uri = android.net.Uri.parse("content://com.other.provider/doc/1")
+        org.junit.Assert.assertFalse(WebEngine.isSafeFileChooserUri(uri, ownPackage) { _ -> throw IllegalStateException("lookup failed") })
+    }
+
+    @Test
+    fun testMixedResultKeepsOnlyTheSafeUri() {
+        val safe = android.net.Uri.parse("content://test/2")
+        val result = parse(clipResult(uriItem("file:///data/data/x/a.xml"), android.content.ClipData.Item(safe), uriItem("http://example.com/a.txt")))
+        org.junit.Assert.assertEquals(listOf(safe), result!!.toList())
     }
 
     @Test

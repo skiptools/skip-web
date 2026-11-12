@@ -1888,7 +1888,7 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         // SKIP INSERT: val clip = data.clipData
         // SKIP INSERT: if (clip != null) { for (i in 0 until clip.itemCount) { candidates.add(clip.getItemAt(i).uri) } }
         // SKIP INSERT: if (candidates.filterNotNull().isEmpty()) { candidates.add(data.data) }
-        // SKIP INSERT: val safe = candidates.filterNotNull().filter { isSafeFileChooserUri(it, context) }
+        // SKIP INSERT: val safe = candidates.filterNotNull().filter { isSafeFileChooserUri(it, context.packageName) { authority -> context.packageManager.resolveContentProvider(authority, 0)?.packageName } }
         // SKIP INSERT: return if (safe.isEmpty()) null else safe.toTypedArray()
         return nil
     }
@@ -1898,11 +1898,14 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     /// Only `content://` URIs are accepted, and only if they do not belong to a provider of this app: a malicious
     /// picker could otherwise return a `file://` URI or one of the app's own FileProvider URIs, and the page could
     /// then read and upload the app's private files. Anything that cannot be checked is rejected.
-    static func isSafeFileChooserUri(_ uri: android.net.Uri, context: android.content.Context) -> Bool {
+    ///
+    /// `providerPackage` maps a provider authority to the package that owns it, or nil if it is unknown. It is a
+    /// parameter so the decision can be tested without registering a real provider.
+    static func isSafeFileChooserUri(_ uri: android.net.Uri, _ ownPackage: String, _ providerPackage: (String) -> String?) -> Bool {
         // SKIP INSERT: if (!"content".equals(uri.scheme, ignoreCase = true)) { return false }
         // SKIP INSERT: val authority = uri.authority?.substringAfterLast('@')
         // SKIP INSERT: if (authority.isNullOrEmpty()) { return false }
-        // SKIP INSERT: try { return context.packageManager.resolveContentProvider(authority, 0)?.packageName != context.packageName } catch (e: Exception) { return false }
+        // SKIP INSERT: try { return providerPackage(authority) != ownPackage } catch (e: Exception) { return false }
         return false
     }
 
