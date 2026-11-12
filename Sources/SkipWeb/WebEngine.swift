@@ -1810,10 +1810,107 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     }
 
     #if SKIP
+    // MARK: Android file chooser (<input type="file">)
+
+    /// Launcher registered by the mounted Compose `WebView`; nil while the engine is not mounted.
+    var androidFileChooserLauncher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>?
+    /// The outstanding `onShowFileChooser` callback. It must be resolved exactly once.
+    var pendingFileChooserCallback: android.webkit.ValueCallback<kotlin.Array<android.net.Uri>>?
+    /// The launcher that started the outstanding request. Only its result can complete the request, and only
+    /// its composition may cancel it when it leaves the screen.
+    var pendingFileChooserOwner: androidx.activity.result.ActivityResultLauncher<android.content.Intent>?
+
+    /// Returns true when the request was taken over (the callback will be resolved), false to decline.
+    func presentAndroidFileChooser(callback: android.webkit.ValueCallback<kotlin.Array<android.net.Uri>>, params: android.webkit.WebChromeClient.FileChooserParams) -> Bool {
+        guard let launcher = androidFileChooserLauncher else { return false }
+        if pendingFileChooserCallback != nil {
+            if pendingFileChooserOwner === launcher {
+                // This launcher's picker is still open, and the results of two pickers cannot be told apart,
+                // so only one is ever outstanding: decline the new request and let the open picker finish.
+                callback.onReceiveValue(nil)
+                return true
+            }
+            // The outstanding request belongs to a launcher that is gone, so its result will never arrive.
+            // It must still be resolved, or WebView stops prompting.
+            cancelPendingFileChooser()
+        }
+        // The WebView builds the picker intent itself: `multiple`, `accept` filters and extension mapping
+        // are whatever the installed Android System WebView implements.
+        var intent: android.content.Intent? = nil
+        do {
+            intent = params.createIntent()
+        } catch {
+            logger.error("file chooser: could not build the picker intent: \(String(describing: error))")
+        }
+        guard let intent else {
+            callback.onReceiveValue(nil)
+            return true
+        }
+        pendingFileChooserCallback = callback
+        pendingFileChooserOwner = launcher
+        do {
+            launcher.launch(intent)
+        } catch {
+            logger.error("file chooser: could not launch the picker: \(String(describing: error))")
+            cancelPendingFileChooser()
+        }
+        return true
+    }
+
+    /// Completes the outstanding request with a picker result. `launcher` is the launcher the result arrived on;
+    /// a result from any other launcher cannot belong to the outstanding request and is ignored.
+    func completeAndroidFileChooser(resultCode: Int, data: android.content.Intent?, launcher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>? = nil) {
+        guard let callback = pendingFileChooserCallback else { return } // recreated/superseded: ignore
+        if let launcher, let owner = pendingFileChooserOwner, owner !== launcher { return }
+        pendingFileChooserCallback = nil
+        pendingFileChooserOwner = nil
+        callback.onReceiveValue(Self.parseFileChooserResult(resultCode: resultCode, data: data, context: webView.context))
+    }
+
+    func cancelPendingFileChooser() {
+        guard let callback = pendingFileChooserCallback else { return }
+        pendingFileChooserCallback = nil
+        pendingFileChooserOwner = nil
+        callback.onReceiveValue(nil)
+    }
+
+    /// Converts the picker result into the URIs WebView expects, dropping any that are not safe to hand to the page.
+    ///
+    /// This is not `FileChooserParams.parseResult`, which only reads `intent.data`: a multiple selection comes
+    /// back in `clipData` with no `data`, so `parseResult` would report no files at all.
+    ///
+    /// The picker is an implicit intent, so any installed app can answer it, and WebView applies no checks to the
+    /// URIs it is given. They are filtered with `isSafeFileChooserUri`.
+    static func parseFileChooserResult(resultCode: Int, data: android.content.Intent?, context: android.content.Context) -> kotlin.Array<android.net.Uri>? {
+        if resultCode != android.app.Activity.RESULT_OK { return nil }
+        guard let data else { return nil }
+        // SKIP INSERT: val candidates = ArrayList<android.net.Uri?>()
+        // SKIP INSERT: val clip = data.clipData
+        // SKIP INSERT: if (clip != null) { for (i in 0 until clip.itemCount) { candidates.add(clip.getItemAt(i).uri) } }
+        // SKIP INSERT: if (candidates.filterNotNull().isEmpty()) { candidates.add(data.data) }
+        // SKIP INSERT: val safe = candidates.filterNotNull().filter { isSafeFileChooserUri(it, context) }
+        // SKIP INSERT: return if (safe.isEmpty()) null else safe.toTypedArray()
+        return nil
+    }
+
+    /// Whether a URI returned by the picker may be passed to the page.
+    ///
+    /// Only `content://` URIs are accepted, and only if they do not belong to a provider of this app: a malicious
+    /// picker could otherwise return a `file://` URI or one of the app's own FileProvider URIs, and the page could
+    /// then read and upload the app's private files. Anything that cannot be checked is rejected.
+    static func isSafeFileChooserUri(_ uri: android.net.Uri, context: android.content.Context) -> Bool {
+        // SKIP INSERT: if (!"content".equals(uri.scheme, ignoreCase = true)) { return false }
+        // SKIP INSERT: val authority = uri.authority?.substringAfterLast('@')
+        // SKIP INSERT: if (authority.isNullOrEmpty()) { return false }
+        // SKIP INSERT: try { return context.packageManager.resolveContentProvider(authority, 0)?.packageName != context.packageName } catch (e: Exception) { return false }
+        return false
+    }
+
     /// Idempotent teardown shared by explicit profile retirement and persistent-cache eviction.
     func destroyNativeView() {
         if nativeViewRetired { return }
         nativeViewRetired = true
+        cancelPendingFileChooser()
         webView.stopLoading()
         webView.clearHistory()
         webView.removeAllViews()
@@ -5374,6 +5471,17 @@ public struct WebContextMenuAction {
     public var androidCreateWindowHandler: ((WebView, WebWindowRequest, AndroidCreateWindowParams) -> WebEngine?)?
     /// Optional Android-only callback for popup child-window closure events.
     public var androidCloseWindowHandler: ((WebView, WebEngine) -> Void)?
+    /// Optional Android-only hook for `<input type="file">` requests (`WebChromeClient.onShowFileChooser`).
+    ///
+    /// By default SkipWeb opens the system document picker. Return `true` to handle the request yourself;
+    /// you then own the callback and must call `onReceiveValue` on it exactly once (with `null` to cancel).
+    /// SkipWeb does not track callbacks you take over, and does not resolve them when the view goes away, so
+    /// resolve the callback yourself if your picker is dismissed; WebView may stop prompting until you do.
+    /// Return `false`, without touching the callback, to fall back to the default picker.
+    ///
+    /// Results from the default picker are checked by SkipWeb before they reach the page; URIs you pass to the
+    /// callback are not, so treat anything your own picker returns as untrusted.
+    public var androidFileChooserHandler: ((WebView, android.webkit.ValueCallback<kotlin.Array<android.net.Uri>>, android.webkit.WebChromeClient.FileChooserParams) -> Bool)?
     #endif
 
     public init(javaScriptEnabled: Bool = true,
@@ -5484,6 +5592,7 @@ public struct WebContextMenuAction {
         copy.androidResolvedProfile = androidResolvedProfile
         copy.androidCreateWindowHandler = androidCreateWindowHandler
         copy.androidCloseWindowHandler = androidCloseWindowHandler
+        copy.androidFileChooserHandler = androidFileChooserHandler
         #endif
         return copy
     }
