@@ -115,6 +115,29 @@ struct PopupHostView: View {
 }
 ```
 
+## Handling a blocked Android popup
+
+A content rule can cancel a popup’s first HTTP(S) main-frame navigation before the child
+has mounted in a `WebView`. The callback receives the rejected destination URL. Several
+pending children can request the same URL, so capture the child’s identifier when creating it.
+This lets you release the right pending window and cancel its timeout as soon as the block occurs.
+
+Set `onDetachedPopupContentRuleBlockedNavigation` on the child before returning it from
+the Android create-window handler. Here `pendingPopups` represents the caller’s tracker.
+
+```swift
+let child = platformContext.makeChildWebEngine()
+let id = pendingPopups.register(child)
+child.onDetachedPopupContentRuleBlockedNavigation = { [weak pendingPopups] url in
+    pendingPopups?.didBlock(id, destination: url)
+}
+return child
+```
+
+While the child is detached, SkipWeb calls the child handler if supplied. Otherwise it
+forwards the event to the opener’s `onContentRuleBlockedNavigation` callback, if set.
+Once the child mounts, subsequent blocks go to its own `WebView.onContentRuleBlockedNavigation`.
+
 ## Notes
 
 - Keep delegate method signatures exactly aligned with the protocol.
