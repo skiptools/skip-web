@@ -1728,6 +1728,10 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     private lazy var weakScriptMessageHandler = WeakWebEngineScriptMessageHandler(webEngine: self)
     #else
     private var profileSetupError: WebProfileError?
+    /// Called when a content rule blocks a main-frame navigation in this detached popup.
+    /// Set this before returning the child from the create-window handler. If omitted,
+    /// the opener receives the event. After mounting, the child's WebView handles it.
+    public var onDetachedPopupContentRuleBlockedNavigation: ((URL) -> Void)?
     private var androidProfileCookieManager: android.webkit.CookieManager?
     private var androidProfileWebStorage: android.webkit.WebStorage?
     fileprivate lazy var androidContentBlockerController = AndroidContentBlockerController(

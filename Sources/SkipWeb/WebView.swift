@@ -742,7 +742,8 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
             onNavigationCommitted: nil,
             onNavigationFinished: nil,
             onNavigationFailed: nil,
-            onContentRuleBlockedNavigation: self.webView.onContentRuleBlockedNavigation,
+            onContentRuleBlockedNavigation: childEngine.onDetachedPopupContentRuleBlockedNavigation
+                ?? self.webView.onContentRuleBlockedNavigation,
             shouldOverrideUrlLoadingHandler: self.webView.shouldOverrideUrlLoading
         ))
         childEngine.webView.webChromeClient = self

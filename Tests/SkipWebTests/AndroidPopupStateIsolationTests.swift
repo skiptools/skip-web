@@ -102,6 +102,26 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         }
     }
 
+    @Test
+    fun testDetachedContentRuleBlockUsesChildHandlerOrFallsBackToOpener() {
+        composeRule.runOnIdle {
+            val target = "https://example.test/ad"
+            val blocker = WebContentBlockerTests.StaticContentBlockingProvider(decision = AndroidRequestBlockDecision.block)
+            val rules = WebContentBlockerConfiguration(androidMode = AndroidContentBlockingMode.custom(blocker))
+            for (useChildHandler in listOf(true, false)) {
+                val popup = PopupFixture(rules, useChildHandler)
+                try {
+                    val client = popup.childView.webViewClient
+                    org.junit.Assert.assertTrue(client.shouldOverrideUrlLoading(popup.childView, Request(target)))
+                    org.junit.Assert.assertEquals(if (useChildHandler) listOf(target) else emptyList<String>(), popup.childEvents)
+                    org.junit.Assert.assertEquals(if (useChildHandler) emptyList<String>() else listOf(target), popup.parentEvents)
+                } finally {
+                    popup.close()
+                }
+            }
+        }
+    }
+
     private class Request(private val address: String): android.webkit.WebResourceRequest {
         override fun getUrl() = android.net.Uri.parse(address)
         override fun isForMainFrame() = true
@@ -123,14 +143,14 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         }
     }
 
-    private class PopupFixture {
+    private class PopupFixture(rules: WebContentBlockerConfiguration? = null, useChildHandler: Boolean = false) {
         val parentState = WebViewState()
         val parentEvents = mutableListOf<String>()
         val childEvents = mutableListOf<String>()
         val downloads = mutableListOf<WebDownloadRequest>()
         val policyURLs = mutableListOf<String>()
         val parentURL = skip.foundation.URL(string = "https://example.test/article")
-        val parentEngine = WebEngine()
+        val parentEngine = WebEngine(configuration = WebEngineConfiguration(contentBlockers = rules))
         val childView = PopupPlatformView(parentEngine.webView.context)
         val childDelegate = object: SkipWebNavigationDelegate {
             override fun webEngineDidStartProvisionalNavigation(engine: WebEngine) { childEvents.add("started") }
@@ -141,6 +161,9 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         val owner: WebView
 
         init {
+            if (useChildHandler) {
+                childEngine.onDetachedPopupContentRuleBlockedNavigation = { childEvents.add(it.absoluteString) }
+            }
             parentState.url = parentURL
             parentState.pageTitle = "Parent article"
             parentState.canGoBack = true
@@ -156,6 +179,7 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
                 onNavigationFinished = { parentEvents.add("finished") },
                 onNavigationFailed = { parentEvents.add("failed") },
                 onDownloadRequested = { downloads.add(it) },
+                onContentRuleBlockedNavigation = { parentEvents.add(it.absoluteString) },
                 shouldOverrideUrlLoading = { url, _ ->
                     policyURLs.add(url.absoluteString)
                     url.absoluteString.endsWith("/blocked")
