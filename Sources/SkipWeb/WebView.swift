@@ -592,6 +592,7 @@ public struct MessageHandlerRouter {
 }
 
 struct WebViewClient : android.webkit.WebViewClient {
+    let isDetachedPopup: Bool
     let state: WebViewState
     let onNavigationCommitted: (() -> Void)?
     let onNavigationFinished: (() -> Void)?
@@ -600,7 +601,10 @@ struct WebViewClient : android.webkit.WebViewClient {
     let shouldOverrideUrlLoadingHandler: ((_ url: URL, _ isMainFrame: Bool) -> Bool)?
 
     /// Reports a main-frame navigation rejected by SkipWeb's Android content rules.
-    func contentRuleDidBlockNavigation(to url: URL) {
+    func contentRuleDidBlockNavigation(to url: URL, in engine: WebEngine) {
+        if isDetachedPopup, engine.androidNavigationDelegate?.webEngineDidBlockContentRuleNavigation(engine, to: url) == true {
+            return
+        }
         onContentRuleBlockedNavigation?(url)
     }
 
@@ -738,12 +742,12 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
             onDownloadRequested: self.webView.onDownloadRequested
         ))
         childEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
+            isDetachedPopup: true,
             state: childState,
             onNavigationCommitted: nil,
             onNavigationFinished: nil,
             onNavigationFailed: nil,
-            onContentRuleBlockedNavigation: childEngine.onDetachedPopupContentRuleBlockedNavigation
-                ?? self.webView.onContentRuleBlockedNavigation,
+            onContentRuleBlockedNavigation: self.webView.onContentRuleBlockedNavigation,
             shouldOverrideUrlLoadingHandler: self.webView.shouldOverrideUrlLoading
         ))
         childEngine.webView.webChromeClient = self
@@ -896,6 +900,7 @@ extension WebView : ViewRepresentable {
             onDownloadRequested: onDownloadRequested
         ))
         webEngine.setAndroidEmbeddedNavigationClient(WebViewClient(
+            isDetachedPopup: false,
             state: state,
             onNavigationCommitted: onNavigationCommitted,
             onNavigationFinished: onNavigationFinished,

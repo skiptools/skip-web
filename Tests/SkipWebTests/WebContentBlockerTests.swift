@@ -751,6 +751,7 @@ final class WebContentBlockerTests: XCTestCase {
         let blockedURL = try XCTUnwrap(URL(string: "https://pro.roundflow.net/redirect"))
         var reportedURLs: [URL] = []
         let client = WebViewClient(
+            isDetachedPopup: false,
             state: WebViewState(),
             onNavigationCommitted: nil,
             onNavigationFinished: nil,
@@ -759,7 +760,7 @@ final class WebContentBlockerTests: XCTestCase {
             shouldOverrideUrlLoadingHandler: nil
         )
 
-        client.contentRuleDidBlockNavigation(to: blockedURL)
+        client.contentRuleDidBlockNavigation(to: blockedURL, in: WebEngine())
 
         XCTAssertEqual(reportedURLs, [blockedURL])
     }

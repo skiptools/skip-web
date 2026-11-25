@@ -639,6 +639,11 @@ public protocol SkipWebNavigationDelegate {
     ///
     /// Return `true` after handling a URL in native code. Return `false` to let the web view load it.
     func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool
+    /// Called only on Android after a content rule blocks a detached popup's main-frame navigation.
+    /// Return true to consume the notification, or false (the default) to forward it to the opener.
+    /// Once mounted, the child's WebView receives subsequent blocks through onContentRuleBlockedNavigation.
+    func webEngineDidBlockContentRuleNavigation(_ engine: WebEngine, to url: URL) -> Bool
+
     /// Called when the main frame starts provisional navigation.
     ///
     /// At this point ``WebEngine/url`` exposes the concrete URL, including the first URL of a
@@ -654,6 +659,10 @@ public protocol SkipWebNavigationDelegate {
 
 public extension SkipWebNavigationDelegate {
     func webEngine(_ engine: WebEngine, shouldOverrideURLLoading url: URL) -> Bool {
+        false
+    }
+
+    func webEngineDidBlockContentRuleNavigation(_ engine: WebEngine, to url: URL) -> Bool {
         false
     }
 
@@ -1728,10 +1737,6 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
     private lazy var weakScriptMessageHandler = WeakWebEngineScriptMessageHandler(webEngine: self)
     #else
     private var profileSetupError: WebProfileError?
-    /// Called when a content rule blocks a main-frame navigation in this detached popup.
-    /// Set this before returning the child from the create-window handler. If omitted,
-    /// the opener receives the event. After mounting, the child's WebView handles it.
-    public var onDetachedPopupContentRuleBlockedNavigation: ((URL) -> Void)?
     private var androidProfileCookieManager: android.webkit.CookieManager?
     private var androidProfileWebStorage: android.webkit.WebStorage?
     fileprivate lazy var androidContentBlockerController = AndroidContentBlockerController(
@@ -4734,7 +4739,7 @@ final class AndroidEngineWebViewClient : android.webkit.WebViewClient {
                     "Android blocker cancelled main-frame navigation source=\(currentPageURL?.absoluteString ?? "<nil>") target=\(url.absoluteString) redirect=\(String(describing: isRedirect)) gesture=\(request.hasGesture())"
                 )
                 (embeddedNavigationClient as? WebViewClient)?
-                    .contentRuleDidBlockNavigation(to: url)
+                    .contentRuleDidBlockNavigation(to: url, in: engine)
                 return true
             }
             engine.androidContentBlockerController.prepare(for: url, in: view)

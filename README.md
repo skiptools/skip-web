@@ -642,8 +642,9 @@ On Android, once a child is returned from the delegate, SkipWeb also mirrors key
 Until mounted, an Android popup keeps its page and loading state separate from its opener
 and does not call the opener's navigation committed, finished, or failed callbacks.
 Navigation policy checks and download requests still forward to the opener. To handle a
-content-rule block for a specific child before it mounts, set
-`child.onDetachedPopupContentRuleBlockedNavigation` during popup creation. By default,
+content-rule block for a specific child before it mounts, implement
+`webEngineDidBlockContentRuleNavigation(_:to:)` on its navigation delegate. Only Android
+calls this method. Return `true` to consume the notification. By default,
 the opener receives the block. Mounting the child in a `WebView` binds its state and
 callbacks to that view’s owner. See [Handling a blocked Android popup](SkipWebUIDelegate.md#handling-a-blocked-android-popup).
 

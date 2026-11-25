@@ -48,7 +48,10 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
 
     @Test
     fun testMountedPopupUpdatesItsOwnStateAndCallbacks() {
-        val popup = composeRule.runOnIdle { PopupFixture() }
+        val popup = composeRule.runOnIdle {
+            val blocker = WebContentBlockerTests.StaticContentBlockingProvider(decision = AndroidRequestBlockDecision.block)
+            PopupFixture(WebContentBlockerConfiguration(androidMode = AndroidContentBlockingMode.custom(blocker)), true)
+        }
         val childState = WebViewState()
         val mountedEvents = mutableListOf<String>()
         val visible = androidx.compose.runtime.mutableStateOf(true)
@@ -62,7 +65,8 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
                         navigator = navigator,
                         state = skip.ui.Binding.constant(childState),
                         onNavigationCommitted = { mountedEvents.add("committed") },
-                        onNavigationFinished = { mountedEvents.add("finished") }
+                        onNavigationFinished = { mountedEvents.add("finished") },
+                        onContentRuleBlockedNavigation = { mountedEvents.add(it.absoluteString) }
                     ).Compose()
                 }
             }
@@ -77,6 +81,11 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
                 org.junit.Assert.assertEquals(popup.childView.documentURL, childState.url!!.absoluteString)
                 org.junit.Assert.assertEquals("Allowed popup", childState.pageTitle)
                 org.junit.Assert.assertEquals(listOf("committed", "finished"), mountedEvents)
+                val target = "https://example.test/blocked-after-mount"
+                val priorChildEvents = popup.childEvents.toList()
+                org.junit.Assert.assertTrue(client.shouldOverrideUrlLoading(popup.childView, Request(target)))
+                org.junit.Assert.assertEquals(listOf("committed", "finished", target), mountedEvents)
+                org.junit.Assert.assertEquals(priorChildEvents, popup.childEvents)
                 popup.assertParentUnchanged()
                 org.junit.Assert.assertEquals(emptyList<String>(), popup.parentEvents)
             }
@@ -103,18 +112,18 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
     }
 
     @Test
-    fun testDetachedContentRuleBlockUsesChildHandlerOrFallsBackToOpener() {
+    fun testDetachedContentRuleBlockRespectsChildDelegateResponse() {
         composeRule.runOnIdle {
             val target = "https://example.test/ad"
             val blocker = WebContentBlockerTests.StaticContentBlockingProvider(decision = AndroidRequestBlockDecision.block)
             val rules = WebContentBlockerConfiguration(androidMode = AndroidContentBlockingMode.custom(blocker))
-            for (useChildHandler in listOf(true, false)) {
-                val popup = PopupFixture(rules, useChildHandler)
+            for (handlesBlock in listOf(true, false, null)) {
+                val popup = PopupFixture(rules, handlesBlock)
                 try {
                     val client = popup.childView.webViewClient
                     org.junit.Assert.assertTrue(client.shouldOverrideUrlLoading(popup.childView, Request(target)))
-                    org.junit.Assert.assertEquals(if (useChildHandler) listOf(target) else emptyList<String>(), popup.childEvents)
-                    org.junit.Assert.assertEquals(if (useChildHandler) emptyList<String>() else listOf(target), popup.parentEvents)
+                    org.junit.Assert.assertEquals(if (handlesBlock != null) listOf(target) else emptyList<String>(), popup.childEvents)
+                    org.junit.Assert.assertEquals(if (handlesBlock == true) emptyList<String>() else listOf(target), popup.parentEvents)
                 } finally {
                     popup.close()
                 }
@@ -143,7 +152,7 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         }
     }
 
-    private class PopupFixture(rules: WebContentBlockerConfiguration? = null, useChildHandler: Boolean = false) {
+    private class PopupFixture(rules: WebContentBlockerConfiguration? = null, handlesBlock: Boolean? = null) {
         val parentState = WebViewState()
         val parentEvents = mutableListOf<String>()
         val childEvents = mutableListOf<String>()
@@ -152,18 +161,22 @@ final class AndroidPopupStateIsolationTests: XCTestCase {
         val parentURL = skip.foundation.URL(string = "https://example.test/article")
         val parentEngine = WebEngine(configuration = WebEngineConfiguration(contentBlockers = rules))
         val childView = PopupPlatformView(parentEngine.webView.context)
-        val childDelegate = object: SkipWebNavigationDelegate {
+        private open class ChildDelegate(val childEvents: MutableList<String>): SkipWebNavigationDelegate {
             override fun webEngineDidStartProvisionalNavigation(engine: WebEngine) { childEvents.add("started") }
             override fun webEngineDidCommitNavigation(engine: WebEngine) { childEvents.add("committed") }
             override fun webEngineDidFinishNavigation(engine: WebEngine) { childEvents.add("finished") }
+        }
+        private val childDelegate = if (handlesBlock == null) ChildDelegate(childEvents) else object: ChildDelegate(childEvents) {
+            override fun webEngineDidBlockContentRuleNavigation(engine: WebEngine, to: skip.foundation.URL): Boolean {
+                org.junit.Assert.assertSame(childView, engine.webView)
+                childEvents.add(to.absoluteString)
+                return handlesBlock
+            }
         }
         val childEngine = WebEngine(configuration = WebEngineConfiguration(navigationDelegate = childDelegate), webView = childView)
         val owner: WebView
 
         init {
-            if (useChildHandler) {
-                childEngine.onDetachedPopupContentRuleBlockedNavigation = { childEvents.add(it.absoluteString) }
-            }
             parentState.url = parentURL
             parentState.pageTitle = "Parent article"
             parentState.canGoBack = true
