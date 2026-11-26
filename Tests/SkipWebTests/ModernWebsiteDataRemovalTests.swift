@@ -40,8 +40,8 @@ final class ModernWebsiteDataRemovalTests: XCTestCase {
 
         // Fetch completion can precede WebKit's delayed disk-cache write. Wait for the
         // seeded entries so this test measures removal of data already stored on disk.
-        try await waitForDiskCacheEntry(in: a)
-        try await waitForDiskCacheEntry(in: b)
+        try await waitForDiskCacheEntry(in: a, key: "A", server: server)
+        try await waitForDiskCacheEntry(in: b, key: "B", server: server)
 
         if cookiesAndStorage {
             try await WebEngine.retireRuntimes(for: profileA)
@@ -79,15 +79,20 @@ final class ModernWebsiteDataRemovalTests: XCTestCase {
         }
     }
 
-    private func waitForDiskCacheEntry(in engine: WebEngine) async throws {
+    private func waitForDiskCacheEntry(in engine: WebEngine, key: String, server: WebsiteDataTestServer) async throws {
         let store = engine.webView.configuration.websiteDataStore
-        let deadline = Date().addingTimeInterval(10)
+        let clock = ContinuousClock()
+        let start = clock.now
+        let deadline = start.advanced(by: .seconds(60))
+        var polls = 1
         var records = await store.dataRecords(ofTypes: [WKWebsiteDataTypeDiskCache])
-        while records.isEmpty && Date() < deadline {
-            try await Task.sleep(nanoseconds: 25_000_000)
+        while records.isEmpty && clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(250))
+            polls += 1
             records = await store.dataRecords(ofTypes: [WKWebsiteDataTypeDiskCache])
         }
-        _ = try XCTUnwrap(records.first, "Timed out waiting for the HTTP cache fixture to reach disk")
+        _ = try XCTUnwrap(records.first, "HTTP cache fixture for profile \(key) had no disk record after "
+            + "\(start.duration(to: clock.now)) (\(polls) polls). \(server.diagnostics)")
     }
 
     private func makeEngine(profile: WebProfile) async -> WebEngine {
