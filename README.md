@@ -881,6 +881,38 @@ On Android, an image-link resolves to its anchor URL rather than the image sourc
 Delayed menu results and selected actions are ignored if the engine navigates,
 remounts, or its native view detaches before they are handled.
 
+### File Uploads
+
+`<input type="file">` works on both platforms with no configuration. iOS uses WKWebView's built-in picker. On Android, SkipWeb implements `WebChromeClient.onShowFileChooser` and opens the system file picker, so no storage permission is needed.
+
+- `multiple` allows selecting several files.
+- `accept` filters the picker, including extensions (`.pdf`), wildcards (`image/*`), and comma-separated lists.
+- A cancelled picker resolves with no files, so the same input can be tapped again.
+
+The picker is opened with the intent from the WebView's own `FileChooserParams.createIntent()`, so what `multiple` and `accept` do, and which picker action is used (normally `ACTION_GET_CONTENT`, though newer WebViews can request other actions for folder, save or writable modes), is decided by the version of Android System WebView installed on the device. Current versions honor `multiple` and map the extensions and wildcards in `accept` to MIME types; older versions may not.
+
+The `capture` attribute is not handled on Android: such inputs open the regular picker.
+
+On Android, the URIs the picker returns are checked before they reach the page, because any installed app can answer the picker intent. Only `content://` URIs that do not belong to your own app's content providers are accepted; anything else is dropped, and if nothing is left the input receives no files. If the host activity is destroyed and recreated while the picker is open, the selection is discarded and the input can be tapped again. Apps created from the Skip template handle common configuration changes such as rotation themselves, so they are not affected by that.
+
+If the host provides no `ActivityResultRegistryOwner` (for example a `ComposeView` outside a `ComponentActivity`), Android file inputs do nothing: the requests are declined, and the `WebView` still composes.
+
+On Android you can take over a request, for example to show your own picker or restrict the choices, with `WebEngineConfiguration.androidFileChooserHandler`. Return `true` if you handled it, in which case you must call `onReceiveValue` on the callback exactly once (with `null` to cancel). Return `false`, without touching the callback, to fall back to the default picker. SkipWeb does not track callbacks you take over, so resolve the callback yourself if your picker is dismissed or the view goes away; WebView may stop prompting until you do. Requests you handle yourself do not go through the URI check above, so treat any URIs you receive from your own picker as untrusted:
+
+```swift
+let config = WebEngineConfiguration()
+#if SKIP
+config.androidFileChooserHandler = { webView, callback, params in
+    // `params.acceptTypes` holds the raw tokens of the `accept` attribute, such as ".pdf" or "application/pdf".
+    guard params.acceptTypes.contains(".pdf") || params.acceptTypes.contains("application/pdf") else { return false }
+    // `showMyDocumentPicker` stands in for your own picker. `callback` is a ValueCallback<Array<Uri>>:
+    // pass it the selected android.net.Uri values as a kotlin.Array, or null to cancel.
+    showMyDocumentPicker { uris in callback.onReceiveValue(uris) }
+    return true
+}
+#endif
+```
+
 ## WebBrowser: Lightweight In-App Browser
 
 For cases where you want to display a web page without the full power and complexity of an embedded `WebView`, SkipWeb provides the `View.openWebBrowser()` modifier. This opens a URL in the platform's native in-app browser:

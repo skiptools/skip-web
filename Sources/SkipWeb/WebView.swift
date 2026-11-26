@@ -696,6 +696,13 @@ private final class LinkHrefHandler: android.os.Handler {
     }
 }
 
+/// Holder tying the composition-scoped file-chooser launcher to the engine currently mounted.
+final class FileChooserEngineBox {
+    var engine: WebEngine?
+    /// This composition's launcher, so results and teardown can be matched to the requests it started.
+    var launcher: androidx.activity.result.ActivityResultLauncher<android.content.Intent>?
+}
+
 final class SkipWebChromeClient : android.webkit.WebChromeClient {
     let webView: WebView
     let webEngine: WebEngine
@@ -747,6 +754,17 @@ final class SkipWebChromeClient : android.webkit.WebChromeClient {
         ))
         childEngine.webView.webChromeClient = self
         return true
+    }
+
+    override func onShowFileChooser(webView: PlatformWebView, filePathCallback: android.webkit.ValueCallback<kotlin.Array<android.net.Uri>>, fileChooserParams: android.webkit.WebChromeClient.FileChooserParams) -> Bool {
+        if let handler = webEngine.configuration.androidFileChooserHandler {
+            // The handler is consulted first and does not touch an outstanding default picker: when it declines,
+            // `presentAndroidFileChooser` applies its one-picker-at-a-time rule to the request.
+            if handler(self.webView, filePathCallback, fileChooserParams) {
+                return true
+            }
+        }
+        return self.webEngine.presentAndroidFileChooser(callback: filePathCallback, params: fileChooserParams)
     }
 
     override func onCreateWindow(view: PlatformWebView, isDialog: Bool, isUserGesture: Bool, resultMsg: android.os.Message) -> Bool {
@@ -846,11 +864,8 @@ extension WebView : ViewRepresentable {
         webEngine.webView.addJavascriptInterface(MessageHandlerRouter(webEngine: webEngine), "skipWebAndroidMessageHandler")
         webEngine.installAndroidScriptMessageFacadeIfNeeded()
         webEngine.installAndroidDocumentStartUserScriptsIfNeeded()
-        if config.uiDelegate != nil || config.androidCreateWindowHandler != nil {
-            webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
-        } else {
-            webEngine.webView.webChromeClient = android.webkit.WebChromeClient()
-        }
+        // Always install our client: it also provides <input type="file"> support (onShowFileChooser).
+        webEngine.webView.webChromeClient = SkipWebChromeClient(webView: self, webEngine: webEngine)
         #else
         let configuration = webEngine.webView.configuration
         configuration.allowsAirPlayForMediaPlayback = true
@@ -887,6 +902,7 @@ extension WebView : ViewRepresentable {
         #if SKIP
         webEngine.configuration.androidCreateWindowHandler = config.androidCreateWindowHandler
         webEngine.configuration.androidCloseWindowHandler = config.androidCloseWindowHandler
+        webEngine.configuration.androidFileChooserHandler = config.androidFileChooserHandler
         #endif
         configureEngineForLoading(webEngine)
         #if SKIP
@@ -1036,9 +1052,37 @@ extension WebView : ViewRepresentable {
         return makeCoordinator()
     }
 
+    @Composable
+    private func rememberedFileChooserBox() -> FileChooserEngineBox {
+        // SKIP INSERT: return androidx.compose.runtime.remember { FileChooserEngineBox() }
+        return FileChooserEngineBox()
+    }
+
+    /// Registers the Activity Result launcher that backs `<input type="file">`, and cancels the request this
+    /// composition's launcher started, if any is still pending, when the composition leaves.
+    ///
+    /// Returns nil when the host provides no `ActivityResultRegistryOwner` (for example a ComposeView outside a
+    /// `ComponentActivity`): file requests are then declined instead of failing the whole composition.
+    ///
+    /// Limitation: if the host activity is destroyed and recreated while a picker is open (for example by a
+    /// configuration change the activity does not handle itself), the selection is discarded. The new composition's
+    /// launcher registers under a new key (`rememberSaveable` does not restore it here), so the registry's pending
+    /// result is never claimed, and the request is cancelled when the old composition leaves.
+    @Composable
+    private func rememberFileChooserLauncher(_ box: FileChooserEngineBox) -> androidx.activity.result.ActivityResultLauncher<android.content.Intent>? {
+        // SKIP INSERT: if (androidx.activity.compose.LocalActivityResultRegistryOwner.current == null) { return null }
+        // SKIP INSERT: val launcher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()) { result -> box.engine?.completeAndroidFileChooser(resultCode = result.resultCode, data = result.data, launcher = box.launcher) }
+        // SKIP INSERT: androidx.compose.runtime.DisposableEffect(box) { onDispose { if (box.engine?.pendingFileChooserOwner === launcher) { box.engine?.cancelPendingFileChooser() }; if (box.engine?.androidFileChooserLauncher == launcher) { box.engine?.androidFileChooserLauncher = null } } }
+        // SKIP INSERT: return launcher
+        return nil
+    }
+
     public var body: some View {
         ComposeView { ctx in
             let coordinator = rememberedCoordinator()
+            let fileChooserBox = rememberedFileChooserBox()
+            let fileChooserLauncher = rememberFileChooserLauncher(fileChooserBox)
+            fileChooserBox.launcher = fileChooserLauncher
             AndroidView(factory: { ctx in
                 config.context = ctx
                 let resolvedWebEngine: WebEngine
@@ -1052,6 +1096,8 @@ extension WebView : ViewRepresentable {
                 }
                 let webEngine = setupWebView(resolvedWebEngine, coordinator: coordinator)
                 navigator.webEngine = webEngine
+                fileChooserBox.engine = webEngine
+                webEngine.androidFileChooserLauncher = fileChooserLauncher
                 let view = webEngine.webView
                 if let parent = view.parent as? ViewGroup {
                     parent.removeView(view)
