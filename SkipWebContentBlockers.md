@@ -234,6 +234,10 @@ WebView(
 The callback reports the rejected destination URL. It does not run on Apple platforms, where the
 initializer remains source compatible because the closure defaults to `nil`.
 
+For Android popups that have yet to mount, the opener receives this event by default.
+Only Android calls `webEngineDidBlockContentRuleNavigation(_:to:)` on the detached
+child’s navigation delegate. Return `true` to handle the notification for that window. See [Handling a blocked Android popup](SkipWebUIDelegate.md#handling-a-blocked-android-popup).
+
 ### Cosmetic Blocking
 
 ```swift

@@ -115,6 +115,31 @@ struct PopupHostView: View {
 }
 ```
 
+## Handling a blocked Android popup
+
+A content rule can reject a popup’s first HTTP(S) main-frame navigation before the child
+mounts in a `WebView`. **Only Android calls** the child navigation delegate’s
+`webEngineDidBlockContentRuleNavigation(_:to:)` method. It receives the child engine and
+the rejected URL. The method is declared on the shared `SkipWebNavigationDelegate`
+protocol, so a cross-platform delegate can implement it without a platform guard.
+
+Assign the delegate to the child’s `WebEngineConfiguration.navigationDelegate` when
+creating the popup. For example, a delegate tracking pending windows can handle the block as follows.
+
+```swift
+func webEngineDidBlockContentRuleNavigation(_ engine: WebEngine, to url: URL) -> Bool {
+    pendingPopups.finishBlockedWindow(for: engine, destination: url)
+    return true
+}
+```
+
+Here `pendingPopups` is the caller’s tracker. It can release the pending child and cancel
+its timer even when several children requested the same URL. Returning `true` consumes
+the notification. Returning `false` (the default) forwards it to the opener’s
+`onContentRuleBlockedNavigation` callback, if set. Either way, the navigation is already
+blocked. Once the child mounts, its own `WebView.onContentRuleBlockedNavigation` receives
+subsequent blocks.
+
 ## Notes
 
 - Keep delegate method signatures exactly aligned with the protocol.
