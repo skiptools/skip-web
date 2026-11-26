@@ -84,24 +84,46 @@ final class AndroidCosmeticStyleTests: XCTestCase {
         var query = Document.prototype.querySelectorAll;
         Element.prototype.matches = function (selector) { calls++; return matches.call(this, selector); };
         Document.prototype.querySelectorAll = function (selector) { scans++; return query.call(this, selector); };
+        // The page only schedules cosmetic work. Keep the real mutation observer, but
+        // advance one batch at a time so a slow WebKit process cannot race the assertions.
+        const timers = new Map();
+        let nextID = 0;
+        window.setTimeout = callback => { timers.set(++nextID, callback); return nextID; };
+        window.clearTimeout = id => timers.delete(id);
+        async function runBatch() {
+            await Promise.resolve(); // Deliver mutations before inspecting scheduled work.
+            const batch = Array.from(timers);
+            for (const [id, callback] of batch) {
+                if (timers.delete(id)) callback();
+            }
+            return batch.length;
+        }
         window.__skipWebCosmeticStyles.replace('test', css.join('\\n'));
         calls = 0;
         scans = 0;
         for (var i = 0; i < 100; i++) { main.setAttribute('data-change', String(i)); }
-        await settle();
-        var batched = calls > 0 && calls <= 36 && scans === 0;
-        var afterBatch = calls;
-        await settle();
-        var noLoop = calls === afterBatch;
-        var hidden = getComputedStyle(main.children[0]).display === 'none';
+        const batches = await runBatch();
+        const matchesInBatch = calls;
+        const scansInBatch = scans;
+        const followUp = await runBatch();
+        const hidden = getComputedStyle(main.children[0]).display;
         window.__skipWebCosmeticStyles.replace('test', '');
         calls = 0;
         main.children[0].style.setProperty('display', 'grid', 'important');
-        await settle();
-        return batched && noLoop && hidden && calls === 0
-            && getComputedStyle(main.children[0]).display === 'grid';
+        const afterDisable = await runBatch();
+        return { batches, matchesInBatch, scansInBatch, followUp, hidden, afterDisable,
+            matchesAfterDisable: calls, display: getComputedStyle(main.children[0]).display };
         """)
-        XCTAssertEqual(result as? Bool, true)
+        let metrics = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(metrics["batches"] as? Int, 1)
+        let matches = try XCTUnwrap(metrics["matchesInBatch"] as? Int)
+        XCTAssertTrue((1...36).contains(matches), "Expected 1–36 selector matches, got \(matches)")
+        XCTAssertEqual(metrics["scansInBatch"] as? Int, 0)
+        XCTAssertEqual(metrics["followUp"] as? Int, 0)
+        XCTAssertEqual(metrics["hidden"] as? String, "none")
+        XCTAssertEqual(metrics["afterDisable"] as? Int, 0)
+        XCTAssertEqual(metrics["matchesAfterDisable"] as? Int, 0)
+        XCTAssertEqual(metrics["display"] as? String, "grid")
     }
 
     @MainActor
