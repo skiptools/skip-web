@@ -3120,7 +3120,8 @@ private final class WeakWebEngineScriptMessageHandler: NSObject, WKScriptMessage
         if persistentOwnershipEnded || pendingURLLoadID != requestID { throw CancellationError() }
         try await awaitPageLoaded {
             #if SKIP
-            webView.loadUrl(urlString ?? "about:blank")
+            let assetURLString = WebURLUtilities.androidAssetURL(for: url)?.absoluteString
+            webView.loadUrl(assetURLString ?? urlString ?? "about:blank")
             #else
             if url.isFileURL {
                 webView.loadFileURL(url, allowingReadAccessTo: url)
