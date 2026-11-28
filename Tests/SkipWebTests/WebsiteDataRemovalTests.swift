@@ -8,6 +8,15 @@ import XCTest
 final class WebsiteDataRemovalTests: XCTestCase {
     @MainActor
     func testNamedProfileRemovalPreservesUncheckedCategoriesAndOtherProfile() async throws {
+        do {
+            try await checkNamedProfileRemoval()
+        } catch let error as FixtureScriptError {
+            XCTFail(error.description)
+        }
+    }
+
+    @MainActor
+    private func checkNamedProfileRemoval() async throws {
         #if SKIP
         if isRobolectric { throw XCTSkip("Requires instrumented WebView") }
         if !WebEngine.isAndroidMultiProfileSupported() { throw XCTSkip("Named profiles unavailable") }
@@ -114,6 +123,10 @@ final class WebsiteDataRemovalTests: XCTestCase {
         try await script("return await read('\(key)')", operation: operation, engine: engine, server: server)
     }
 
+    private struct FixtureScriptError: Error, CustomStringConvertible {
+        let description: String
+    }
+
     /// Polls result and trace together; retains the last trace if a later evaluation fails.
     @MainActor
     private func script(_ body: String, operation: String, engine: WebEngine, server: WebsiteDataTestServer) async throws -> String {
@@ -150,8 +163,7 @@ final class WebsiteDataRemovalTests: XCTestCase {
                         log(operation, "poll=\(poll) JS \(diagnostics)", started: started, server: server)
                     }
                     if let error = snapshot?["error"] as? String {
-                        XCTFail("Fixture JavaScript failed: \(operation) elapsedMs=\(Int(Date().timeIntervalSince(started) * 1000)) error=\(error) trace=\(diagnostics) \(server.diagnostics)")
-                        return "ERROR:" + error
+                        throw FixtureScriptError(description: "Fixture JavaScript failed: \(operation) elapsedMs=\(Int(Date().timeIntervalSince(started) * 1000)) error=\(error) trace=\(diagnostics) \(server.diagnostics)")
                     }
                     if let result = snapshot?["result"] as? String {
                         log(operation, "END result=\(result)", started: started, server: server)
@@ -164,8 +176,7 @@ final class WebsiteDataRemovalTests: XCTestCase {
             log(operation, "ERROR \(error) lastTrace=\(diagnostics)", started: started, server: server)
             throw error
         }
-        XCTFail("Fixture did not report JavaScript completion: \(operation) polls=200 elapsedMs=\(Int(Date().timeIntervalSince(started) * 1000)) trace=\(diagnostics) \(server.diagnostics)")
-        return "TIMEOUT"
+        throw FixtureScriptError(description: "Fixture did not report JavaScript completion: \(operation) polls=200 elapsedMs=\(Int(Date().timeIntervalSince(started) * 1000)) trace=\(diagnostics) \(server.diagnostics)")
     }
 }
 #endif
