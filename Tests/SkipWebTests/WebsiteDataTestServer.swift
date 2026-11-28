@@ -209,9 +209,18 @@ final class WebsiteDataTestServer: @unchecked Sendable {
     function database() {
       return new Promise((resolve, reject) => {
         const request = indexedDB.open('clear-data-fixture', 1);
-        request.onupgradeneeded = () => {
-          fixtureEvent('database upgrade needed');
-          request.result.createObjectStore('values');
+        request.onupgradeneeded = event => {
+          fixtureEvent('database upgrade ' + event.oldVersion + ' -> ' + event.newVersion);
+          const tx = request.transaction;
+          tx.onabort = () => fixtureEvent('database upgrade aborted: ' + String(tx.error));
+          tx.oncomplete = () => fixtureEvent('database upgrade committed');
+          try {
+            request.result.createObjectStore('values');
+            fixtureEvent('created object store values');
+          } catch (error) {
+            fixtureEvent('createObjectStore(values) failed: ' + String(error));
+            throw error;
+          }
         };
         request.onblocked = () => fixtureEvent('database open blocked');
         request.onsuccess = () => resolve(request.result);
