@@ -227,20 +227,32 @@ final class WebsiteDataTestServer: @unchecked Sendable {
         request.onerror = () => reject(request.error);
       });
     }
+    async function writeIndexedValue(value) {
+      const db = await fixtureAwait('database open', () => database());
+      try {
+        await fixtureAwait('seed transaction complete', () => new Promise((resolve, reject) => {
+          const tx = db.transaction('values', 'readwrite');
+          tx.oncomplete = resolve;
+          tx.onabort = () => reject(tx.error || new DOMException('Seed transaction aborted', 'AbortError'));
+          tx.objectStore('values').put(value, 'fixture');
+        }));
+      } finally {
+        db.close();
+        fixtureEvent('database close');
+      }
+    }
     async function seed(value, key) {
       fixtureEvent('seed cookie/localStorage/sessionStorage');
       document.cookie = 'fixture=' + value + '; path=/';
       localStorage.setItem('fixture', value);
       sessionStorage.setItem('fixture', value);
-      const db = await fixtureAwait('database open', () => database());
-      await fixtureAwait('seed transaction complete', () => new Promise((resolve, reject) => {
-        const tx = db.transaction('values', 'readwrite');
-        tx.objectStore('values').put(value, 'fixture');
-        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
-        tx.onabort = () => fixtureEvent('seed transaction aborted: ' + String(tx.error));
-      }));
-      db.close();
-      fixtureEvent('database close');
+      try {
+        await writeIndexedValue(value);
+      } catch (error) {
+        if (error.name !== 'AbortError') throw error;
+        fixtureEvent('retry aborted IndexedDB seed');
+        await writeIndexedValue(value);
+      }
       await cachedValue(key);
     }
     async function cachedValue(key) {
